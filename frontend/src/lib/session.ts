@@ -1,5 +1,31 @@
 const backendBaseUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 
+export interface RegistrationPayload {
+  full_name: string;
+  email: string;
+  password: string;
+  confirm_password: string;
+  role: string;
+  gender: string;
+  date_of_birth: string;
+  blood_group?: string | null;
+  specialization?: string | null;
+}
+
+export interface PendingRegistration {
+  id: string;
+  full_name: string;
+  email: string;
+  role: string;
+  date_of_birth?: string | null;
+  blood_group?: string | null;
+  specialization?: string | null;
+}
+
+interface ApproveRegistrationResponse {
+  user_id: string;
+}
+
 export function setAuthCookies(accessToken: string, role: string, userId: string) {
   const secure = typeof window !== "undefined" && window.location.protocol === "https:" ? "; Secure" : "";
   document.cookie = `aegis_access_token=${accessToken}; Path=/; SameSite=Lax${secure}`;
@@ -28,7 +54,7 @@ async function fetchWithAuth(url: string, options: RequestInit = {}) {
   return fetch(url, { ...options, headers });
 }
 
-export async function register(data: any) {
+export async function register(data: RegistrationPayload) {
   const response = await fetch(`${backendBaseUrl}/api/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -74,7 +100,7 @@ export async function getProfile() {
 export async function getAdminPending() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/registrations/pending`);
   if (!response.ok) throw new Error("Failed to fetch pending registrations");
-  return response.json();
+  return response.json() as Promise<PendingRegistration[]>;
 }
 
 export async function approveRegistration(id: string) {
@@ -82,7 +108,7 @@ export async function approveRegistration(id: string) {
     method: "POST",
   });
   if (!response.ok) throw new Error("Failed to approve registration");
-  return response.json();
+  return response.json() as Promise<ApproveRegistrationResponse>;
 }
 
 export async function rejectRegistration(id: string) {
