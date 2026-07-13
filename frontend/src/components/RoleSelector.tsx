@@ -2,6 +2,7 @@
 
 import React from "react";
 import { User, Stethoscope, TestTube, Activity } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import type { AppRole } from "@/lib/iam";
 
 interface RoleSelectorProps {
@@ -9,7 +10,7 @@ interface RoleSelectorProps {
   onSelect: (role: AppRole) => void;
 }
 
-const roles: { role: AppRole; icon: React.FC<any>; description: string; color: string }[] = [
+const roles: { role: AppRole; icon: LucideIcon; description: string; color: string }[] = [
   { role: "Patient", icon: User, description: "Access personal health records", color: "text-blue-500" },
   { role: "Doctor", icon: Stethoscope, description: "Manage patients and diagnoses", color: "text-teal-500" },
   { role: "Nurse", icon: Activity, description: "Update vitals and care plans", color: "text-rose-500" },

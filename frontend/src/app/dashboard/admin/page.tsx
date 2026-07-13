@@ -2,14 +2,18 @@
 
 import React, { useEffect, useState } from "react";
 import { getAdminPending, approveRegistration, rejectRegistration } from "@/lib/session";
+import type { PendingRegistration } from "@/lib/session";
 import RoleDashboard from "@/components/RoleDashboard";
 import { Check, X, Loader2 } from "lucide-react";
 
 export default function AdminDashboardPage() {
-  const [pending, setPending] = useState<any[]>([]);
+  const [pending, setPending] = useState<PendingRegistration[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [message, setMessage] = useState<{type: "success" | "error", text: string} | null>(null);
+
+  const getErrorMessage = (err: unknown, fallback: string) =>
+    err instanceof Error ? err.message : fallback;
 
   useEffect(() => {
     fetchPending();
@@ -32,8 +36,8 @@ export default function AdminDashboardPage() {
       const res = await approveRegistration(id);
       setMessage({ type: "success", text: `Approved! User ID: ${res.user_id}` });
       await fetchPending();
-    } catch (err: any) {
-      setMessage({ type: "error", text: err.message || "Failed to approve" });
+    } catch (err: unknown) {
+      setMessage({ type: "error", text: getErrorMessage(err, "Failed to approve") });
     } finally {
       setActionLoading(null);
     }
@@ -45,8 +49,8 @@ export default function AdminDashboardPage() {
       await rejectRegistration(id);
       setMessage({ type: "success", text: "Registration rejected." });
       await fetchPending();
-    } catch (err: any) {
-      setMessage({ type: "error", text: err.message || "Failed to reject" });
+    } catch (err: unknown) {
+      setMessage({ type: "error", text: getErrorMessage(err, "Failed to reject") });
     } finally {
       setActionLoading(null);
     }
