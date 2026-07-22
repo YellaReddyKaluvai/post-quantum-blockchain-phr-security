@@ -31,13 +31,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     // Read from cookies or localStorage only after mount (client-side)
     const cookieRole = normalizeRole(readCookie("aegis_role") || localStorage.getItem("aegis_role"));
-    setRole(cookieRole);
-    setPermissions(cookieRole ? rolePermissions[cookieRole] : []);
     
-    setUserId(readCookie("aegis_user_id") || localStorage.getItem("aegis_user_id"));
-    setAccessToken(readCookie("aegis_access_token") || localStorage.getItem("aegis_access_token"));
-    
-    setIsMounted(true);
+    // Defer to avoid synchronous cascading render warnings
+    queueMicrotask(() => {
+      setRole(cookieRole);
+      setPermissions(cookieRole ? rolePermissions[cookieRole] : []);
+      setUserId(readCookie("aegis_user_id") || localStorage.getItem("aegis_user_id"));
+      setAccessToken(readCookie("aegis_access_token") || localStorage.getItem("aegis_access_token"));
+      setIsMounted(true);
+    });
   }, []);
 
   const value = useMemo<AuthState>(() => ({

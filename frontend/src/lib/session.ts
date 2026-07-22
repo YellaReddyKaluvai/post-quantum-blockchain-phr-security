@@ -28,7 +28,7 @@ async function fetchWithAuth(url: string, options: RequestInit = {}) {
   return fetch(url, { ...options, headers });
 }
 
-export async function register(data: any) {
+export async function register(data: Record<string, unknown>) {
   const response = await fetch(`${backendBaseUrl}/api/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

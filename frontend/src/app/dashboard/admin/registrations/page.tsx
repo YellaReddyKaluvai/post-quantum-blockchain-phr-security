@@ -149,7 +149,7 @@ export default function RegistrationsPage() {
       if (tab === "pending") {
         const data = await getAdminPending();
         setRegistrations(
-          (Array.isArray(data) ? data : []).map((d: any) => ({ ...d, status: d.status || "Pending" }))
+          (Array.isArray(data) ? data : []).map((d: Registration) => ({ ...d, status: d.status || "Pending" }))
         );
       } else {
         const data = await getAllRegistrations();

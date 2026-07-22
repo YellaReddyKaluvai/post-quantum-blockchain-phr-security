@@ -46,7 +46,7 @@ interface ActivityItem {
   action: string;
   admin_user_id?: string;
   target_public_user_id?: string;
-  details?: any;
+  details?: unknown;
   created_at?: string;
 }
 
@@ -289,9 +289,9 @@ export default function AdminDashboardHome() {
                       <p className="text-xs text-slate-500 mt-0.5">
                         Target: {item.target_public_user_id || "N/A"} • Admin: {item.admin_user_id || "SYSTEM"}
                       </p>
-                      {item.details && (
+                      {item.details !== undefined && item.details !== null && (
                         <p className="text-xs text-slate-400 mt-0.5 truncate">
-                          {typeof item.details === "object" ? JSON.stringify(item.details) : item.details}
+                          {typeof item.details === "object" ? JSON.stringify(item.details) : String(item.details)}
                         </p>
                       )}
                     </div>

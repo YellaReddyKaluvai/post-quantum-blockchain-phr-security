@@ -5,8 +5,16 @@ import { motion } from "framer-motion";
 import { Shield, ShieldAlert, Users, KeyRound, Activity, AlertTriangle, Loader2 } from "lucide-react";
 import { getSecurityStats } from "@/lib/session";
 
+interface SecurityStats {
+  failed_login_attempts_24h: number;
+  disabled_accounts: number;
+  active_sessions: number;
+  total_pqc_keypairs: number;
+  active_crypto_identities: number;
+}
+
 export default function SecurityPage() {
-  const [stats, setStats] = useState<any>(null);
+  const [stats, setStats] = useState<SecurityStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -15,7 +23,7 @@ export default function SecurityPage() {
       try {
         const data = await getSecurityStats();
         setStats(data);
-      } catch (err: unknown) {
+      } catch {
         setError("Failed to load security statistics");
       } finally {
         setLoading(false);
@@ -115,7 +123,7 @@ export default function SecurityPage() {
       </motion.div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {cards.map((c, i) => (
+        {cards.map((c) => (
           <motion.div
             key={c.title}
             initial={{ opacity: 0, y: 20 }}

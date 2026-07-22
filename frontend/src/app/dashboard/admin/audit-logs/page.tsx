@@ -5,8 +5,17 @@ import { motion } from "framer-motion";
 import { FileText, Loader2, ChevronLeft, ChevronRight, Filter } from "lucide-react";
 import { getAuditLogs } from "@/lib/session";
 
+interface AuditLog {
+  id: string;
+  created_at?: string;
+  admin_user_id?: string;
+  action: string;
+  target_public_user_id?: string;
+  details?: unknown;
+}
+
 export default function AuditLogsPage() {
-  const [logs, setLogs] = useState<any[]>([]);
+  const [logs, setLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -23,7 +32,7 @@ export default function AuditLogsPage() {
       setLogs(data.logs || []);
       setTotal(data.total || 0);
       setTotalPages(data.total_pages || 1);
-    } catch (err) {
+    } catch {
       setError("Failed to load audit logs");
     } finally {
       setLoading(false);

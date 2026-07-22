@@ -29,8 +29,31 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+interface User {
+  id: string;
+  user_id?: string;
+  full_name: string;
+  email: string;
+  role: string;
+  status: string;
+  gender?: string;
+  created_at?: string;
+  has_mlkem_keys?: boolean;
+  has_mldsa_keys?: boolean;
+}
+
+interface UserEmail {
+  id: string;
+  notification_type: string;
+  sent_status: string;
+  email_subject: string;
+  email_address: string;
+  error_message?: string;
+  created_at?: string;
+}
+
 export default function UsersPage() {
-  const [users, setUsers] = useState<any[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   
@@ -46,12 +69,12 @@ export default function UsersPage() {
   const [totalPages, setTotalPages] = useState(1);
 
   // Modals
-  const [detailUser, setDetailUser] = useState<any | null>(null);
-  const [confirmDisable, setConfirmDisable] = useState<any | null>(null);
+  const [detailUser, setDetailUser] = useState<User | null>(null);
+  const [confirmDisable, setConfirmDisable] = useState<User | null>(null);
   
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
-  const [userEmails, setUserEmails] = useState<any[]>([]);
+  const [userEmails, setUserEmails] = useState<UserEmail[]>([]);
   const [loadingEmails, setLoadingEmails] = useState(false);
   const [resendingEmailId, setResendingEmailId] = useState<string | null>(null);
 
@@ -76,8 +99,9 @@ export default function UsersPage() {
         const data = await getUserEmails(detailUser.id);
         setUserEmails(data);
       }
-    } catch (err: any) {
-      setToast({ message: err.message || "Failed to resend email", type: "error" });
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : "Failed to resend email";
+      setToast({ message: errorMsg, type: "error" });
     } finally {
       setResendingEmailId(null);
     }
@@ -96,7 +120,7 @@ export default function UsersPage() {
       setUsers(data.users || []);
       setTotal(data.total || 0);
       setTotalPages(data.total_pages || 1);
-    } catch (err: unknown) {
+    } catch {
       setToast({ message: "Failed to load users", type: "error" });
     } finally {
       setLoading(false);

@@ -2,16 +2,14 @@
 
 import React, { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ShieldCheck, Mail, Lock, User, ArrowRight, ArrowLeft, Loader2, CheckCircle2 } from "lucide-react";
+import { ShieldCheck, ArrowRight, ArrowLeft, Loader2, CheckCircle2 } from "lucide-react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { register } from "../../lib/session";
 import RoleSelector from "../../components/RoleSelector";
 import PasswordStrength from "../../components/PasswordStrength";
 import type { AppRole } from "../../lib/iam";
 
 export default function SignupPage() {
-  const router = useRouter();
   const [step, setStep] = useState(1);
   const [formData, setFormData] = useState({
     role: "" as AppRole | "",
