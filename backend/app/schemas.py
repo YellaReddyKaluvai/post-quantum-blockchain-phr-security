@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 from typing import Any, Optional
 from pydantic import BaseModel, EmailStr, Field
 
@@ -119,3 +119,172 @@ class SecurityStats(BaseModel):
     active_sessions: int
     total_pqc_keypairs: int
     active_crypto_identities: int
+
+class PatientProfile(BaseModel):
+    id: str
+    user_id: Optional[str] = None
+    full_name: str
+    email: str
+    role: str
+    gender: str
+    date_of_birth: Optional[str] = None
+    blood_group: Optional[str] = None
+    status: str
+    created_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+
+class PatientDashboardSummary(BaseModel):
+    full_name: str
+    user_id: Optional[str] = None
+    blood_group: Optional[str] = None
+    assigned_doctor: Optional[str] = None
+    latest_diagnosis: Optional[str] = None
+    current_treatment: Optional[str] = None
+    latest_prescription: Optional[str] = None
+    total_reports: int = 0
+    pending_reports: int = 0
+    latest_report: Optional[str] = None
+    upcoming_appointment: Optional[dict] = None
+    previous_visit: Optional[dict] = None
+    recent_activities: list = []
+
+class DiagnosisRecord(BaseModel):
+    id: str
+    title: str
+    description: Optional[str] = None
+    symptoms: Optional[str] = None
+    doctor_notes: Optional[str] = None
+    recommended_tests: Optional[str] = None
+    visit_date: Optional[date] = None
+    doctor_name: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+class LabReportItem(BaseModel):
+    id: str
+    report_name: str
+    report_type: str
+    report_id_public: Optional[str] = None
+    findings: Optional[str] = None
+    normal_range: Optional[str] = None
+    status: str
+    uploaded_by_name: Optional[str] = None
+    upload_date: Optional[datetime] = None
+
+class PrescriptionRecord(BaseModel):
+    id: str
+    medicine_name: str
+    dosage: str
+    frequency: str
+    duration: str
+    instructions: Optional[str] = None
+    prescribed_date: Optional[date] = None
+    doctor_name: Optional[str] = None
+
+class ConsultationRecord(BaseModel):
+    id: str
+    consultation_date: Optional[date] = None
+    symptoms: Optional[str] = None
+    diagnosis_summary: Optional[str] = None
+    doctor_notes: Optional[str] = None
+    doctor_name: Optional[str] = None
+    doctor_specialization: Optional[str] = None
+
+class AppointmentRecord(BaseModel):
+    id: str
+    doctor_name: Optional[str] = None
+    department: Optional[str] = None
+    appointment_date: Optional[date] = None
+    appointment_time: Optional[str] = None
+    status: str
+    notes: Optional[str] = None
+
+class NotificationItem(BaseModel):
+    id: str
+    notification_type: str
+    title: str
+    body: str
+    read_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+class PatientSecurityInfo(BaseModel):
+    user_id: Optional[str] = None
+    account_status: str
+    last_login: Optional[datetime] = None
+    last_login_ip: Optional[str] = None
+    active_sessions: int = 0
+    pqc_protection_enabled: bool = False
+    account_created: Optional[datetime] = None
+
+class DoctorProfile(BaseModel):
+    id: str
+    user_id: Optional[str] = None
+    full_name: str
+    email: str
+    role: str
+    gender: str
+    specialization: Optional[str] = None
+    status: str
+    created_at: Optional[datetime] = None
+
+class DoctorDashboardSummary(BaseModel):
+    total_assigned_patients: int = 0
+    todays_appointments: int = 0
+    pending_reports: int = 0
+    recent_diagnoses: int = 0
+    recent_activities: list = []
+
+class DoctorPatientListItem(BaseModel):
+    id: str
+    user_id: Optional[str] = None
+    full_name: str
+    gender: str
+    blood_group: Optional[str] = None
+    last_visit_date: Optional[date] = None
+    status: str
+
+class CreateDiagnosisRequest(BaseModel):
+    title: str
+    description: Optional[str] = None
+    symptoms: Optional[str] = None
+    doctor_notes: Optional[str] = None
+    recommended_tests: Optional[str] = None
+    visit_date: date
+
+class CreatePrescriptionRequest(BaseModel):
+    medicine_name: str
+    dosage: str
+    frequency: str
+    duration: str
+    instructions: Optional[str] = None
+    prescribed_date: date
+
+class CreateConsultationRequest(BaseModel):
+    consultation_date: date
+    symptoms: Optional[str] = None
+    diagnosis_summary: Optional[str] = None
+    doctor_notes: Optional[str] = None
+
+class MedicalDocumentItem(BaseModel):
+    id: str
+    document_name: str
+    document_type: str
+    patient_name: Optional[str] = None
+    upload_date: Optional[datetime] = None
+    status: str
+
+class CreateDocumentRequest(BaseModel):
+    patient_id: str
+    document_name: str
+    document_type: str
+    content: Optional[str] = None
+    status: str = "Final"
+
+class DoctorAppointmentItem(BaseModel):
+    id: str
+    patient_name: Optional[str] = None
+    patient_id_public: Optional[str] = None
+    department: Optional[str] = None
+    appointment_date: Optional[date] = None
+    appointment_time: Optional[str] = None
+    status: str
+    notes: Optional[str] = None

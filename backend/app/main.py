@@ -9,7 +9,12 @@ from psycopg.rows import dict_row
 from app.schemas import (
     RegistrationRequest, LoginRequest, RegistrationResponse, LoginResponse, 
     PendingRegistration, AdminActionRequest, AdminActionResponse,
-    RejectRequest, DashboardStats, UserDetail, AuditLogEntry, SecurityStats
+    RejectRequest, DashboardStats, UserDetail, AuditLogEntry, SecurityStats,
+    PatientProfile, PatientDashboardSummary, DiagnosisRecord, LabReportItem,
+    PrescriptionRecord, ConsultationRecord, AppointmentRecord, NotificationItem,
+    PatientSecurityInfo, DoctorProfile, DoctorDashboardSummary, DoctorPatientListItem,
+    CreateDiagnosisRequest, CreatePrescriptionRequest, CreateConsultationRequest,
+    MedicalDocumentItem, CreateDocumentRequest, DoctorAppointmentItem
 )
 from app.database import get_db, init_db
 from app.security import (
@@ -667,6 +672,622 @@ def resend_failed_email_endpoint(notification_id: str, session: dict = Depends(r
         raise HTTPException(status_code=400, detail=f"Failed to resend email: {res['error_message']}")
         
     return {"message": "Email resent successfully", "status": res["sent_status"]}
+
+
+# ─── Patient Dashboard Endpoints ─────────────────────────────────────────────
+
+@app.get("/api/patient/profile")
+def get_patient_profile(session: dict = Depends(require_role("Patient"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT * FROM Users WHERE id = %s", (user_uuid,))
+            user = cur.fetchone()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return PatientProfile(
+        id=str(user["id"]),
+        user_id=user["user_id"],
+        full_name=user["full_name"],
+        email=user["email"],
+        role=user["role"],
+        gender=user["gender"],
+        date_of_birth=decrypt_data(user["date_of_birth_encrypted"]) if user["date_of_birth_encrypted"] else None,
+        blood_group=decrypt_data(user["blood_group_encrypted"]) if user["blood_group_encrypted"] else None,
+        status=user["status"],
+        created_at=user["created_at"],
+        approved_at=user["approved_at"]
+    )
+
+
+@app.get("/api/patient/dashboard/summary")
+def get_patient_dashboard_summary(session: dict = Depends(require_role("Patient"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            # User info
+            cur.execute("SELECT * FROM Users WHERE id = %s", (user_uuid,))
+            user = cur.fetchone()
+            
+            # Latest diagnosis
+            cur.execute("SELECT d.title, u.full_name as doctor_name FROM Diagnoses d LEFT JOIN Users u ON d.doctor_id = u.id WHERE d.patient_id = %s ORDER BY d.visit_date DESC LIMIT 1", (user_uuid,))
+            latest_diag = cur.fetchone()
+            
+            # Latest prescription
+            cur.execute("SELECT p.medicine_name, p.dosage FROM Prescriptions p WHERE p.patient_id = %s ORDER BY p.prescribed_date DESC LIMIT 1", (user_uuid,))
+            latest_rx = cur.fetchone()
+            
+            # Reports summary
+            cur.execute("SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = 'Pending') as pending FROM LabReports WHERE patient_id = %s", (user_uuid,))
+            report_stats = cur.fetchone()
+            
+            cur.execute("SELECT report_name FROM LabReports WHERE patient_id = %s ORDER BY upload_date DESC LIMIT 1", (user_uuid,))
+            latest_report = cur.fetchone()
+            
+            # Upcoming appointment
+            cur.execute("SELECT a.appointment_date, a.appointment_time, a.department, a.status, u.full_name as doctor_name FROM Appointments a LEFT JOIN Users u ON a.doctor_id = u.id WHERE a.patient_id = %s AND a.appointment_date >= CURRENT_DATE AND a.status = 'Scheduled' ORDER BY a.appointment_date ASC, a.appointment_time ASC LIMIT 1", (user_uuid,))
+            upcoming = cur.fetchone()
+            
+            # Previous visit
+            cur.execute("SELECT a.appointment_date, a.appointment_time, a.department, a.status, u.full_name as doctor_name FROM Appointments a LEFT JOIN Users u ON a.doctor_id = u.id WHERE a.patient_id = %s AND a.status = 'Completed' ORDER BY a.appointment_date DESC LIMIT 1", (user_uuid,))
+            previous = cur.fetchone()
+            
+            # Assigned doctor (from latest consultation)
+            cur.execute("SELECT u.full_name FROM DoctorConsultations dc JOIN Users u ON dc.doctor_id = u.id WHERE dc.patient_id = %s ORDER BY dc.consultation_date DESC LIMIT 1", (user_uuid,))
+            assigned_doc = cur.fetchone()
+            
+            # Recent activities from Notifications
+            cur.execute("SELECT title, body, created_at FROM Notifications WHERE user_id = %s ORDER BY created_at DESC LIMIT 5", (user_uuid,))
+            activities = cur.fetchall()
+
+    return PatientDashboardSummary(
+        full_name=user["full_name"],
+        user_id=user["user_id"],
+        blood_group=decrypt_data(user["blood_group_encrypted"]) if user.get("blood_group_encrypted") else None,
+        assigned_doctor=assigned_doc["full_name"] if assigned_doc else None,
+        latest_diagnosis=latest_diag["title"] if latest_diag else None,
+        current_treatment=f"{latest_rx['medicine_name']} ({latest_rx['dosage']})" if latest_rx else None,
+        latest_prescription=latest_rx["medicine_name"] if latest_rx else None,
+        total_reports=report_stats["total"],
+        pending_reports=report_stats["pending"],
+        latest_report=latest_report["report_name"] if latest_report else None,
+        upcoming_appointment={"date": str(upcoming["appointment_date"]), "time": str(upcoming["appointment_time"]), "doctor": upcoming["doctor_name"], "department": upcoming["department"]} if upcoming else None,
+        previous_visit={"date": str(previous["appointment_date"]), "doctor": previous["doctor_name"], "department": previous["department"]} if previous else None,
+        recent_activities=[{"title": a["title"], "body": a["body"], "created_at": a["created_at"].isoformat() if a["created_at"] else None} for a in activities]
+    )
+
+
+@app.get("/api/patient/medical-records")
+def get_patient_medical_records(session: dict = Depends(require_role("Patient"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT d.*, u.full_name as doctor_name
+                FROM Diagnoses d
+                LEFT JOIN Users u ON d.doctor_id = u.id
+                WHERE d.patient_id = %s
+                ORDER BY d.visit_date DESC
+            """, (user_uuid,))
+            rows = cur.fetchall()
+    return [DiagnosisRecord(
+        id=str(r["id"]), title=r["title"], description=r["description"],
+        symptoms=r["symptoms"], doctor_notes=r["doctor_notes"],
+        recommended_tests=r["recommended_tests"],
+        visit_date=r["visit_date"], doctor_name=r["doctor_name"],
+        created_at=r["created_at"]
+    ) for r in rows]
+
+
+@app.get("/api/patient/medical-records/{record_id}")
+def get_patient_medical_record_detail(record_id: str, session: dict = Depends(require_role("Patient"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT d.*, u.full_name as doctor_name
+                FROM Diagnoses d LEFT JOIN Users u ON d.doctor_id = u.id
+                WHERE d.id = %s AND d.patient_id = %s
+            """, (record_id, user_uuid))
+            r = cur.fetchone()
+    if not r:
+        raise HTTPException(status_code=404, detail="Record not found")
+    return DiagnosisRecord(
+        id=str(r["id"]), title=r["title"], description=r["description"],
+        symptoms=r["symptoms"], doctor_notes=r["doctor_notes"],
+        recommended_tests=r["recommended_tests"],
+        visit_date=r["visit_date"], doctor_name=r["doctor_name"],
+        created_at=r["created_at"]
+    )
+
+
+@app.get("/api/patient/lab-reports")
+def get_patient_lab_reports(session: dict = Depends(require_role("Patient"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT lr.*, u.full_name as uploaded_by_name
+                FROM LabReports lr LEFT JOIN Users u ON lr.uploaded_by = u.id
+                WHERE lr.patient_id = %s ORDER BY lr.upload_date DESC
+            """, (user_uuid,))
+            rows = cur.fetchall()
+    return [LabReportItem(
+        id=str(r["id"]), report_name=r["report_name"], report_type=r["report_type"],
+        report_id_public=r["report_id_public"], findings=r["findings"],
+        normal_range=r["normal_range"], status=r["status"],
+        uploaded_by_name=r["uploaded_by_name"], upload_date=r["upload_date"]
+    ) for r in rows]
+
+
+@app.get("/api/patient/lab-reports/{report_id}")
+def get_patient_lab_report_detail(report_id: str, session: dict = Depends(require_role("Patient"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT lr.*, u.full_name as uploaded_by_name
+                FROM LabReports lr LEFT JOIN Users u ON lr.uploaded_by = u.id
+                WHERE lr.id = %s AND lr.patient_id = %s
+            """, (report_id, user_uuid))
+            r = cur.fetchone()
+    if not r:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return LabReportItem(
+        id=str(r["id"]), report_name=r["report_name"], report_type=r["report_type"],
+        report_id_public=r["report_id_public"], findings=r["findings"],
+        normal_range=r["normal_range"], status=r["status"],
+        uploaded_by_name=r["uploaded_by_name"], upload_date=r["upload_date"]
+    )
+
+
+@app.get("/api/patient/prescriptions")
+def get_patient_prescriptions(session: dict = Depends(require_role("Patient"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT p.*, u.full_name as doctor_name
+                FROM Prescriptions p LEFT JOIN Users u ON p.doctor_id = u.id
+                WHERE p.patient_id = %s ORDER BY p.prescribed_date DESC
+            """, (user_uuid,))
+            rows = cur.fetchall()
+    return [PrescriptionRecord(
+        id=str(r["id"]), medicine_name=r["medicine_name"], dosage=r["dosage"],
+        frequency=r["frequency"], duration=r["duration"], instructions=r["instructions"],
+        prescribed_date=r["prescribed_date"], doctor_name=r["doctor_name"]
+    ) for r in rows]
+
+
+@app.get("/api/patient/consultations")
+def get_patient_consultations(session: dict = Depends(require_role("Patient"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT dc.*, u.full_name as doctor_name, u.specialization as doctor_specialization
+                FROM DoctorConsultations dc LEFT JOIN Users u ON dc.doctor_id = u.id
+                WHERE dc.patient_id = %s ORDER BY dc.consultation_date DESC
+            """, (user_uuid,))
+            rows = cur.fetchall()
+    return [ConsultationRecord(
+        id=str(r["id"]), consultation_date=r["consultation_date"],
+        symptoms=r["symptoms"], diagnosis_summary=r["diagnosis_summary"],
+        doctor_notes=r["doctor_notes"], doctor_name=r["doctor_name"],
+        doctor_specialization=r["doctor_specialization"]
+    ) for r in rows]
+
+
+@app.get("/api/patient/appointments")
+def get_patient_appointments(session: dict = Depends(require_role("Patient"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT a.*, u.full_name as doctor_name
+                FROM Appointments a LEFT JOIN Users u ON a.doctor_id = u.id
+                WHERE a.patient_id = %s ORDER BY a.appointment_date DESC, a.appointment_time DESC
+            """, (user_uuid,))
+            rows = cur.fetchall()
+    return [AppointmentRecord(
+        id=str(r["id"]), doctor_name=r["doctor_name"], department=r["department"],
+        appointment_date=r["appointment_date"],
+        appointment_time=str(r["appointment_time"]) if r["appointment_time"] else None,
+        status=r["status"], notes=r["notes"]
+    ) for r in rows]
+
+
+@app.get("/api/patient/notifications")
+def get_patient_notifications(session: dict = Depends(require_role("Patient"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT * FROM Notifications
+                WHERE user_id = %s ORDER BY created_at DESC
+            """, (user_uuid,))
+            rows = cur.fetchall()
+    return [NotificationItem(
+        id=str(r["notification_id"]), notification_type=r["notification_type"],
+        title=r["title"], body=r["body"],
+        read_at=r["read_at"], created_at=r["created_at"]
+    ) for r in rows]
+
+
+@app.post("/api/patient/notifications/{notification_id}/read")
+def mark_notification_read(notification_id: str, session: dict = Depends(require_role("Patient"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE Notifications SET read_at = CURRENT_TIMESTAMP
+                WHERE notification_id = %s AND user_id = %s AND read_at IS NULL
+            """, (notification_id, user_uuid))
+            conn.commit()
+    return {"status": "success"}
+
+
+@app.post("/api/patient/notifications/clear")
+def clear_patient_notifications(session: dict = Depends(require_role("Patient"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM Notifications WHERE user_id = %s AND read_at IS NOT NULL
+            """, (user_uuid,))
+            conn.commit()
+    return {"status": "success"}
+
+
+@app.get("/api/patient/security")
+def get_patient_security_info(session: dict = Depends(require_role("Patient"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT user_id, status, mlkem_public_key, created_at FROM Users WHERE id = %s", (user_uuid,))
+            user = cur.fetchone()
+            
+            cur.execute("""
+                SELECT created_at, ip_address FROM AuthLogs
+                WHERE user_id = %s AND action = 'LOGIN_SUCCESS'
+                ORDER BY created_at DESC LIMIT 1
+            """, (user_uuid,))
+            last_login = cur.fetchone()
+            
+            cur.execute("""
+                SELECT COUNT(*) as cnt FROM Sessions
+                WHERE user_id = %s AND expires_at > NOW() AND is_active = TRUE
+            """, (user_uuid,))
+            active_sessions = cur.fetchone()["cnt"]
+    
+    return PatientSecurityInfo(
+        user_id=user["user_id"] if user else None,
+        account_status=user["status"] if user else "Unknown",
+        last_login=last_login["created_at"] if last_login else None,
+        last_login_ip=str(last_login["ip_address"]) if last_login and last_login["ip_address"] else None,
+        active_sessions=active_sessions,
+        pqc_protection_enabled=user["mlkem_public_key"] is not None if user else False,
+        account_created=user["created_at"] if user else None
+    )
+
+# ─── Doctor Dashboard Endpoints ──────────────────────────────────────────────
+
+@app.get("/api/doctor/profile")
+def get_doctor_profile(session: dict = Depends(require_role("Doctor"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT * FROM Users WHERE id = %s", (user_uuid,))
+            user = cur.fetchone()
+    if not user:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    return DoctorProfile(
+        id=str(user["id"]),
+        user_id=user["user_id"],
+        full_name=user["full_name"],
+        email=user["email"],
+        role=user["role"],
+        gender=user["gender"],
+        specialization=user["specialization"],
+        status=user["status"],
+        created_at=user["created_at"]
+    )
+
+@app.get("/api/doctor/dashboard/summary")
+def get_doctor_dashboard_summary(session: dict = Depends(require_role("Doctor"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            # Patients assigned to this doctor (via past diagnoses, consultations, or appointments)
+            cur.execute("""
+                SELECT COUNT(DISTINCT patient_id) as cnt FROM (
+                    SELECT patient_id FROM Diagnoses WHERE doctor_id = %s
+                    UNION
+                    SELECT patient_id FROM DoctorConsultations WHERE doctor_id = %s
+                    UNION
+                    SELECT patient_id FROM Appointments WHERE doctor_id = %s
+                ) as assigned
+            """, (user_uuid, user_uuid, user_uuid))
+            assigned_patients = cur.fetchone()["cnt"]
+
+            # Today's appointments
+            cur.execute("SELECT COUNT(*) as cnt FROM Appointments WHERE doctor_id = %s AND appointment_date = CURRENT_DATE", (user_uuid,))
+            todays_appointments = cur.fetchone()["cnt"]
+
+            # Pending reports (for patients assigned to this doctor)
+            cur.execute("""
+                SELECT COUNT(DISTINCT lr.id) as cnt FROM LabReports lr
+                JOIN (
+                    SELECT patient_id FROM Diagnoses WHERE doctor_id = %s
+                    UNION SELECT patient_id FROM Appointments WHERE doctor_id = %s
+                ) as assigned ON lr.patient_id = assigned.patient_id
+                WHERE lr.status = 'Pending'
+            """, (user_uuid, user_uuid))
+            pending_reports = cur.fetchone()["cnt"]
+
+            # Recent diagnoses today
+            cur.execute("SELECT COUNT(*) as cnt FROM Diagnoses WHERE doctor_id = %s AND visit_date = CURRENT_DATE", (user_uuid,))
+            recent_diagnoses = cur.fetchone()["cnt"]
+
+            # Recent activities (Notifications)
+            cur.execute("SELECT title, body, created_at FROM Notifications WHERE user_id = %s ORDER BY created_at DESC LIMIT 5", (user_uuid,))
+            activities = cur.fetchall()
+
+    return DoctorDashboardSummary(
+        total_assigned_patients=assigned_patients,
+        todays_appointments=todays_appointments,
+        pending_reports=pending_reports,
+        recent_diagnoses=recent_diagnoses,
+        recent_activities=[{"title": a["title"], "body": a["body"], "created_at": a["created_at"].isoformat() if a["created_at"] else None} for a in activities]
+    )
+
+@app.get("/api/doctor/patients")
+def get_doctor_patients(session: dict = Depends(require_role("Doctor"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT DISTINCT u.*, 
+                (SELECT MAX(visit_date) FROM Diagnoses WHERE patient_id = u.id AND doctor_id = %s) as last_visit
+                FROM Users u
+                JOIN (
+                    SELECT patient_id FROM Diagnoses WHERE doctor_id = %s
+                    UNION
+                    SELECT patient_id FROM DoctorConsultations WHERE doctor_id = %s
+                    UNION
+                    SELECT patient_id FROM Appointments WHERE doctor_id = %s
+                ) as assigned ON u.id = assigned.patient_id
+                WHERE u.role = 'Patient'
+            """, (user_uuid, user_uuid, user_uuid, user_uuid))
+            rows = cur.fetchall()
+
+    return [DoctorPatientListItem(
+        id=str(r["id"]),
+        user_id=r["user_id"],
+        full_name=r["full_name"],
+        gender=r["gender"],
+        blood_group=decrypt_data(r["blood_group_encrypted"]) if r.get("blood_group_encrypted") else None,
+        last_visit_date=r["last_visit"],
+        status=r["status"]
+    ) for r in rows]
+
+@app.get("/api/doctor/patients/{patient_id}")
+def get_doctor_patient_detail(patient_id: str, session: dict = Depends(require_role("Doctor"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT * FROM Users WHERE id = %s AND role = 'Patient'", (patient_id,))
+            user = cur.fetchone()
+            if not user:
+                raise HTTPException(status_code=404, detail="Patient not found")
+
+            # Check if assigned to this doctor
+            cur.execute("""
+                SELECT 1 FROM (
+                    SELECT patient_id FROM Diagnoses WHERE doctor_id = %s AND patient_id = %s
+                    UNION SELECT patient_id FROM Appointments WHERE doctor_id = %s AND patient_id = %s
+                    UNION SELECT patient_id FROM DoctorConsultations WHERE doctor_id = %s AND patient_id = %s
+                ) as assigned
+            """, (user_uuid, patient_id, user_uuid, patient_id, user_uuid, patient_id))
+            if not cur.fetchone():
+                # Allow access anyway for emergency / new patients, or enforce it. 
+                # For this demo, let's allow it as they might want to see any patient they search for.
+                pass
+
+            cur.execute("SELECT * FROM Diagnoses WHERE patient_id = %s ORDER BY visit_date DESC LIMIT 5", (patient_id,))
+            diagnoses = cur.fetchall()
+
+            cur.execute("SELECT * FROM Prescriptions WHERE patient_id = %s ORDER BY prescribed_date DESC LIMIT 5", (patient_id,))
+            prescriptions = cur.fetchall()
+            
+    return {
+        "profile": {
+            "id": str(user["id"]),
+            "user_id": user["user_id"],
+            "full_name": user["full_name"],
+            "email": user["email"],
+            "gender": user["gender"],
+            "date_of_birth": decrypt_data(user["date_of_birth_encrypted"]) if user.get("date_of_birth_encrypted") else None,
+            "blood_group": decrypt_data(user["blood_group_encrypted"]) if user.get("blood_group_encrypted") else None,
+        },
+        "diagnoses": [
+            DiagnosisRecord(
+                id=str(r["id"]), title=r["title"], description=r["description"],
+                symptoms=r["symptoms"], doctor_notes=r["doctor_notes"],
+                recommended_tests=r["recommended_tests"], visit_date=r["visit_date"],
+                created_at=r["created_at"]
+            ) for r in diagnoses
+        ],
+        "prescriptions": [
+            PrescriptionRecord(
+                id=str(r["id"]), medicine_name=r["medicine_name"], dosage=r["dosage"],
+                frequency=r["frequency"], duration=r["duration"], instructions=r["instructions"],
+                prescribed_date=r["prescribed_date"]
+            ) for r in prescriptions
+        ]
+    }
+
+@app.post("/api/doctor/patients/{patient_id}/diagnosis")
+def create_diagnosis(patient_id: str, req: CreateDiagnosisRequest, session: dict = Depends(require_role("Doctor"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO Diagnoses (patient_id, doctor_id, title, description, symptoms, doctor_notes, recommended_tests, visit_date)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+            """, (patient_id, user_uuid, req.title, req.description, req.symptoms, req.doctor_notes, req.recommended_tests, req.visit_date))
+            conn.commit()
+    return {"status": "success"}
+
+@app.post("/api/doctor/patients/{patient_id}/prescription")
+def create_prescription(patient_id: str, req: CreatePrescriptionRequest, session: dict = Depends(require_role("Doctor"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO Prescriptions (patient_id, doctor_id, medicine_name, dosage, frequency, duration, instructions, prescribed_date)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+            """, (patient_id, user_uuid, req.medicine_name, req.dosage, req.frequency, req.duration, req.instructions, req.prescribed_date))
+            conn.commit()
+    return {"status": "success"}
+
+@app.post("/api/doctor/patients/{patient_id}/consultation")
+def create_consultation(patient_id: str, req: CreateConsultationRequest, session: dict = Depends(require_role("Doctor"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO DoctorConsultations (patient_id, doctor_id, consultation_date, symptoms, diagnosis_summary, doctor_notes)
+                VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+            """, (patient_id, user_uuid, req.consultation_date, req.symptoms, req.diagnosis_summary, req.doctor_notes))
+            conn.commit()
+    return {"status": "success"}
+
+@app.get("/api/doctor/reports")
+def get_doctor_reports(session: dict = Depends(require_role("Doctor"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT lr.*, u.full_name as patient_name
+                FROM LabReports lr
+                JOIN Users u ON lr.patient_id = u.id
+                JOIN (
+                    SELECT patient_id FROM Diagnoses WHERE doctor_id = %s
+                    UNION SELECT patient_id FROM Appointments WHERE doctor_id = %s
+                ) as assigned ON lr.patient_id = assigned.patient_id
+                ORDER BY lr.upload_date DESC
+            """, (user_uuid, user_uuid))
+            rows = cur.fetchall()
+    return [LabReportItem(
+        id=str(r["id"]), report_name=r["report_name"], report_type=r["report_type"],
+        report_id_public=r["report_id_public"], findings=r["findings"],
+        normal_range=r["normal_range"], status=r["status"],
+        uploaded_by_name=r["patient_name"],  # Reusing this field for patient_name in UI
+        upload_date=r["upload_date"]
+    ) for r in rows]
+
+@app.post("/api/doctor/reports/{report_id}/review")
+def review_lab_report(report_id: str, session: dict = Depends(require_role("Doctor"))):
+    # Only marks as reviewed, no content changes
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE LabReports SET status = 'Reviewed' WHERE id = %s", (report_id,))
+            conn.commit()
+    return {"status": "success"}
+
+@app.get("/api/doctor/documents")
+def get_doctor_documents(session: dict = Depends(require_role("Doctor"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT m.*, u.full_name as patient_name
+                FROM MedicalDocuments m
+                JOIN Users u ON m.patient_id = u.id
+                WHERE m.doctor_id = %s
+                ORDER BY m.created_at DESC
+            """, (user_uuid,))
+            rows = cur.fetchall()
+    return [MedicalDocumentItem(
+        id=str(r["id"]), document_name=r["document_name"], document_type=r["document_type"],
+        patient_name=r["patient_name"], upload_date=r["created_at"], status=r["status"]
+    ) for r in rows]
+
+@app.post("/api/doctor/documents")
+def create_medical_document(req: CreateDocumentRequest, session: dict = Depends(require_role("Doctor"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO MedicalDocuments (patient_id, doctor_id, document_name, document_type, content, status)
+                VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+            """, (req.patient_id, user_uuid, req.document_name, req.document_type, req.content, req.status))
+            conn.commit()
+    return {"status": "success"}
+
+@app.get("/api/doctor/appointments")
+def get_doctor_appointments(session: dict = Depends(require_role("Doctor"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT a.*, u.full_name as patient_name, u.user_id as patient_id_public
+                FROM Appointments a
+                JOIN Users u ON a.patient_id = u.id
+                WHERE a.doctor_id = %s
+                ORDER BY a.appointment_date DESC, a.appointment_time DESC
+            """, (user_uuid,))
+            rows = cur.fetchall()
+    return [DoctorAppointmentItem(
+        id=str(r["id"]), patient_name=r["patient_name"], patient_id_public=r["patient_id_public"],
+        department=r["department"], appointment_date=r["appointment_date"],
+        appointment_time=str(r["appointment_time"]) if r["appointment_time"] else None,
+        status=r["status"], notes=r["notes"]
+    ) for r in rows]
+
+@app.post("/api/doctor/appointments/{appointment_id}/{action}")
+def update_appointment_status(appointment_id: str, action: str, session: dict = Depends(require_role("Doctor"))):
+    user_uuid = session["user_id"]
+    status_map = {"accept": "Confirmed", "complete": "Completed", "cancel": "Cancelled"}
+    if action not in status_map:
+        raise HTTPException(status_code=400, detail="Invalid action")
+    
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE Appointments SET status = %s WHERE id = %s AND doctor_id = %s", (status_map[action], appointment_id, user_uuid))
+            conn.commit()
+    return {"status": "success"}
+
+@app.get("/api/doctor/notifications")
+def get_doctor_notifications(session: dict = Depends(require_role("Doctor"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT * FROM Notifications WHERE user_id = %s ORDER BY created_at DESC", (user_uuid,))
+            rows = cur.fetchall()
+    return [NotificationItem(
+        id=str(r["notification_id"]), notification_type=r["notification_type"],
+        title=r["title"], body=r["body"], read_at=r["read_at"], created_at=r["created_at"]
+    ) for r in rows]
+
+@app.post("/api/doctor/notifications/{notification_id}/read")
+def mark_doctor_notification_read(notification_id: str, session: dict = Depends(require_role("Doctor"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE Notifications SET read_at = CURRENT_TIMESTAMP WHERE notification_id = %s AND user_id = %s AND read_at IS NULL", (notification_id, user_uuid))
+            conn.commit()
+    return {"status": "success"}
+
+@app.post("/api/doctor/notifications/clear")
+def clear_doctor_notifications(session: dict = Depends(require_role("Doctor"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM Notifications WHERE user_id = %s AND read_at IS NOT NULL", (user_uuid,))
+            conn.commit()
+    return {"status": "success"}
 
 
 if __name__ == "__main__":

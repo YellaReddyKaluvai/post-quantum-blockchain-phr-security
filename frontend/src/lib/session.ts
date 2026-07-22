@@ -175,3 +175,181 @@ export async function resendEmail(notificationId: string) {
   }
   return response.json();
 }
+
+// ─── Patient API Functions ───────────────────────────────────────────────────
+
+export async function getPatientProfile() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/profile`);
+  if (!response.ok) throw new Error("Failed to fetch patient profile");
+  return response.json();
+}
+
+export async function getPatientDashboardSummary() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/dashboard/summary`);
+  if (!response.ok) throw new Error("Failed to fetch dashboard summary");
+  return response.json();
+}
+
+export async function getPatientMedicalRecords() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/medical-records`);
+  if (!response.ok) throw new Error("Failed to fetch medical records");
+  return response.json();
+}
+
+export async function getPatientMedicalRecordDetail(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/medical-records/${id}`);
+  if (!response.ok) throw new Error("Failed to fetch medical record detail");
+  return response.json();
+}
+
+export async function getPatientLabReports() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/lab-reports`);
+  if (!response.ok) throw new Error("Failed to fetch lab reports");
+  return response.json();
+}
+
+export async function getPatientLabReportDetail(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/lab-reports/${id}`);
+  if (!response.ok) throw new Error("Failed to fetch lab report detail");
+  return response.json();
+}
+
+export async function getPatientPrescriptions() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/prescriptions`);
+  if (!response.ok) throw new Error("Failed to fetch prescriptions");
+  return response.json();
+}
+
+export async function getPatientConsultations() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/consultations`);
+  if (!response.ok) throw new Error("Failed to fetch consultations");
+  return response.json();
+}
+
+export async function getPatientAppointments() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/appointments`);
+  if (!response.ok) throw new Error("Failed to fetch appointments");
+  return response.json();
+}
+
+export async function getPatientNotifications() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/notifications`);
+  if (!response.ok) throw new Error("Failed to fetch notifications");
+  return response.json();
+}
+
+export async function markNotificationRead(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/notifications/${id}/read`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to mark notification as read");
+  return response.json();
+}
+
+export async function clearNotifications() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/notifications/clear`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to clear notifications");
+  return response.json();
+}
+
+export async function getPatientSecurity() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/security`);
+  if (!response.ok) throw new Error("Failed to fetch security info");
+  return response.json();
+}
+
+// ─── Doctor API Functions ────────────────────────────────────────────────────
+
+export async function getDoctorProfile() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/profile`);
+  if (!response.ok) throw new Error("Failed to fetch doctor profile");
+  return response.json();
+}
+
+export async function getDoctorDashboardSummary() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/dashboard/summary`);
+  if (!response.ok) throw new Error("Failed to fetch dashboard summary");
+  return response.json();
+}
+
+export async function getDoctorPatients() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients`);
+  if (!response.ok) throw new Error("Failed to fetch patients");
+  return response.json();
+}
+
+export async function getDoctorPatientDetail(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${id}`);
+  if (!response.ok) throw new Error("Failed to fetch patient details");
+  return response.json();
+}
+
+export async function createDiagnosis(patientId: string, data: any) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${patientId}/diagnosis`, {
+    method: "POST", body: JSON.stringify(data)
+  });
+  if (!response.ok) throw new Error("Failed to create diagnosis");
+  return response.json();
+}
+
+export async function createPrescription(patientId: string, data: any) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${patientId}/prescription`, {
+    method: "POST", body: JSON.stringify(data)
+  });
+  if (!response.ok) throw new Error("Failed to create prescription");
+  return response.json();
+}
+
+export async function getDoctorReports() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/reports`);
+  if (!response.ok) throw new Error("Failed to fetch reports");
+  return response.json();
+}
+
+export async function reviewLabReport(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/reports/${id}/review`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to review report");
+  return response.json();
+}
+
+export async function getDoctorDocuments() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/documents`);
+  if (!response.ok) throw new Error("Failed to fetch documents");
+  return response.json();
+}
+
+export async function createMedicalDocument(data: any) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/documents`, {
+    method: "POST", body: JSON.stringify(data)
+  });
+  if (!response.ok) throw new Error("Failed to upload document");
+  return response.json();
+}
+
+export async function getDoctorAppointments() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/appointments`);
+  if (!response.ok) throw new Error("Failed to fetch appointments");
+  return response.json();
+}
+
+export async function updateAppointmentStatus(id: string, action: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/appointments/${id}/${action}`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to update appointment");
+  return response.json();
+}
+
+export async function getDoctorNotifications() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/notifications`);
+  if (!response.ok) throw new Error("Failed to fetch notifications");
+  return response.json();
+}
+
+export async function markDoctorNotificationRead(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/notifications/${id}/read`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to mark notification as read");
+  return response.json();
+}
+
+export async function clearDoctorNotifications() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/notifications/clear`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to clear notifications");
+  return response.json();
+}

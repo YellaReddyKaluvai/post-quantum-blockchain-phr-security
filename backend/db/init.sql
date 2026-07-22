@@ -160,6 +160,128 @@ CREATE TABLE IF NOT EXISTS AdminAuditLogs (
 CREATE INDEX IF NOT EXISTS idx_admin_audit_admin ON AdminAuditLogs(admin_id);
 CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON AdminAuditLogs(created_at DESC);
 
+-- Lab Report Type enum
+DO $$ BEGIN
+    CREATE TYPE lab_report_type AS ENUM (
+        'CBC', 'Blood Sugar', 'Urine Test', 'Lipid Profile',
+        'Liver Function', 'Kidney Function', 'ECG', 'X-Ray',
+        'MRI', 'CT Scan', 'Ultrasound', 'Other'
+    );
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE appointment_status AS ENUM ('Scheduled', 'Completed', 'Cancelled');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE lab_report_status AS ENUM ('Pending', 'Completed', 'Reviewed');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+CREATE TABLE IF NOT EXISTS Diagnoses (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    doctor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    title VARCHAR(255) NOT NULL,
+    description TEXT,
+    symptoms TEXT,
+    doctor_notes TEXT,
+    recommended_tests TEXT,
+    visit_date DATE NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS LabReports (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    uploaded_by UUID REFERENCES Users(id) ON DELETE SET NULL,
+    report_name VARCHAR(255) NOT NULL,
+    report_type lab_report_type NOT NULL DEFAULT 'Other',
+    report_id_public VARCHAR(30) UNIQUE,
+    file_data TEXT,
+    findings TEXT,
+    normal_range TEXT,
+    status lab_report_status NOT NULL DEFAULT 'Pending',
+    upload_date TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS Prescriptions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    doctor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    medicine_name VARCHAR(255) NOT NULL,
+    dosage VARCHAR(100) NOT NULL,
+    frequency VARCHAR(100) NOT NULL,
+    duration VARCHAR(100) NOT NULL,
+    instructions TEXT,
+    prescribed_date DATE NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS DoctorConsultations (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    doctor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    consultation_date DATE NOT NULL,
+    symptoms TEXT,
+    diagnosis_summary TEXT,
+    doctor_notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS Appointments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    doctor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    department VARCHAR(100),
+    appointment_date DATE NOT NULL,
+    appointment_time TIME NOT NULL,
+    status appointment_status NOT NULL DEFAULT 'Scheduled',
+    notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+DO $$ BEGIN
+    CREATE TYPE medical_document_type AS ENUM (
+        'Diagnosis Report', 'Consultation Report', 'Treatment Summary',
+        'Medical Certificate', 'Referral Letter', 'Discharge Summary', 'Other'
+    );
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+ALTER TYPE appointment_status ADD VALUE IF NOT EXISTS 'Pending';
+ALTER TYPE appointment_status ADD VALUE IF NOT EXISTS 'Confirmed';
+
+CREATE TABLE IF NOT EXISTS MedicalDocuments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    doctor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    document_name VARCHAR(255) NOT NULL,
+    document_type medical_document_type NOT NULL DEFAULT 'Other',
+    content TEXT,
+    status VARCHAR(50) NOT NULL DEFAULT 'Final',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_medicaldocuments_doctor ON MedicalDocuments(doctor_id);
+CREATE INDEX IF NOT EXISTS idx_medicaldocuments_patient ON MedicalDocuments(patient_id);
+
+CREATE INDEX IF NOT EXISTS idx_diagnoses_patient ON Diagnoses(patient_id);
+CREATE INDEX IF NOT EXISTS idx_labreports_patient ON LabReports(patient_id);
+CREATE INDEX IF NOT EXISTS idx_prescriptions_patient ON Prescriptions(patient_id);
+CREATE INDEX IF NOT EXISTS idx_consultations_patient ON DoctorConsultations(patient_id);
+CREATE INDEX IF NOT EXISTS idx_appointments_patient ON Appointments(patient_id);
+CREATE INDEX IF NOT EXISTS idx_appointments_date ON Appointments(appointment_date);
+
 CREATE INDEX IF NOT EXISTS idx_users_role ON Users(role);
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON Sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_auditlogs_user_id ON AuthLogs(user_id);
