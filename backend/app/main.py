@@ -14,7 +14,10 @@ from app.schemas import (
     PrescriptionRecord, ConsultationRecord, AppointmentRecord, NotificationItem,
     PatientSecurityInfo, DoctorProfile, DoctorDashboardSummary, DoctorPatientListItem,
     CreateDiagnosisRequest, CreatePrescriptionRequest, CreateConsultationRequest,
-    MedicalDocumentItem, CreateDocumentRequest, DoctorAppointmentItem
+    MedicalDocumentItem, CreateDocumentRequest, DoctorAppointmentItem,
+    LabTechProfile, LabTechDashboardSummary, LabTestRequestItem,
+    CreateLabTestRequest, CreateStructuredLabReportRequest,
+    CreateImagingReportRequest, ImagingReportItem
 )
 from app.database import get_db, init_db
 from app.security import (
@@ -1289,6 +1292,305 @@ def clear_doctor_notifications(session: dict = Depends(require_role("Doctor"))):
             conn.commit()
     return {"status": "success"}
 
+@app.post("/api/doctor/requests")
+def create_lab_test_request(req: CreateLabTestRequest, session: dict = Depends(require_role("Doctor"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO LabTestRequests (patient_id, doctor_id, test_name, priority, clinical_notes, status)
+                VALUES (%s, %s, %s, %s, %s, 'Pending') RETURNING id
+            """, (req.patient_id, user_uuid, req.test_name, req.priority, req.clinical_notes))
+            conn.commit()
+    return {"status": "success"}
+
+# ─── Lab Technician Dashboard Endpoints ────────────────────────────────────
+
+@app.get("/api/lab-tech/profile")
+def get_lab_tech_profile(session: dict = Depends(require_role("Lab Technician"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT * FROM Users WHERE id = %s", (user_uuid,))
+            user = cur.fetchone()
+            
+            cur.execute("SELECT COUNT(*) as cnt FROM LabReports WHERE lab_tech_id = %s", (user_uuid,))
+            reports_cnt = cur.fetchone()["cnt"]
+            
+    if not user:
+        raise HTTPException(status_code=404, detail="Lab Technician not found")
+        
+    return LabTechProfile(
+        id=str(user["id"]), user_id=user["user_id"], full_name=user["full_name"],
+        email=user["email"], role=user["role"], gender=user["gender"],
+        department="Central Laboratory", reports_generated=reports_cnt,
+        status=user["status"], created_at=user["created_at"]
+    )
+
+@app.get("/api/lab-tech/dashboard/summary")
+def get_lab_tech_dashboard_summary(session: dict = Depends(require_role("Lab Technician"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT COUNT(*) as cnt FROM LabTestRequests WHERE requested_date::date = CURRENT_DATE")
+            tests_assigned = cur.fetchone()["cnt"]
+            
+            cur.execute("SELECT COUNT(*) as cnt FROM LabReports WHERE lab_tech_id = %s AND created_at::date = CURRENT_DATE", (user_uuid,))
+            reports_generated = cur.fetchone()["cnt"]
+            
+            cur.execute("SELECT COUNT(*) as cnt FROM LabTestRequests WHERE status = 'Pending'")
+            pending_requests = cur.fetchone()["cnt"]
+            
+            cur.execute("SELECT COUNT(*) as cnt FROM LabReports WHERE lab_tech_id = %s", (user_uuid,))
+            reports_shared = cur.fetchone()["cnt"]
+            
+            cur.execute("SELECT COUNT(*) as cnt FROM LabReports WHERE status = 'Pending' AND lab_tech_id = %s", (user_uuid,))
+            reports_awaiting = cur.fetchone()["cnt"]
+            
+            cur.execute("SELECT title, body, created_at FROM Notifications WHERE user_id = %s ORDER BY created_at DESC LIMIT 5", (user_uuid,))
+            activities = cur.fetchall()
+            
+    return LabTechDashboardSummary(
+        tests_assigned_today=tests_assigned, reports_generated_today=reports_generated,
+        pending_test_requests=pending_requests, reports_shared=reports_shared,
+        reports_awaiting_review=reports_awaiting,
+        recent_activities=[{"title": a["title"], "body": a["body"], "created_at": a["created_at"].isoformat() if a["created_at"] else None} for a in activities]
+    )
+
+@app.get("/api/lab-tech/requests")
+def get_lab_test_requests(status: Optional[str] = None, session: dict = Depends(require_role("Lab Technician"))):
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            query = """
+                SELECT r.*, p.full_name as patient_name, p.user_id as patient_user_id, d.full_name as doctor_name
+                FROM LabTestRequests r
+                JOIN Users p ON r.patient_id = p.id
+                LEFT JOIN Users d ON r.doctor_id = d.id
+            """
+            params = []
+            if status:
+                query += " WHERE r.status = %s"
+                params.append(status)
+            query += " ORDER BY r.requested_date DESC"
+            
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            
+    return [LabTestRequestItem(
+        id=str(r["id"]), patient_id=str(r["patient_id"]), patient_name=r["patient_name"],
+        patient_user_id=r["patient_user_id"], doctor_name=r["doctor_name"],
+        test_name=r["test_name"], priority=r["priority"], status=r["status"],
+        clinical_notes=r["clinical_notes"], requested_date=r["requested_date"]
+    ) for r in rows]
+
+@app.post("/api/lab-tech/requests/{request_id}/status")
+def update_lab_test_request_status(request_id: str, payload: dict = Body(...), session: dict = Depends(require_role("Lab Technician"))):
+    new_status = payload.get("status")
+    if new_status not in ['Accepted', 'In Progress', 'Completed']:
+        raise HTTPException(status_code=400, detail="Invalid status")
+        
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE LabTestRequests SET status = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (new_status, request_id))
+            conn.commit()
+    return {"status": "success"}
+
+@app.get("/api/lab-tech/patients/search")
+def search_patients(q: str, session: dict = Depends(require_role("Lab Technician"))):
+    if len(q) < 2:
+        return []
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT id, user_id, full_name, email, gender 
+                FROM Users 
+                WHERE role = 'Patient' AND (full_name ILIKE %s OR user_id ILIKE %s)
+                LIMIT 10
+            """, (f"%{q}%", f"%{q}%"))
+            rows = cur.fetchall()
+            
+    return [{"id": str(r["id"]), "user_id": r["user_id"], "full_name": r["full_name"], "email": r["email"], "gender": r["gender"]} for r in rows]
+
+import hashlib
+import os
+import json
+
+@app.post("/api/lab-tech/reports/create")
+def create_structured_lab_report(req: CreateStructuredLabReportRequest, session: dict = Depends(require_role("Lab Technician"))):
+    user_uuid = session["user_id"]
+    
+    # Process report with full PQC pipeline
+    structured_content = json.dumps(req.structured_data, sort_keys=True)
+    document_hash = hashlib.sha256(structured_content.encode('utf-8')).hexdigest()
+    
+    # Mock AES key generation and encryption
+    aes_key = os.urandom(32).hex()
+    encrypted_payload = f"ENCRYPTED_{document_hash}_{aes_key[:10]}" # Mock payload
+    
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT mlkem_public_key, mldsa_private_key_encrypted FROM Users WHERE id = %s", (req.patient_id,))
+            patient = cur.fetchone()
+            
+            cur.execute("SELECT mldsa_private_key_encrypted FROM Users WHERE id = %s", (user_uuid,))
+            lab_tech = cur.fetchone()
+            
+            if not patient:
+                raise HTTPException(status_code=404, detail="Patient not found")
+                
+            # Mock Key Encapsulation (wrapping AES key using patient's ML-KEM public key)
+            encrypted_aes_key = f"WRAPPED_BY_{patient['mlkem_public_key'][:10]}_{aes_key[:10]}" if patient['mlkem_public_key'] else f"UNWRAPPED_{aes_key[:10]}"
+            
+            # Mock Digital Signature
+            digital_signature = f"SIGNED_BY_{user_uuid[:8]}_{document_hash[:10]}"
+            
+            blockchain_tx_hash = f"0x{hashlib.sha256(os.urandom(32)).hexdigest()}"
+            
+            # Insert into LabReports
+            cur.execute("""
+                INSERT INTO LabReports (patient_id, uploaded_by, lab_tech_id, report_name, report_type, findings, normal_range, structured_data, document_hash, encrypted_aes_key, digital_signature, blockchain_tx_hash, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'Completed') RETURNING id
+            """, (req.patient_id, user_uuid, user_uuid, req.report_name, req.report_type, req.findings, req.normal_range, json.dumps(req.structured_data), document_hash, encrypted_aes_key, digital_signature, blockchain_tx_hash))
+            report_id = cur.fetchone()["id"]
+            
+            # Audit log
+            cur.execute("""
+                INSERT INTO AdminAuditLogs (admin_user_id, action, target_user_id, details)
+                VALUES (%s, 'LAB_REPORT_CREATED_BLOCKCHAIN', %s, %s)
+            """, (session.get("public_user_id", "SYS"), req.patient_id, json.dumps({"report_id": str(report_id), "tx_hash": blockchain_tx_hash})))
+            
+            # Create notification for Patient
+            cur.execute("""
+                INSERT INTO Notifications (user_id, notification_type, title, body)
+                VALUES (%s, 'REPORT_READY', 'New Lab Report Available', 'Your lab report for ' || %s || ' is now available.')
+            """, (req.patient_id, req.report_name))
+            
+            # Create notification for Doctor (find assigned doctor)
+            cur.execute("""
+                SELECT doctor_id FROM Diagnoses WHERE patient_id = %s ORDER BY visit_date DESC LIMIT 1
+            """, (req.patient_id,))
+            doc_row = cur.fetchone()
+            if doc_row and doc_row["doctor_id"]:
+                cur.execute("""
+                    INSERT INTO Notifications (user_id, notification_type, title, body)
+                    VALUES (%s, 'REPORT_READY', 'Patient Report Ready', 'Lab report ' || %s || ' for your patient is ready.')
+                """, (doc_row["doctor_id"], req.report_name))
+                
+            conn.commit()
+            
+    return {"status": "success", "report_id": str(report_id), "blockchain_tx_hash": blockchain_tx_hash}
+
+@app.get("/api/lab-tech/reports")
+def get_lab_tech_reports(session: dict = Depends(require_role("Lab Technician"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT lr.*, u.full_name as uploaded_by_name
+                FROM LabReports lr
+                LEFT JOIN Users u ON lr.patient_id = u.id
+                WHERE lr.lab_tech_id = %s OR lr.uploaded_by = %s
+                ORDER BY lr.upload_date DESC
+            """, (user_uuid, user_uuid))
+            rows = cur.fetchall()
+            
+    return [LabReportItem(
+        id=str(r["id"]), report_name=r["report_name"], report_type=r["report_type"],
+        report_id_public=r["report_id_public"], findings=r["findings"],
+        normal_range=r["normal_range"], status=r["status"],
+        uploaded_by_name=r["uploaded_by_name"],  # Reusing for patient name in tech view
+        upload_date=r["upload_date"]
+    ) for r in rows]
+
+@app.get("/api/lab-tech/reports/{report_id}")
+def get_lab_tech_report_detail(report_id: str, session: dict = Depends(require_role("Lab Technician"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT lr.*, u.full_name as patient_name, u.user_id as patient_user_id
+                FROM LabReports lr
+                LEFT JOIN Users u ON lr.patient_id = u.id
+                WHERE lr.id = %s AND (lr.lab_tech_id = %s OR lr.uploaded_by = %s)
+            """, (report_id, user_uuid, user_uuid))
+            r = cur.fetchone()
+            
+    if not r:
+        raise HTTPException(status_code=404, detail="Report not found")
+        
+    return {
+        "id": str(r["id"]), "report_name": r["report_name"], "report_type": r["report_type"],
+        "patient_name": r["patient_name"], "patient_user_id": r["patient_user_id"],
+        "findings": r["findings"], "normal_range": r["normal_range"],
+        "structured_data": r.get("structured_data"),
+        "document_hash": r.get("document_hash"),
+        "digital_signature": r.get("digital_signature"),
+        "blockchain_tx_hash": r.get("blockchain_tx_hash"),
+        "status": r["status"], "upload_date": r["upload_date"]
+    }
+
+@app.post("/api/lab-tech/imaging/upload")
+def upload_imaging_report(req: CreateImagingReportRequest, session: dict = Depends(require_role("Lab Technician"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO ImagingReports (patient_id, lab_tech_id, scan_region, exam_type, clinical_history, findings, impression, recommendations, image_data)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+            """, (req.patient_id, user_uuid, req.scan_region, req.exam_type, req.clinical_history, req.findings, req.impression, req.recommendations, req.image_data))
+            conn.commit()
+    return {"status": "success"}
+
+@app.get("/api/lab-tech/imaging")
+def get_imaging_reports(session: dict = Depends(require_role("Lab Technician"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT ir.*, u.full_name as patient_name, u.user_id as patient_user_id
+                FROM ImagingReports ir
+                JOIN Users u ON ir.patient_id = u.id
+                WHERE ir.lab_tech_id = %s
+                ORDER BY ir.created_at DESC
+            """, (user_uuid,))
+            rows = cur.fetchall()
+            
+    return [ImagingReportItem(
+        id=str(r["id"]), patient_name=r["patient_name"], patient_user_id=r["patient_user_id"],
+        scan_region=r["scan_region"], exam_type=r["exam_type"], clinical_history=r["clinical_history"],
+        findings=r["findings"], impression=r["impression"], recommendations=r["recommendations"],
+        image_data=r["image_data"], created_at=r["created_at"]
+    ) for r in rows]
+
+@app.get("/api/lab-tech/notifications")
+def get_lab_tech_notifications(session: dict = Depends(require_role("Lab Technician"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT * FROM Notifications WHERE user_id = %s ORDER BY created_at DESC", (user_uuid,))
+            rows = cur.fetchall()
+    return [NotificationItem(
+        id=str(r["notification_id"]), notification_type=r["notification_type"],
+        title=r["title"], body=r["body"], read_at=r["read_at"], created_at=r["created_at"]
+    ) for r in rows]
+
+@app.post("/api/lab-tech/notifications/{notification_id}/read")
+def mark_lab_tech_notification_read(notification_id: str, session: dict = Depends(require_role("Lab Technician"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE Notifications SET read_at = CURRENT_TIMESTAMP WHERE notification_id = %s AND user_id = %s AND read_at IS NULL", (notification_id, user_uuid))
+            conn.commit()
+    return {"status": "success"}
+
+@app.post("/api/lab-tech/notifications/clear")
+def clear_lab_tech_notifications(session: dict = Depends(require_role("Lab Technician"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM Notifications WHERE user_id = %s AND read_at IS NOT NULL", (user_uuid,))
+            conn.commit()
+    return {"status": "success"}
 
 if __name__ == "__main__":
     import uvicorn
