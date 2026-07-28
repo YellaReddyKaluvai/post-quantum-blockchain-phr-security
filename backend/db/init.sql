@@ -274,6 +274,51 @@ CREATE TABLE IF NOT EXISTS MedicalDocuments (
 
 CREATE INDEX IF NOT EXISTS idx_medicaldocuments_doctor ON MedicalDocuments(doctor_id);
 CREATE INDEX IF NOT EXISTS idx_medicaldocuments_patient ON MedicalDocuments(patient_id);
+    
+DO $$ BEGIN
+    CREATE TYPE lab_request_priority AS ENUM ('Routine', 'Urgent', 'Emergency');
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE lab_request_status AS ENUM ('Pending', 'Accepted', 'In Progress', 'Completed');
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+CREATE TABLE IF NOT EXISTS LabTestRequests (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    doctor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    test_name VARCHAR(255) NOT NULL,
+    priority lab_request_priority NOT NULL DEFAULT 'Routine',
+    status lab_request_status NOT NULL DEFAULT 'Pending',
+    clinical_notes TEXT,
+    requested_date TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS ImagingReports (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    lab_tech_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    scan_region VARCHAR(100) NOT NULL,
+    exam_type VARCHAR(100) NOT NULL,
+    clinical_history TEXT,
+    findings TEXT,
+    impression TEXT,
+    recommendations TEXT,
+    image_data TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS structured_data JSONB;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS document_hash VARCHAR(64);
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS encrypted_aes_key TEXT;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS digital_signature TEXT;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS blockchain_tx_hash VARCHAR(66);
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS lab_tech_id UUID REFERENCES Users(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_labtestrequests_patient ON LabTestRequests(patient_id);
+CREATE INDEX IF NOT EXISTS idx_labtestrequests_status ON LabTestRequests(status);
+CREATE INDEX IF NOT EXISTS idx_imagingreports_patient ON ImagingReports(patient_id);
 
 CREATE INDEX IF NOT EXISTS idx_diagnoses_patient ON Diagnoses(patient_id);
 CREATE INDEX IF NOT EXISTS idx_labreports_patient ON LabReports(patient_id);

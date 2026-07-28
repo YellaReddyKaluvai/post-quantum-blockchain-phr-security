@@ -353,3 +353,103 @@ export async function clearDoctorNotifications() {
   if (!response.ok) throw new Error("Failed to clear notifications");
   return response.json();
 }
+
+// ─── Lab Technician API Functions ───────────────────────────────────────────
+
+export async function getLabTechProfile() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/profile`);
+  if (!response.ok) throw new Error("Failed to fetch lab tech profile");
+  return response.json();
+}
+
+export async function getLabTechDashboardSummary() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/dashboard/summary`);
+  if (!response.ok) throw new Error("Failed to fetch lab dashboard summary");
+  return response.json();
+}
+
+export async function getLabTestRequests() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/requests`);
+  if (!response.ok) throw new Error("Failed to fetch lab test requests");
+  return response.json();
+}
+
+export async function updateLabTestRequestStatus(id: string, status: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/requests/${id}/status`, {
+    method: "POST",
+    body: JSON.stringify({ status })
+  });
+  if (!response.ok) throw new Error("Failed to update test request status");
+  return response.json();
+}
+
+export async function createLabTestRequest(data: any) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/requests`, {
+    method: "POST",
+    body: JSON.stringify(data)
+  });
+  if (!response.ok) throw new Error("Failed to create lab test request");
+  return response.json();
+}
+
+export async function searchPatientsForLab(query: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/patients/search?q=${encodeURIComponent(query)}`);
+  if (!response.ok) throw new Error("Failed to search patients");
+  return response.json();
+}
+
+export async function createStructuredLabReport(data: any) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/reports/create`, {
+    method: "POST",
+    body: JSON.stringify(data)
+  });
+  if (!response.ok) throw new Error("Failed to create structured lab report");
+  return response.json();
+}
+
+export async function getLabTechReports() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/reports`);
+  if (!response.ok) throw new Error("Failed to fetch lab reports");
+  return response.json();
+}
+
+export async function getLabTechReportDetail(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/reports/${id}`);
+  if (!response.ok) throw new Error("Failed to fetch lab report details");
+  return response.json();
+}
+
+export async function uploadImagingReport(data: any) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/imaging/upload`, {
+    method: "POST",
+    body: JSON.stringify(data)
+  });
+  if (!response.ok) throw new Error("Failed to upload imaging report");
+  return response.json();
+}
+
+export async function getImagingReports() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/imaging`);
+  if (!response.ok) throw new Error("Failed to fetch imaging reports");
+  return response.json();
+}
+
+export async function getLabTechNotifications() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/notifications`);
+  if (!response.ok) throw new Error("Failed to fetch notifications");
+  return response.json();
+}
+
+export async function markLabNotificationRead(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/notifications/${id}/read`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to mark notification as read");
+  return response.json();
+}
+
+export async function clearLabNotifications() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/notifications/clear`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to clear notifications");
+  return response.json();
+}
+
+

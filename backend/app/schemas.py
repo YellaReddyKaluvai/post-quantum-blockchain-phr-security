@@ -288,3 +288,73 @@ class DoctorAppointmentItem(BaseModel):
     appointment_time: Optional[str] = None
     status: str
     notes: Optional[str] = None
+
+class LabTechProfile(BaseModel):
+    id: str
+    user_id: Optional[str] = None
+    full_name: str
+    email: str
+    role: str
+    gender: str
+    department: Optional[str] = "Central Laboratory"
+    reports_generated: int = 0
+    status: str
+    created_at: Optional[datetime] = None
+
+class LabTechDashboardSummary(BaseModel):
+    tests_assigned_today: int = 0
+    reports_generated_today: int = 0
+    pending_test_requests: int = 0
+    reports_shared: int = 0
+    reports_awaiting_review: int = 0
+    recent_activities: list = []
+
+class LabTestRequestItem(BaseModel):
+    id: str
+    patient_id: str
+    patient_name: Optional[str] = None
+    patient_user_id: Optional[str] = None
+    doctor_name: Optional[str] = None
+    test_name: str
+    priority: str
+    status: str
+    clinical_notes: Optional[str] = None
+    requested_date: Optional[datetime] = None
+
+class CreateLabTestRequest(BaseModel):
+    patient_id: str
+    test_name: str
+    priority: str = "Routine"
+    clinical_notes: Optional[str] = None
+
+class CreateStructuredLabReportRequest(BaseModel):
+    patient_id: str
+    report_name: str
+    report_type: str  # CBC, Blood Sugar, Urine Test, Liver Function, ECG, Imaging Report, Other
+    findings: Optional[str] = None
+    normal_range: Optional[str] = None
+    structured_data: dict = {}
+    remarks: Optional[str] = None
+
+class CreateImagingReportRequest(BaseModel):
+    patient_id: str
+    scan_region: str
+    exam_type: str  # MRI, X-Ray, CT Scan, Ultrasound
+    clinical_history: Optional[str] = None
+    findings: Optional[str] = None
+    impression: Optional[str] = None
+    recommendations: Optional[str] = None
+    image_data: Optional[str] = None
+
+class ImagingReportItem(BaseModel):
+    id: str
+    patient_name: Optional[str] = None
+    patient_user_id: Optional[str] = None
+    scan_region: str
+    exam_type: str
+    clinical_history: Optional[str] = None
+    findings: Optional[str] = None
+    impression: Optional[str] = None
+    recommendations: Optional[str] = None
+    image_data: Optional[str] = None
+    created_at: Optional[datetime] = None
