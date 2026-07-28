@@ -50,12 +50,14 @@ export default function LabTechnicianDashboard() {
   }
 
   const statCards = [
-    { label: "Tests Assigned Today", value: summary.testsAssigned, icon: FlaskConical, color: "text-cyan-600", bg: "bg-cyan-50" },
-    { label: "Reports Generated", value: summary.reportsGenerated, icon: FileText, color: "text-emerald-600", bg: "bg-emerald-50" },
-    { label: "Pending Requests", value: summary.pendingRequests, icon: ClipboardList, color: "text-amber-600", bg: "bg-amber-50" },
-    { label: "Reports Shared", value: summary.reportsShared, icon: Share2, color: "text-blue-600", bg: "bg-blue-50" },
-    { label: "Awaiting Review", value: summary.awaitingReview, icon: AlertCircle, color: "text-rose-600", bg: "bg-rose-50" },
+    { label: "Tests Assigned Today", value: summary?.tests_assigned_today ?? summary?.testsAssigned ?? 0, icon: FlaskConical, color: "text-cyan-600", bg: "bg-cyan-50" },
+    { label: "Reports Generated", value: summary?.reports_generated_today ?? summary?.reportsGenerated ?? 0, icon: FileText, color: "text-emerald-600", bg: "bg-emerald-50" },
+    { label: "Pending Requests", value: summary?.pending_test_requests ?? summary?.pendingRequests ?? 0, icon: ClipboardList, color: "text-amber-600", bg: "bg-amber-50" },
+    { label: "Reports Shared", value: summary?.reports_shared ?? summary?.reportsShared ?? 0, icon: Share2, color: "text-blue-600", bg: "bg-blue-50" },
+    { label: "Awaiting Review", value: summary?.reports_awaiting_review ?? summary?.awaitingReview ?? 0, icon: AlertCircle, color: "text-rose-600", bg: "bg-rose-50" },
   ];
+
+  const activitiesList = summary?.recent_activities ?? summary?.recentActivity ?? [];
 
   return (
     <div className="space-y-8">
@@ -97,24 +99,30 @@ export default function LabTechnicianDashboard() {
         </div>
         <div className="p-6">
           <div className="space-y-6">
-            {summary.recentActivity.map((activity: any, idx: number) => (
-              <div key={idx} className="flex gap-4">
-                <div className="flex flex-col items-center">
-                  <div className={`w-3 h-3 rounded-full mt-1.5 ${
-                    activity.type === 'success' ? 'bg-emerald-400' :
-                    activity.type === 'warning' ? 'bg-amber-400' :
-                    'bg-cyan-400'
-                  }`} />
-                  {idx !== summary.recentActivity.length - 1 && (
-                    <div className="w-0.5 h-full bg-slate-100 mt-2" />
-                  )}
+            {activitiesList.length === 0 ? (
+              <p className="text-sm text-slate-500">No recent activity found.</p>
+            ) : (
+              activitiesList.map((activity: any, idx: number) => (
+                <div key={idx} className="flex gap-4">
+                  <div className="flex flex-col items-center">
+                    <div className={`w-3 h-3 rounded-full mt-1.5 ${
+                      activity.type === 'success' ? 'bg-emerald-400' :
+                      activity.type === 'warning' ? 'bg-amber-400' :
+                      'bg-cyan-400'
+                    }`} />
+                    {idx !== activitiesList.length - 1 && (
+                      <div className="w-0.5 h-full bg-slate-100 mt-2" />
+                    )}
+                  </div>
+                  <div className="pb-6">
+                    <p className="text-sm font-medium text-slate-800">{activity.title || activity.action}</p>
+                    <p className="text-xs text-slate-500 mt-1">
+                      {activity.body || activity.time || (activity.created_at ? new Date(activity.created_at).toLocaleString() : "")}
+                    </p>
+                  </div>
                 </div>
-                <div className="pb-6">
-                  <p className="text-sm font-medium text-slate-800">{activity.action}</p>
-                  <p className="text-xs text-slate-500 mt-1">{activity.time}</p>
-                </div>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </div>
       </motion.div>

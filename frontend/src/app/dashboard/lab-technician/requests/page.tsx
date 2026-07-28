@@ -52,11 +52,14 @@ export default function RequestsPage() {
     return "bg-slate-100 text-slate-700 border-slate-200";
   };
 
-  const filteredRequests = requests.filter(req => 
-    req.patientName.toLowerCase().includes(searchTerm.toLowerCase()) || 
-    req.patientId.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    req.testName.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const filteredRequests = requests.filter(req => {
+    const pName = req.patient_name || req.patientName || "";
+    const pId = req.patient_user_id || req.patientId || "";
+    const tName = req.test_name || req.testName || "";
+    return pName.toLowerCase().includes(searchTerm.toLowerCase()) || 
+           pId.toLowerCase().includes(searchTerm.toLowerCase()) ||
+           tName.toLowerCase().includes(searchTerm.toLowerCase());
+  });
 
   return (
     <div className="space-y-6">
@@ -123,15 +126,17 @@ export default function RequestsPage() {
                     className="hover:bg-slate-50/50 transition-colors group"
                   >
                     <td className="px-6 py-4">
-                      <p className="font-semibold text-slate-800">{req.patientName}</p>
-                      <p className="text-xs text-slate-500">{req.patientId}</p>
+                      <p className="font-semibold text-slate-800">{req.patient_name || req.patientName || "Patient"}</p>
+                      <p className="text-xs text-slate-500">{req.patient_user_id || req.patientId || req.patient_id}</p>
                     </td>
                     <td className="px-6 py-4">
-                      <p className="text-sm font-medium text-slate-700">{req.doctorName}</p>
+                      <p className="text-sm font-medium text-slate-700">{req.doctor_name || req.doctorName || "Dr. Unassigned"}</p>
                     </td>
                     <td className="px-6 py-4">
-                      <p className="text-sm font-semibold text-slate-800">{req.testName}</p>
-                      <p className="text-xs text-slate-500">{req.date}</p>
+                      <p className="text-sm font-semibold text-slate-800">{req.test_name || req.testName}</p>
+                      <p className="text-xs text-slate-500">
+                        {req.requested_date ? new Date(req.requested_date).toLocaleDateString() : req.date}
+                      </p>
                     </td>
                     <td className="px-6 py-4">
                       <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${getPriorityColor(req.priority)}`}>

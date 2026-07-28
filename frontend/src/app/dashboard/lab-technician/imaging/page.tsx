@@ -80,11 +80,11 @@ export default function ImagingReportsPage() {
             >
               <div className="flex border-b border-slate-100">
                 <div className="w-1/3 relative bg-slate-900 overflow-hidden flex items-center justify-center min-h-[200px]">
-                  {report.imageUrl ? (
+                  {(report.image_data || report.imageUrl) ? (
                     <>
-                      <img src={report.imageUrl} alt="Scan" className="w-full h-full object-cover opacity-80 mix-blend-screen" />
+                      <img src={report.image_data || report.imageUrl} alt="Scan" className="w-full h-full object-cover opacity-80 mix-blend-screen" />
                       <button 
-                        onClick={() => setSelectedImage(report.imageUrl)}
+                        onClick={() => setSelectedImage(report.image_data || report.imageUrl)}
                         className="absolute inset-0 bg-black/40 flex flex-col items-center justify-center opacity-0 hover:opacity-100 transition-opacity"
                       >
                         <ZoomIn className="w-8 h-8 text-white mb-2" />
@@ -100,13 +100,20 @@ export default function ImagingReportsPage() {
                     <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-100 text-cyan-700">
                       {report.id}
                     </span>
-                    <span className="text-xs font-semibold text-slate-500">{report.date}</span>
+                    <span className="text-xs font-semibold text-slate-500">
+                      {report.created_at ? new Date(report.created_at).toLocaleDateString() : report.date}
+                    </span>
                   </div>
-                  <h3 className="text-base font-bold text-slate-800">{report.patientName} <span className="text-xs font-normal text-slate-500">({report.patientId})</span></h3>
-                  <p className="text-sm font-medium text-cyan-600 mt-1">{report.examType}</p>
+                  <h3 className="text-base font-bold text-slate-800">
+                    {report.patient_name || report.patientName || "Patient"}{" "}
+                    <span className="text-xs font-normal text-slate-500">
+                      ({report.patient_user_id || report.patientId || ""})
+                    </span>
+                  </h3>
+                  <p className="text-sm font-medium text-cyan-600 mt-1">{report.exam_type || report.examType}</p>
                   <div className="mt-3 flex items-center gap-2 text-xs text-slate-600">
                     <Activity className="w-4 h-4 text-slate-400" />
-                    <span>Region: <span className="font-semibold">{report.scanRegion}</span></span>
+                    <span>Region: <span className="font-semibold">{report.scan_region || report.scanRegion}</span></span>
                   </div>
                 </div>
               </div>
@@ -114,7 +121,7 @@ export default function ImagingReportsPage() {
               <div className="p-4 space-y-3 flex-1">
                 <div>
                   <h4 className="text-xs font-bold text-slate-700 mb-1">Clinical History</h4>
-                  <p className="text-sm text-slate-600">{report.history}</p>
+                  <p className="text-sm text-slate-600">{report.clinical_history || report.history}</p>
                 </div>
                 <div>
                   <h4 className="text-xs font-bold text-slate-700 mb-1">Findings</h4>

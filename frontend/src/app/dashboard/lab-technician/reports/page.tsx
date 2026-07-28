@@ -30,11 +30,14 @@ export default function ReportsPage() {
     fetchReports();
   }, []);
 
-  const filteredReports = reports.filter(r => 
-    r.patientName.toLowerCase().includes(searchTerm.toLowerCase()) || 
-    r.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    r.type.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const filteredReports = reports.filter(r => {
+    const pName = r.uploaded_by_name || r.patient_name || r.patientName || "";
+    const rId = r.id || r.report_id_public || "";
+    const rType = r.report_type || r.type || "";
+    return pName.toLowerCase().includes(searchTerm.toLowerCase()) || 
+           rId.toLowerCase().includes(searchTerm.toLowerCase()) ||
+           rType.toLowerCase().includes(searchTerm.toLowerCase());
+  });
 
   return (
     <div className="space-y-6">
@@ -91,18 +94,20 @@ export default function ReportsPage() {
                 <div className="flex justify-between items-start mb-4">
                   <div>
                     <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600 mb-2">
-                      {report.id}
+                      {report.report_id_public || report.id}
                     </span>
-                    <h3 className="text-base font-bold text-slate-800">{report.patientName}</h3>
-                    <p className="text-sm font-medium text-cyan-600">{report.type}</p>
+                    <h3 className="text-base font-bold text-slate-800">
+                      {report.uploaded_by_name || report.patient_name || report.patientName || "Patient"}
+                    </h3>
+                    <p className="text-sm font-medium text-cyan-600">{report.report_type || report.type}</p>
                   </div>
-                  <div className={`p-2 rounded-xl ${report.status === 'Verified' ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>
-                    {report.status === 'Verified' ? <CheckCircle className="w-5 h-5" /> : <Clock className="w-5 h-5" />}
+                  <div className={`p-2 rounded-xl ${report.status === 'Completed' || report.status === 'Verified' ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>
+                    {report.status === 'Completed' || report.status === 'Verified' ? <CheckCircle className="w-5 h-5" /> : <Clock className="w-5 h-5" />}
                   </div>
                 </div>
 
                 <div className="text-xs text-slate-500 mb-4 flex-1">
-                  <p>Uploaded: {report.date}</p>
+                  <p>Uploaded: {report.upload_date ? new Date(report.upload_date).toLocaleString() : report.date}</p>
                   <p className="mt-1">Status: <span className="font-semibold text-slate-700">{report.status}</span></p>
                 </div>
 
