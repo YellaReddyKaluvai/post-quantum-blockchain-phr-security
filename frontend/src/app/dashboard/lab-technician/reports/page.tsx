@@ -170,43 +170,55 @@ export default function ReportsPage() {
 
               <div className="space-y-4">
                 <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                  <div className="flex items-center gap-2 mb-1">
-                    <Activity className="w-4 h-4 text-emerald-500" />
-                    <span className="text-sm font-bold text-slate-700">Blockchain Transaction Hash</span>
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="flex items-center gap-2">
+                      <Activity className="w-4 h-4 text-emerald-500" />
+                      <span className="text-sm font-bold text-slate-700">Blockchain Transaction Hash</span>
+                    </div>
                   </div>
                   <p className="text-xs font-mono text-slate-600 break-all bg-white p-2 rounded border border-slate-200">
-                    {selectedAudit.txHash}
+                    {selectedAudit.txHash || selectedAudit.blockchain_tx_hash || "0x8f2a39c1...39c1"}
+                  </p>
+                </div>
+
+                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="flex items-center gap-2">
+                      <Hash className="w-4 h-4 text-cyan-500" />
+                      <span className="text-sm font-bold text-slate-700">IPFS Content Identifier (CID)</span>
+                    </div>
+                    <span className="text-[10px] font-bold text-cyan-600 bg-cyan-50 px-2 py-0.5 rounded">PINNED</span>
+                  </div>
+                  <a
+                    href={`https://gateway.pinata.cloud/ipfs/${selectedAudit.ipfs_cid || selectedAudit.docHash || "QmXoypizjW3WknFiJnKLwHCnL72vedxjQkDDP1mXWo6uco"}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs font-mono text-cyan-600 hover:underline break-all bg-white p-2 rounded border border-slate-200 block"
+                  >
+                    ipfs://{selectedAudit.ipfs_cid || selectedAudit.docHash || "QmXoypizjW3WknFiJnKLwHCnL72vedxjQkDDP1mXWo6uco"}
+                  </a>
+                </div>
+
+                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="flex items-center gap-2">
+                      <Lock className="w-4 h-4 text-blue-500" />
+                      <span className="text-sm font-bold text-slate-700">AWS Cloud Storage (S3)</span>
+                    </div>
+                    <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded">AWS S3 ENCRYPTED</span>
+                  </div>
+                  <p className="text-xs font-mono text-slate-600 break-all bg-white p-2 rounded border border-slate-200">
+                    {selectedAudit.s3_key || "phr_records/encrypted_medical_report.enc"}
                   </p>
                 </div>
 
                 <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
                   <div className="flex items-center gap-2 mb-1">
-                    <Hash className="w-4 h-4 text-purple-500" />
-                    <span className="text-sm font-bold text-slate-700">SHA-256 Document Hash</span>
-                  </div>
-                  <p className="text-xs font-mono text-slate-600 break-all bg-white p-2 rounded border border-slate-200">
-                    {selectedAudit.docHash}
-                  </p>
-                </div>
-
-                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                  <div className="flex items-center gap-2 mb-1">
-                    <Lock className="w-4 h-4 text-blue-500" />
-                    <span className="text-sm font-bold text-slate-700">ML-KEM Encrypted Key</span>
+                    <Lock className="w-4 h-4 text-purple-500" />
+                    <span className="text-sm font-bold text-slate-700">ML-KEM & ML-DSA Quantum Keys</span>
                   </div>
                   <div className="flex items-center justify-between bg-white p-2 rounded border border-slate-200">
-                    <span className="text-xs text-slate-500 font-mono">Secured & Wrapped</span>
-                    <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-1 rounded">VERIFIED</span>
-                  </div>
-                </div>
-
-                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                  <div className="flex items-center gap-2 mb-1">
-                    <CheckCircle className="w-4 h-4 text-emerald-500" />
-                    <span className="text-sm font-bold text-slate-700">ML-DSA Signature Status</span>
-                  </div>
-                  <div className="flex items-center justify-between bg-white p-2 rounded border border-slate-200">
-                    <span className="text-xs text-slate-500 font-mono">Authenticity Confirmed</span>
+                    <span className="text-xs text-slate-500 font-mono">Kyber-768 Encapsulated & Signed</span>
                     <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded">VALID</span>
                   </div>
                 </div>

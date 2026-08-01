@@ -350,3 +350,14 @@ CREATE TABLE IF NOT EXISTS EmailNotifications (
 CREATE INDEX IF NOT EXISTS idx_email_notifications_user ON EmailNotifications(user_id);
 CREATE INDEX IF NOT EXISTS idx_email_notifications_status ON EmailNotifications(sent_status);
 
+-- IPFS & AWS S3 Cloud Storage Columns
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS ipfs_cid VARCHAR(255);
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS s3_key VARCHAR(512);
+
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS ipfs_cid VARCHAR(255);
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS s3_key VARCHAR(512);
+
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS ipfs_cid VARCHAR(255);
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS s3_key VARCHAR(512);
+
+

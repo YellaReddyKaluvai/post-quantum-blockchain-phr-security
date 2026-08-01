@@ -20,6 +20,13 @@ class Settings(BaseModel):
     access_token_minutes: int = int(os.getenv("ACCESS_TOKEN_MINUTES", "30"))
     refresh_token_days: int = int(os.getenv("REFRESH_TOKEN_DAYS", "14"))
 
+    AWS_ACCESS_KEY_ID: str = os.getenv("AWS_ACCESS_KEY_ID", "AKIA_MOCK_QUANTUMCARE_AWS_KEY")
+    AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY", "mock_aws_secret_key_quantumcare_pqc")
+    AWS_REGION: str = os.getenv("AWS_REGION", "ap-south-1")
+    AWS_S3_BUCKET: str = os.getenv("AWS_S3_BUCKET", "quantumcare-pqc-phr-storage")
+    IPFS_GATEWAY_URL: str = os.getenv("IPFS_GATEWAY_URL", "https://gateway.pinata.cloud/ipfs/")
+    IPFS_PINNING_API_KEY: str = os.getenv("IPFS_PINNING_API_KEY", "")
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings()

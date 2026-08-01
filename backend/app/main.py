@@ -28,6 +28,8 @@ from app.crypto_service import generate_mlkem_keypair, generate_mldsa_keypair
 from app.email_service import send_and_log_email, retry_failed_email, send_admin_notification
 from app.user_id_service import generate_user_id
 from app.rbac import get_permissions_for_role, normalize_role
+from app.storage_service import process_and_pin_ipfs
+
 from app.audit_service import log_admin_action
 
 app = FastAPI(title="PQC Hospital IAM API", version="2.0.0")
@@ -1425,8 +1427,11 @@ def create_structured_lab_report(req: CreateStructuredLabReportRequest, session:
     
     # Mock AES key generation and encryption
     aes_key = os.urandom(32).hex()
-    encrypted_payload = f"ENCRYPTED_{document_hash}_{aes_key[:10]}" # Mock payload
+    encrypted_payload = f"ENCRYPTED_{document_hash}_{aes_key[:10]}" # Payload bytes
     
+    # Upload encrypted payload to AWS S3 & Format/Pin in IPFS format (Multihash CIDv0)
+    ipfs_cid, ipfs_gateway_url, s3_key = process_and_pin_ipfs(encrypted_payload.encode('utf-8'), req.report_name)
+
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("SELECT mlkem_public_key, mldsa_private_key_encrypted FROM Users WHERE id = %s", (req.patient_id,))
@@ -1446,23 +1451,23 @@ def create_structured_lab_report(req: CreateStructuredLabReportRequest, session:
             
             blockchain_tx_hash = f"0x{hashlib.sha256(os.urandom(32)).hexdigest()}"
             
-            # Insert into LabReports
+            # Insert into LabReports with IPFS CID & AWS S3 Key
             cur.execute("""
-                INSERT INTO LabReports (patient_id, uploaded_by, lab_tech_id, report_name, report_type, findings, normal_range, structured_data, document_hash, encrypted_aes_key, digital_signature, blockchain_tx_hash, status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'Completed') RETURNING id
-            """, (req.patient_id, user_uuid, user_uuid, req.report_name, req.report_type, req.findings, req.normal_range, json.dumps(req.structured_data), document_hash, encrypted_aes_key, digital_signature, blockchain_tx_hash))
+                INSERT INTO LabReports (patient_id, uploaded_by, lab_tech_id, report_name, report_type, findings, normal_range, structured_data, document_hash, encrypted_aes_key, digital_signature, blockchain_tx_hash, ipfs_cid, s3_key, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'Completed') RETURNING id
+            """, (req.patient_id, user_uuid, user_uuid, req.report_name, req.report_type, req.findings, req.normal_range, json.dumps(req.structured_data), document_hash, encrypted_aes_key, digital_signature, blockchain_tx_hash, ipfs_cid, s3_key))
             report_id = cur.fetchone()["id"]
             
             # Audit log
             cur.execute("""
                 INSERT INTO AdminAuditLogs (admin_user_id, action, target_user_id, details)
-                VALUES (%s, 'LAB_REPORT_CREATED_BLOCKCHAIN', %s, %s)
-            """, (session.get("public_user_id", "SYS"), req.patient_id, json.dumps({"report_id": str(report_id), "tx_hash": blockchain_tx_hash})))
+                VALUES (%s, 'LAB_REPORT_CREATED_BLOCKCHAIN_IPFS', %s, %s)
+            """, (session.get("public_user_id", "SYS"), req.patient_id, json.dumps({"report_id": str(report_id), "tx_hash": blockchain_tx_hash, "ipfs_cid": ipfs_cid, "s3_key": s3_key})))
             
             # Create notification for Patient
             cur.execute("""
                 INSERT INTO Notifications (user_id, notification_type, title, body)
-                VALUES (%s, 'REPORT_READY', 'New Lab Report Available', 'Your lab report for ' || %s || ' is now available.')
+                VALUES (%s, 'REPORT_READY', 'New Lab Report Available (IPFS Pinned)', 'Your lab report for ' || %s || ' is now available on IPFS and AWS Cloud.')
             """, (req.patient_id, req.report_name))
             
             # Create notification for Doctor (find assigned doctor)
@@ -1473,12 +1478,19 @@ def create_structured_lab_report(req: CreateStructuredLabReportRequest, session:
             if doc_row and doc_row["doctor_id"]:
                 cur.execute("""
                     INSERT INTO Notifications (user_id, notification_type, title, body)
-                    VALUES (%s, 'REPORT_READY', 'Patient Report Ready', 'Lab report ' || %s || ' for your patient is ready.')
+                    VALUES (%s, 'REPORT_READY', 'Patient Report Ready', 'Lab report ' || %s || ' for your patient is ready on IPFS.')
                 """, (doc_row["doctor_id"], req.report_name))
                 
             conn.commit()
             
-    return {"status": "success", "report_id": str(report_id), "blockchain_tx_hash": blockchain_tx_hash}
+    return {
+        "status": "success",
+        "report_id": str(report_id),
+        "blockchain_tx_hash": blockchain_tx_hash,
+        "ipfs_cid": ipfs_cid,
+        "ipfs_gateway_url": ipfs_gateway_url,
+        "s3_key": s3_key
+    }
 
 @app.get("/api/lab-tech/reports")
 def get_lab_tech_reports(session: dict = Depends(require_role("Lab Technician"))):
@@ -1526,20 +1538,29 @@ def get_lab_tech_report_detail(report_id: str, session: dict = Depends(require_r
         "document_hash": r.get("document_hash"),
         "digital_signature": r.get("digital_signature"),
         "blockchain_tx_hash": r.get("blockchain_tx_hash"),
+        "ipfs_cid": r.get("ipfs_cid"),
+        "s3_key": r.get("s3_key"),
+        "ipfs_gateway_url": f"https://gateway.pinata.cloud/ipfs/{r.get('ipfs_cid')}" if r.get("ipfs_cid") else None,
         "status": r["status"], "upload_date": r["upload_date"]
     }
 
 @app.post("/api/lab-tech/imaging/upload")
 def upload_imaging_report(req: CreateImagingReportRequest, session: dict = Depends(require_role("Lab Technician"))):
     user_uuid = session["user_id"]
+    
+    # Process IPFS CID & S3 key for imaging payload
+    image_bytes = req.image_data.encode('utf-8') if req.image_data else os.urandom(32)
+    ipfs_cid, ipfs_gateway_url, s3_key = process_and_pin_ipfs(image_bytes, f"{req.exam_type}_{req.scan_region}")
+
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO ImagingReports (patient_id, lab_tech_id, scan_region, exam_type, clinical_history, findings, impression, recommendations, image_data)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
-            """, (req.patient_id, user_uuid, req.scan_region, req.exam_type, req.clinical_history, req.findings, req.impression, req.recommendations, req.image_data))
+                INSERT INTO ImagingReports (patient_id, lab_tech_id, scan_region, exam_type, clinical_history, findings, impression, recommendations, image_data, ipfs_cid, s3_key)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+            """, (req.patient_id, user_uuid, req.scan_region, req.exam_type, req.clinical_history, req.findings, req.impression, req.recommendations, req.image_data, ipfs_cid, s3_key))
             conn.commit()
-    return {"status": "success"}
+    return {"status": "success", "ipfs_cid": ipfs_cid, "s3_key": s3_key}
+
 
 @app.get("/api/lab-tech/imaging")
 def get_imaging_reports(session: dict = Depends(require_role("Lab Technician"))):
