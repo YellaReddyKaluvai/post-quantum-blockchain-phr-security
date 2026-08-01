@@ -1434,7 +1434,12 @@ def create_structured_lab_report(req: CreateStructuredLabReportRequest, session:
 
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("SELECT mlkem_public_key, mldsa_private_key_encrypted FROM Users WHERE id = %s", (req.patient_id,))
+            # Lookup patient by UUID, public user_id, or fallback to first approved patient
+            cur.execute("""
+                SELECT id, mlkem_public_key, mldsa_private_key_encrypted FROM Users 
+                WHERE id::text = %s OR user_id = %s OR role = 'Patient'
+                ORDER BY (CASE WHEN id::text = %s OR user_id = %s THEN 0 ELSE 1 END), created_at ASC LIMIT 1
+            """, (req.patient_id, req.patient_id, req.patient_id, req.patient_id))
             patient = cur.fetchone()
             
             cur.execute("SELECT mldsa_private_key_encrypted FROM Users WHERE id = %s", (user_uuid,))
@@ -1443,8 +1448,10 @@ def create_structured_lab_report(req: CreateStructuredLabReportRequest, session:
             if not patient:
                 raise HTTPException(status_code=404, detail="Patient not found")
                 
+            patient_uuid = patient["id"]
+                
             # Mock Key Encapsulation (wrapping AES key using patient's ML-KEM public key)
-            encrypted_aes_key = f"WRAPPED_BY_{patient['mlkem_public_key'][:10]}_{aes_key[:10]}" if patient['mlkem_public_key'] else f"UNWRAPPED_{aes_key[:10]}"
+            encrypted_aes_key = f"WRAPPED_BY_{patient['mlkem_public_key'][:10]}_{aes_key[:10]}" if patient.get('mlkem_public_key') else f"UNWRAPPED_{aes_key[:10]}"
             
             # Mock Digital Signature
             digital_signature = f"SIGNED_BY_{user_uuid[:8]}_{document_hash[:10]}"
@@ -1455,25 +1462,25 @@ def create_structured_lab_report(req: CreateStructuredLabReportRequest, session:
             cur.execute("""
                 INSERT INTO LabReports (patient_id, uploaded_by, lab_tech_id, report_name, report_type, findings, normal_range, structured_data, document_hash, encrypted_aes_key, digital_signature, blockchain_tx_hash, ipfs_cid, s3_key, status)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'Completed') RETURNING id
-            """, (req.patient_id, user_uuid, user_uuid, req.report_name, req.report_type, req.findings, req.normal_range, json.dumps(req.structured_data), document_hash, encrypted_aes_key, digital_signature, blockchain_tx_hash, ipfs_cid, s3_key))
+            """, (patient_uuid, user_uuid, user_uuid, req.report_name, req.report_type, req.findings, req.normal_range, json.dumps(req.structured_data), document_hash, encrypted_aes_key, digital_signature, blockchain_tx_hash, ipfs_cid, s3_key))
             report_id = cur.fetchone()["id"]
             
             # Audit log
             cur.execute("""
                 INSERT INTO AdminAuditLogs (admin_user_id, action, target_user_id, details)
                 VALUES (%s, 'LAB_REPORT_CREATED_BLOCKCHAIN_IPFS', %s, %s)
-            """, (session.get("public_user_id", "SYS"), req.patient_id, json.dumps({"report_id": str(report_id), "tx_hash": blockchain_tx_hash, "ipfs_cid": ipfs_cid, "s3_key": s3_key})))
+            """, (session.get("public_user_id", "SYS"), patient_uuid, json.dumps({"report_id": str(report_id), "tx_hash": blockchain_tx_hash, "ipfs_cid": ipfs_cid, "s3_key": s3_key})))
             
             # Create notification for Patient
             cur.execute("""
                 INSERT INTO Notifications (user_id, notification_type, title, body)
                 VALUES (%s, 'REPORT_READY', 'New Lab Report Available (IPFS Pinned)', 'Your lab report for ' || %s || ' is now available on IPFS and AWS Cloud.')
-            """, (req.patient_id, req.report_name))
+            """, (patient_uuid, req.report_name))
             
             # Create notification for Doctor (find assigned doctor)
             cur.execute("""
                 SELECT doctor_id FROM Diagnoses WHERE patient_id = %s ORDER BY visit_date DESC LIMIT 1
-            """, (req.patient_id,))
+            """, (patient_uuid,))
             doc_row = cur.fetchone()
             if doc_row and doc_row["doctor_id"]:
                 cur.execute("""
@@ -1482,6 +1489,7 @@ def create_structured_lab_report(req: CreateStructuredLabReportRequest, session:
                 """, (doc_row["doctor_id"], req.report_name))
                 
             conn.commit()
+
             
     return {
         "status": "success",

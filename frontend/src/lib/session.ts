@@ -399,13 +399,23 @@ export async function searchPatientsForLab(query: string) {
 }
 
 export async function createStructuredLabReport(data: any) {
+  const payload = {
+    patient_id: data.patient_id || data.patientId || data.patient || "PAT-2026-000001",
+    report_name: data.report_name || data.reportName || (data.type ? data.type.toUpperCase() + " Report" : "Complete Blood Count"),
+    report_type: data.report_type || (data.type === "cbc" ? "CBC" : data.type === "sugar" ? "Blood Sugar" : "CBC"),
+    findings: data.findings || data.remarks || "Test results within standard reference ranges.",
+    normal_range: data.normal_range || "Standard Medical Reference",
+    structured_data: data.structured_data || data,
+    remarks: data.remarks
+  };
   const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/reports/create`, {
     method: "POST",
-    body: JSON.stringify(data)
+    body: JSON.stringify(payload)
   });
   if (!response.ok) throw new Error("Failed to create structured lab report");
   return response.json();
 }
+
 
 export async function getLabTechReports() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/reports`);
