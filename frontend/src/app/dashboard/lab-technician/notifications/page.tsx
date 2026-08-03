@@ -5,8 +5,19 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Bell, CheckCircle2, Trash2, ShieldAlert, FileText, AlertCircle } from "lucide-react";
 import { getLabTechNotifications, markLabNotificationRead, clearLabNotifications } from "@/lib/session";
 
+interface LabTechNotifItem {
+  id: string;
+  type?: string;
+  title?: string;
+  message?: string;
+  time?: string;
+  read?: boolean;
+  [key: string]: unknown;
+}
+
 export default function NotificationsPage() {
-  const [notifications, setNotifications] = useState<any[]>([]);
+  const [notifications, setNotifications] = useState<LabTechNotifItem[]>([]);
+
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -14,7 +25,7 @@ export default function NotificationsPage() {
       try {
         const data = await getLabTechNotifications();
         setNotifications(data);
-      } catch (error) {
+      } catch {
         setNotifications([
           { id: "1", type: "system", title: "PQC Keys Updated", message: "Your quantum-secure keys have been successfully rotated.", time: "10 mins ago", read: false },
           { id: "2", type: "doctor", title: "Urgent Test Request", message: "Dr. Sarah Smith requested an urgent CBC for PAT-8821.", time: "1 hour ago", read: false },
@@ -31,7 +42,7 @@ export default function NotificationsPage() {
     try {
       await markLabNotificationRead(id);
       setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
-    } catch (e) {
+    } catch {
       setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
     }
   };
@@ -40,10 +51,11 @@ export default function NotificationsPage() {
     try {
       await clearLabNotifications();
       setNotifications([]);
-    } catch (e) {
+    } catch {
       setNotifications([]);
     }
   };
+
 
   const unreadCount = notifications.filter(n => !n.read).length;
 
@@ -85,13 +97,14 @@ export default function NotificationsPage() {
           <div className="p-12 text-center text-slate-500">
             <Bell className="w-12 h-12 mx-auto text-slate-300 mb-4" />
             <p className="text-lg font-medium text-slate-700">No Notifications</p>
-            <p className="text-sm mt-1">You're all caught up!</p>
+            <p className="text-sm mt-1">You&apos;re all caught up!</p>
           </div>
         ) : (
           <div className="divide-y divide-slate-100">
             <AnimatePresence>
-              {notifications.map((notification) => (
+              {notifications.map((notification: LabTechNotifItem) => (
                 <motion.div
+
                   key={notification.id}
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -99,7 +112,8 @@ export default function NotificationsPage() {
                   className={`p-4 flex gap-4 transition-colors ${notification.read ? 'bg-white' : 'bg-cyan-50/30'}`}
                 >
                   <div className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${notification.read ? 'bg-slate-100' : 'bg-white border border-cyan-100 shadow-sm'}`}>
-                    {getIcon(notification.type)}
+                    {getIcon(notification.type || "system")}
+
                   </div>
                   <div className="flex-1">
                     <div className="flex justify-between items-start mb-1">

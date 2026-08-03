@@ -7,7 +7,7 @@ import { getDoctorDashboardSummary } from "@/lib/session";
 
 export default function DoctorDashboard() {
   const [loading, setLoading] = useState(true);
-  const [data, setData] = useState<any>(null);
+  const [data, setData] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
     async function fetchData() {
@@ -36,19 +36,15 @@ export default function DoctorDashboard() {
     );
   }
 
-  const stats = data?.stats || {
-    assigned_patients: 0,
-    todays_appointments: 0,
-    pending_reports: 0,
-    recent_diagnoses: 0,
-  };
+  const stats = (data?.stats || {}) as Record<string, number>;
 
   const statCards = [
-    { label: "Assigned Patients", value: stats.assigned_patients, icon: Users, color: "text-blue-500", bg: "bg-blue-50" },
-    { label: "Today's Appointments", value: stats.todays_appointments, icon: Calendar, color: "text-indigo-500", bg: "bg-indigo-50" },
-    { label: "Pending Reports", value: stats.pending_reports, icon: FileText, color: "text-amber-500", bg: "bg-amber-50" },
-    { label: "Recent Diagnoses", value: stats.recent_diagnoses, icon: HeartPulse, color: "text-emerald-500", bg: "bg-emerald-50" },
+    { label: "Assigned Patients", value: stats.assigned_patients || 0, icon: Users, color: "text-blue-500", bg: "bg-blue-50" },
+    { label: "Today's Appointments", value: stats.todays_appointments || 0, icon: Calendar, color: "text-indigo-500", bg: "bg-indigo-50" },
+    { label: "Pending Reports", value: stats.pending_reports || 0, icon: FileText, color: "text-amber-500", bg: "bg-amber-50" },
+    { label: "Recent Diagnoses", value: stats.recent_diagnoses || 0, icon: HeartPulse, color: "text-emerald-500", bg: "bg-emerald-50" },
   ];
+
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
@@ -84,13 +80,14 @@ export default function DoctorDashboard() {
           <h2 className="text-lg font-bold text-slate-800">Recent Activities</h2>
         </div>
         <div className="space-y-4">
-          {data?.recent_activities?.length > 0 ? (
-            data.recent_activities.map((activity: any, i: number) => (
+          {((data?.recent_activities as Record<string, unknown>[])?.length > 0) ? (
+            ((data?.recent_activities || []) as Record<string, unknown>[]).map((act: Record<string, unknown>, i: number) => (
+
               <div key={i} className="flex items-start gap-4 pb-4 border-b border-slate-50 last:border-0">
                 <div className="w-2 h-2 mt-2 rounded-full bg-cyan-400" />
                 <div>
-                  <p className="text-sm font-medium text-slate-800">{activity.description}</p>
-                  <p className="text-xs text-slate-500">{new Date(activity.timestamp).toLocaleString()}</p>
+                  <p className="text-sm font-medium text-slate-800">{act.description as string}</p>
+                  <p className="text-xs text-slate-500">{new Date(act.timestamp as string).toLocaleString()}</p>
                 </div>
               </div>
             ))

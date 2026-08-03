@@ -5,9 +5,31 @@ import { motion } from "framer-motion";
 import { User, FileHeart, TestTubes, Calendar, Activity, Clock } from "lucide-react";
 import { getPatientDashboardSummary } from "@/lib/session";
 
+interface PatientActivityItem {
+  title?: string;
+  body?: string;
+  description?: string;
+  date?: string;
+  created_at?: string;
+  [key: string]: unknown;
+}
+
+interface PatientSummaryData {
+  full_name?: string;
+  patient_info?: { name?: string; user_id?: string; blood_group?: string; assigned_doctor?: string; [key: string]: unknown };
+  medical_summary?: { latest_diagnosis?: string; current_treatment?: string; latest_prescription?: string; [key: string]: unknown };
+  reports_summary?: { total_reports?: number; total?: number; latest_report?: string; pending_reports?: number; pending?: number; latest_report_date?: string; [key: string]: unknown };
+  appointments_summary?: { upcoming_appointment?: { date?: string; doctor?: string }; upcoming_date?: string; previous_visit?: { date?: string; doctor?: string }; previous_visit_date?: string; [key: string]: unknown };
+  recent_activities?: PatientActivityItem[];
+  [key: string]: unknown;
+}
+
+
+
+
 export default function PatientDashboardHome() {
   const [loading, setLoading] = useState(true);
-  const [data, setData] = useState<any>(null);
+  const [data, setData] = useState<PatientSummaryData | null>(null);
 
   useEffect(() => {
     async function loadData() {
@@ -144,9 +166,10 @@ export default function PatientDashboardHome() {
         
         {data?.recent_activities && data.recent_activities.length > 0 ? (
           <div className="space-y-6">
-            {data.recent_activities.map((activity: any, index: number) => (
+            {((data?.recent_activities || []) as PatientActivityItem[]).map((activity: PatientActivityItem, index: number) => (
+
               <div key={index} className="flex gap-4 relative">
-                {index !== data.recent_activities.length - 1 && (
+                {index !== (data?.recent_activities || []).length - 1 && (
                   <div className="absolute top-8 left-[11px] bottom-[-24px] w-0.5 bg-slate-100"></div>
                 )}
                 <div className="w-6 h-6 rounded-full bg-cyan-100 flex items-center justify-center flex-shrink-0 mt-0.5 relative z-10 border-2 border-white shadow-sm">
@@ -154,7 +177,8 @@ export default function PatientDashboardHome() {
                 </div>
                 <div>
                   <p className="text-sm font-medium text-slate-800">{activity.description}</p>
-                  <p className="text-xs text-slate-500 mt-1">{new Date(activity.date).toLocaleString()}</p>
+                  <p className="text-xs text-slate-500 mt-1">{new Date((activity.created_at || activity.date || Date.now()) as string | number | Date).toLocaleString()}</p>
+
                 </div>
               </div>
             ))}

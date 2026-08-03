@@ -5,9 +5,21 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Stethoscope, Calendar, ChevronDown, ChevronUp, User, Activity, FileText } from "lucide-react";
 import { getPatientConsultations } from "@/lib/session";
 
+interface ConsultationItem {
+  id: string;
+  doctor_name?: string;
+  specialization?: string;
+  date?: string;
+  symptoms?: string;
+  diagnosis_summary?: string;
+  doctor_notes?: string;
+  [key: string]: unknown;
+}
+
 export default function ConsultationsPage() {
   const [loading, setLoading] = useState(true);
-  const [consultations, setConsultations] = useState<any[]>([]);
+  const [consultations, setConsultations] = useState<ConsultationItem[]>([]);
+
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -52,7 +64,7 @@ export default function ConsultationsPage() {
         </div>
       ) : (
         <div className="space-y-4">
-          {consultations.map((consultation: any, index: number) => {
+          {consultations.map((consultation: ConsultationItem, index: number) => {
             const isExpanded = expandedId === consultation.id;
             return (
               <motion.div
@@ -79,7 +91,7 @@ export default function ConsultationsPage() {
                       </h3>
                       <div className="flex flex-wrap items-center gap-3 mt-1 text-sm font-medium text-slate-500">
                         <span className="px-2 py-0.5 bg-slate-100 rounded-md text-slate-600">{consultation.specialization}</span>
-                        <span className="flex items-center gap-1.5"><Calendar className="w-4 h-4" /> {new Date(consultation.date).toLocaleDateString()}</span>
+                        <span className="flex items-center gap-1.5"><Calendar className="w-4 h-4" /> {new Date(consultation.date || Date.now()).toLocaleDateString()}</span>
                       </div>
                     </div>
                   </div>
@@ -122,7 +134,7 @@ export default function ConsultationsPage() {
                           <div className="flex gap-4">
                             <User className="w-5 h-5 text-emerald-500 flex-shrink-0 mt-0.5" />
                             <div className="flex-1">
-                              <h4 className="text-sm font-bold text-slate-700 uppercase tracking-wide mb-1">Doctor's Notes</h4>
+                              <h4 className="text-sm font-bold text-slate-700 uppercase tracking-wide mb-1">Doctor&apos;s Notes</h4>
                               <p className="text-sm text-slate-600 bg-white p-3.5 rounded-xl border border-emerald-100 shadow-sm whitespace-pre-wrap">{consultation.doctor_notes}</p>
                             </div>
                           </div>
@@ -133,6 +145,7 @@ export default function ConsultationsPage() {
                 </AnimatePresence>
               </motion.div>
             );
+
           })}
         </div>
       )}

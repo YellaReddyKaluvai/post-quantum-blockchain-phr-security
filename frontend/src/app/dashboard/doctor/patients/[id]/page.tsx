@@ -1,17 +1,32 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import { motion } from "framer-motion";
 import { User, Activity, FileText, ChevronLeft, Plus, X } from "lucide-react";
 import Link from "next/link";
 import { getDoctorPatientDetail, createDiagnosis, createPrescription } from "@/lib/session";
 
+interface PatientDetailInfo {
+  id: string;
+  name?: string;
+  email?: string;
+  gender?: string;
+  blood_group?: string;
+  date_of_birth?: string;
+  dob?: string;
+  diagnoses?: Record<string, unknown>[];
+  prescriptions?: Record<string, unknown>[];
+  [key: string]: unknown;
+}
+
+
 export default function PatientDetails() {
   const params = useParams();
-  const router = useRouter();
-  const [patient, setPatient] = useState<any>(null);
+  const [patient, setPatient] = useState<PatientDetailInfo | null>(null);
+
   const [loading, setLoading] = useState(true);
+
 
   const [diagnosisModal, setDiagnosisModal] = useState(false);
   const [prescriptionModal, setPrescriptionModal] = useState(false);
@@ -115,11 +130,11 @@ export default function PatientDetails() {
             <h2 className="text-lg font-bold text-slate-800">Previous Diagnoses</h2>
           </div>
           <div className="space-y-4">
-            {patient.diagnoses && patient.diagnoses.length > 0 ? (
-              patient.diagnoses.map((d: any, i: number) => (
+            {patient.diagnoses && (patient.diagnoses as Record<string, unknown>[]).length > 0 ? (
+              (patient.diagnoses as Record<string, unknown>[]).map((d: Record<string, unknown>, i: number) => (
                 <div key={i} className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-                  <p className="text-sm text-slate-700">{d.description}</p>
-                  <p className="text-xs text-slate-400 mt-2">{new Date(d.date).toLocaleString()}</p>
+                  <p className="text-sm text-slate-700">{d.description as string}</p>
+                  <p className="text-xs text-slate-400 mt-2">{new Date(d.date as string).toLocaleString()}</p>
                 </div>
               ))
             ) : (
@@ -134,11 +149,11 @@ export default function PatientDetails() {
             <h2 className="text-lg font-bold text-slate-800">Previous Prescriptions</h2>
           </div>
           <div className="space-y-4">
-            {patient.prescriptions && patient.prescriptions.length > 0 ? (
-              patient.prescriptions.map((p: any, i: number) => (
+            {patient.prescriptions && (patient.prescriptions as Record<string, unknown>[]).length > 0 ? (
+              (patient.prescriptions as Record<string, unknown>[]).map((p: Record<string, unknown>, i: number) => (
                 <div key={i} className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-                  <p className="text-sm text-slate-700">{p.medications}</p>
-                  <p className="text-xs text-slate-400 mt-2">{new Date(p.date).toLocaleString()}</p>
+                  <p className="text-sm text-slate-700">{p.medications as string}</p>
+                  <p className="text-xs text-slate-400 mt-2">{new Date(p.date as string).toLocaleString()}</p>
                 </div>
               ))
             ) : (

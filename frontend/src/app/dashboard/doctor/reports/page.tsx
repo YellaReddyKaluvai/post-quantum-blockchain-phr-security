@@ -5,10 +5,32 @@ import { motion } from "framer-motion";
 import { FileText, CheckCircle, Upload, X } from "lucide-react";
 import { getDoctorReports, getDoctorDocuments, reviewLabReport, createMedicalDocument } from "@/lib/session";
 
+interface DoctorReportItem {
+  id: string;
+  title?: string;
+  report_name?: string;
+  status?: string;
+  date?: string;
+  patient_name?: string;
+  file_url?: string;
+  [key: string]: unknown;
+}
+
+interface DoctorDocumentItem {
+  id: string;
+  document_name?: string;
+  document_type?: string;
+  upload_date?: string;
+  file_url?: string;
+  [key: string]: unknown;
+}
+
 export default function ReportsAndDocuments() {
   const [activeTab, setActiveTab] = useState("reports");
-  const [reports, setReports] = useState<any[]>([]);
-  const [documents, setDocuments] = useState<any[]>([]);
+  const [reports, setReports] = useState<DoctorReportItem[]>([]);
+  const [documents, setDocuments] = useState<DoctorDocumentItem[]>([]);
+
+
   const [loading, setLoading] = useState(true);
 
   const [uploadModal, setUploadModal] = useState(false);
@@ -86,16 +108,16 @@ export default function ReportsAndDocuments() {
           {reports.length === 0 ? (
             <p className="col-span-full text-center text-slate-500 py-8 bg-white rounded-2xl border border-slate-100">No lab reports found.</p>
           ) : (
-            reports.map((report, i) => (
+            reports.map((report: DoctorReportItem, i: number) => (
               <motion.div key={report.id || i} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }} className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
                 <div className="flex justify-between items-start mb-4">
-                  <h3 className="font-bold text-slate-800">{report.title || "Report"}</h3>
+                  <h3 className="font-bold text-slate-800">{report.title || report.report_name || "Report"}</h3>
                   <span className={`text-xs px-2 py-1 rounded-full font-bold ${report.status === "Reviewed" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
                     {report.status || "Pending"}
                   </span>
                 </div>
-                <p className="text-sm text-slate-600 mb-2">Patient: {report.patient_name}</p>
-                <p className="text-xs text-slate-400 mb-6">{new Date(report.date).toLocaleDateString()}</p>
+                <p className="text-sm text-slate-600 mb-2">Patient: {report.patient_name || "N/A"}</p>
+                <p className="text-xs text-slate-400 mb-6">{report.date ? new Date(report.date).toLocaleDateString() : "N/A"}</p>
                 {report.status !== "Reviewed" && (
                   <button onClick={() => handleReview(report.id)} className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-cyan-50 hover:bg-cyan-100 text-cyan-700 rounded-xl font-semibold text-sm transition-colors">
                     <CheckCircle className="w-4 h-4" /> Mark as Reviewed
@@ -118,11 +140,11 @@ export default function ReportsAndDocuments() {
             {documents.length === 0 ? (
               <p className="col-span-full text-center text-slate-500 py-8 bg-white rounded-2xl border border-slate-100">No documents found.</p>
             ) : (
-              documents.map((doc, i) => (
+              documents.map((doc: DoctorDocumentItem, i: number) => (
                 <motion.div key={doc.id || i} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }} className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
-                  <h3 className="font-bold text-slate-800 mb-2">{doc.title}</h3>
-                  <p className="text-sm text-slate-600">Type: {doc.type}</p>
-                  <p className="text-xs text-slate-400 mt-4 mb-4">{new Date(doc.date).toLocaleDateString()}</p>
+                  <h3 className="font-bold text-slate-800 mb-2">{doc.document_name || "Document"}</h3>
+                  <p className="text-sm text-slate-600">Type: {doc.document_type || "General"}</p>
+                  <p className="text-xs text-slate-400 mt-4 mb-4">{doc.upload_date ? new Date(doc.upload_date).toLocaleDateString() : "N/A"}</p>
                   <a href={doc.file_url} target="_blank" rel="noopener noreferrer" className="block text-center w-full py-2 px-4 bg-slate-50 hover:bg-slate-100 text-slate-700 rounded-xl font-semibold text-sm transition-colors">
                     View Document
                   </a>

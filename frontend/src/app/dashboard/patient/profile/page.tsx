@@ -7,7 +7,7 @@ import { getPatientProfile } from "@/lib/session";
 
 export default function PatientProfilePage() {
   const [loading, setLoading] = useState(true);
-  const [profile, setProfile] = useState<any>(null);
+  const [profile, setProfile] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
     async function loadData() {

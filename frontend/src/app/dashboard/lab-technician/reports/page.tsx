@@ -5,11 +5,41 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Search, Filter, FileText, Download, Shield, Eye, X, Activity, Hash, Lock, CheckCircle, Clock } from "lucide-react";
 import { getLabTechReports } from "@/lib/session";
 
-export default function ReportsPage() {
-  const [reports, setReports] = useState<any[]>([]);
+interface LabReportItem {
+  id: string;
+  report_name?: string;
+  report_type?: string;
+  type?: string;
+  report_id_public?: string;
+  patient_name?: string;
+  patientName?: string;
+  uploaded_by_name?: string;
+  status?: string;
+  upload_date?: string;
+  date?: string;
+  findings?: string;
+  normal_range?: string;
+  file_data?: string;
+  txHash?: string;
+  blockchain_tx_hash?: string;
+  ipfs_cid?: string;
+  docHash?: string;
+  s3_key?: string;
+  [key: string]: unknown;
+}
+
+
+
+
+
+
+export default function LabReportsPage() {
+  const [reports, setReports] = useState<LabReportItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
-  const [selectedAudit, setSelectedAudit] = useState<any>(null);
+  const [selectedAudit, setSelectedAudit] = useState<LabReportItem | null>(null);
+
+
 
   useEffect(() => {
     const fetchReports = async () => {
@@ -30,14 +60,15 @@ export default function ReportsPage() {
     fetchReports();
   }, []);
 
-  const filteredReports = reports.filter(r => {
-    const pName = r.uploaded_by_name || r.patient_name || r.patientName || "";
-    const rId = r.id || r.report_id_public || "";
-    const rType = r.report_type || r.type || "";
+  const filteredReports = reports.filter((report: LabReportItem) => {
+    const pName = (report.patient_name || report.patientName || String(report.patient_id || "")) as string;
+    const rId = (report.id || report.report_id_public || "") as string;
+    const rType = (report.report_type || report.type || report.report_name || "") as string;
     return pName.toLowerCase().includes(searchTerm.toLowerCase()) || 
            rId.toLowerCase().includes(searchTerm.toLowerCase()) ||
            rType.toLowerCase().includes(searchTerm.toLowerCase());
   });
+
 
   return (
     <div className="space-y-6">
@@ -83,7 +114,7 @@ export default function ReportsPage() {
               <p>No reports found.</p>
             </div>
           ) : (
-            filteredReports.map((report, idx) => (
+            filteredReports.map((report: LabReportItem, idx: number) => (
               <motion.div
                 key={report.id}
                 initial={{ opacity: 0, y: 10 }}

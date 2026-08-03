@@ -5,9 +5,23 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Bell, Check, Trash2, Info, AlertTriangle, CheckCircle, Clock } from "lucide-react";
 import { getPatientNotifications, markNotificationRead, clearNotifications } from "@/lib/session";
 
+interface PatientNotifItem {
+  id: string;
+  notification_type?: string;
+  type?: string;
+  title?: string;
+  body?: string;
+  message?: string;
+  is_read?: boolean;
+  read?: boolean;
+  read_at?: string;
+  created_at?: string;
+  [key: string]: unknown;
+}
+
 export default function NotificationsPage() {
   const [loading, setLoading] = useState(true);
-  const [notifications, setNotifications] = useState<any[]>([]);
+  const [notifications, setNotifications] = useState<PatientNotifItem[]>([]);
 
   useEffect(() => {
     loadData();
@@ -92,7 +106,8 @@ export default function NotificationsPage() {
       ) : (
         <div className="space-y-3">
           <AnimatePresence>
-            {notifications.map((notification, index) => (
+            {notifications.map((notification: PatientNotifItem, index: number) => (
+
               <motion.div
                 layout
                 initial={{ opacity: 0, x: -20 }}
@@ -108,7 +123,8 @@ export default function NotificationsPage() {
                 <div className="p-4 sm:p-5 flex gap-4">
                   <div className="flex-shrink-0 mt-1">
                     <div className="p-2.5 bg-white shadow-sm border border-slate-100 rounded-full">
-                      {getIcon(notification.type)}
+                      {getIcon(notification.notification_type || notification.type || "system")}
+
                     </div>
                   </div>
                   <div className="flex-1">
@@ -117,7 +133,8 @@ export default function NotificationsPage() {
                         {notification.title}
                       </h3>
                       <span className="text-xs font-medium text-slate-400 whitespace-nowrap">
-                        {new Date(notification.timestamp).toLocaleDateString()}
+                        {new Date((notification.created_at || notification.timestamp || Date.now()) as string | number | Date).toLocaleDateString()}
+
                       </span>
                     </div>
                     <p className={`text-sm mt-1 mb-3 ${!notification.is_read ? "text-slate-700 font-medium" : "text-slate-500"}`}>

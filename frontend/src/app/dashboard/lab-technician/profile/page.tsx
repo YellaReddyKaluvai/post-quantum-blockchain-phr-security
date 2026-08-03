@@ -2,11 +2,30 @@
 
 import React, { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { User, Mail, Shield, Building, Award, Calendar, RefreshCw } from "lucide-react";
+import { User, Mail, Shield, Building, Award, RefreshCw } from "lucide-react";
 import { getLabTechProfile } from "@/lib/session";
 
+interface LabTechProfileInfo {
+  id?: string;
+  full_name?: string;
+  email?: string;
+  role?: string;
+  gender?: string;
+  department?: string;
+  certification?: string;
+  hospital_branch?: string;
+  user_id?: string;
+  status?: string;
+  reports_generated?: number;
+  created_at?: string;
+  [key: string]: unknown;
+}
+
+
+
 export default function LabTechProfilePage() {
-  const [profile, setProfile] = useState<any>(null);
+  const [profile, setProfile] = useState<LabTechProfileInfo | null>(null);
+
   const [loading, setLoading] = useState(true);
 
   const fetchProfile = async () => {

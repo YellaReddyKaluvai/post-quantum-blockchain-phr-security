@@ -2,12 +2,26 @@
 
 import React, { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Calendar, Clock, User, Building, CalendarCheck, CalendarX2 } from "lucide-react";
+import { Calendar, Clock, User, CalendarCheck, CalendarX2 } from "lucide-react";
 import { getPatientAppointments } from "@/lib/session";
+
+interface AppointmentItem {
+  id: string;
+  doctor_name?: string;
+  department?: string;
+  appointment_date?: string;
+  appointment_time?: string;
+  time?: string;
+  status?: string;
+  notes?: string;
+  [key: string]: unknown;
+}
+
 
 export default function AppointmentsPage() {
   const [loading, setLoading] = useState(true);
-  const [appointments, setAppointments] = useState<any[]>([]);
+  const [appointments, setAppointments] = useState<AppointmentItem[]>([]);
+
 
   useEffect(() => {
     async function loadData() {
@@ -39,15 +53,17 @@ export default function AppointmentsPage() {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const upcoming = appointments.filter(app => {
-    const appDate = new Date(app.date);
+  const upcoming = appointments.filter((app: AppointmentItem) => {
+    const dateStr = (app.appointment_date || app.date || "") as string | number | Date;
+    const appDate = new Date(dateStr);
     return app.status === 'Scheduled' && appDate >= today;
-  }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  }).sort((a: AppointmentItem, b: AppointmentItem) => new Date((a.appointment_date || a.date || "") as string | number | Date).getTime() - new Date((b.appointment_date || b.date || "") as string | number | Date).getTime());
 
-  const previous = appointments.filter(app => {
-    const appDate = new Date(app.date);
+  const previous = appointments.filter((app: AppointmentItem) => {
+    const dateStr = (app.appointment_date || app.date || "") as string | number | Date;
+    const appDate = new Date(dateStr);
     return app.status !== 'Scheduled' || appDate < today;
-  }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }).sort((a: AppointmentItem, b: AppointmentItem) => new Date((b.appointment_date || b.date || "") as string | number | Date).getTime() - new Date((a.appointment_date || a.date || "") as string | number | Date).getTime());
 
   const getStatusColor = (status: string) => {
     switch (status.toLowerCase()) {
@@ -58,7 +74,7 @@ export default function AppointmentsPage() {
     }
   };
 
-  const AppointmentCard = ({ appointment, isUpcoming }: { appointment: any, isUpcoming: boolean }) => (
+  const AppointmentCard = ({ appointment, isUpcoming }: { appointment: AppointmentItem, isUpcoming: boolean }) => (
     <motion.div
       variants={{ hidden: { opacity: 0, scale: 0.95 }, show: { opacity: 1, scale: 1 } }}
       className={`bg-white rounded-2xl shadow-sm border overflow-hidden relative group ${isUpcoming ? "border-blue-100 hover:shadow-md ring-1 ring-blue-50" : "border-slate-100 opacity-90"}`}
@@ -71,7 +87,8 @@ export default function AppointmentsPage() {
               {appointment.department}
             </span>
           </div>
-          <span className={`px-2.5 py-1 rounded-full text-xs font-bold border ${getStatusColor(appointment.status)}`}>
+          <span className={`px-2.5 py-1 rounded-full text-xs font-bold border ${getStatusColor(appointment.status || "Scheduled")}`}>
+
             {appointment.status}
           </span>
         </div>
@@ -83,11 +100,13 @@ export default function AppointmentsPage() {
         <div className="grid grid-cols-2 gap-3 bg-slate-50 p-3 rounded-xl border border-slate-100">
           <div className="flex flex-col">
             <span className="text-[10px] uppercase font-bold text-slate-400 mb-1 flex items-center gap-1"><Calendar className="w-3 h-3" /> Date</span>
-            <span className="text-sm font-semibold text-slate-700">{new Date(appointment.date).toLocaleDateString()}</span>
+            <span className="text-sm font-semibold text-slate-700">{new Date((appointment.appointment_date || appointment.date || "") as string | number | Date).toLocaleDateString()}</span>
+
           </div>
           <div className="flex flex-col">
             <span className="text-[10px] uppercase font-bold text-slate-400 mb-1 flex items-center gap-1"><Clock className="w-3 h-3" /> Time</span>
-            <span className="text-sm font-semibold text-slate-700">{appointment.time}</span>
+            <span className="text-sm font-semibold text-slate-700">{appointment.appointment_time || appointment.time}</span>
+
           </div>
         </div>
       </div>

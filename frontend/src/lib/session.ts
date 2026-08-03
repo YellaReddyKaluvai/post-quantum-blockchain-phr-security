@@ -282,7 +282,7 @@ export async function getDoctorPatientDetail(id: string) {
   return response.json();
 }
 
-export async function createDiagnosis(patientId: string, data: any) {
+export async function createDiagnosis(patientId: string, data: Record<string, unknown>) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${patientId}/diagnosis`, {
     method: "POST", body: JSON.stringify(data)
   });
@@ -290,7 +290,7 @@ export async function createDiagnosis(patientId: string, data: any) {
   return response.json();
 }
 
-export async function createPrescription(patientId: string, data: any) {
+export async function createPrescription(patientId: string, data: Record<string, unknown>) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${patientId}/prescription`, {
     method: "POST", body: JSON.stringify(data)
   });
@@ -316,13 +316,14 @@ export async function getDoctorDocuments() {
   return response.json();
 }
 
-export async function createMedicalDocument(data: any) {
+export async function createMedicalDocument(data: Record<string, unknown>) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/documents`, {
     method: "POST", body: JSON.stringify(data)
   });
   if (!response.ok) throw new Error("Failed to upload document");
   return response.json();
 }
+
 
 export async function getDoctorAppointments() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/appointments`);
@@ -383,7 +384,7 @@ export async function updateLabTestRequestStatus(id: string, status: string) {
   return response.json();
 }
 
-export async function createLabTestRequest(data: any) {
+export async function createLabTestRequest(data: Record<string, unknown>) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/requests`, {
     method: "POST",
     body: JSON.stringify(data)
@@ -398,10 +399,10 @@ export async function searchPatientsForLab(query: string) {
   return response.json();
 }
 
-export async function createStructuredLabReport(data: any) {
+export async function createStructuredLabReport(data: Record<string, unknown>) {
   const payload = {
     patient_id: data.patient_id || data.patientId || data.patient || "PAT-2026-000001",
-    report_name: data.report_name || data.reportName || (data.type ? data.type.toUpperCase() + " Report" : "Complete Blood Count"),
+    report_name: data.report_name || data.reportName || (typeof data.type === 'string' ? data.type.toUpperCase() + " Report" : "Complete Blood Count"),
     report_type: data.report_type || (data.type === "cbc" ? "CBC" : data.type === "sugar" ? "Blood Sugar" : "CBC"),
     findings: data.findings || data.remarks || "Test results within standard reference ranges.",
     normal_range: data.normal_range || "Standard Medical Reference",
@@ -429,7 +430,7 @@ export async function getLabTechReportDetail(id: string) {
   return response.json();
 }
 
-export async function uploadImagingReport(data: any) {
+export async function uploadImagingReport(data: Record<string, unknown>) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/imaging/upload`, {
     method: "POST",
     body: JSON.stringify(data)
@@ -437,6 +438,7 @@ export async function uploadImagingReport(data: any) {
   if (!response.ok) throw new Error("Failed to upload imaging report");
   return response.json();
 }
+
 
 export async function getImagingReports() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/imaging`);

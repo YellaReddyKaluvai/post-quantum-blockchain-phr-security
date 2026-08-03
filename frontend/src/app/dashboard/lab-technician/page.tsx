@@ -5,9 +5,39 @@ import { motion } from "framer-motion";
 import { FlaskConical, FileText, ClipboardList, Share2, AlertCircle, Clock } from "lucide-react";
 import { getLabTechDashboardSummary } from "@/lib/session";
 
+interface LabActivityItem {
+  title?: string;
+  action?: string;
+  body?: string;
+  time?: string;
+  created_at?: string;
+  type?: string;
+  [key: string]: unknown;
+}
+
+interface LabTechSummary {
+  tests_assigned_today?: number;
+  testsAssigned?: number;
+  reports_generated_today?: number;
+  reportsGenerated?: number;
+  pending_test_requests?: number;
+  pendingRequests?: number;
+  reports_shared?: number;
+  reportsShared?: number;
+  reports_awaiting_review?: number;
+  awaitingReview?: number;
+  recent_activities?: LabActivityItem[];
+  recentActivity?: LabActivityItem[];
+  [key: string]: unknown;
+}
+
+
+
 export default function LabTechnicianDashboard() {
-  const [summary, setSummary] = useState<any>(null);
+  const [summary, setSummary] = useState<LabTechSummary | null>(null);
+
   const [loading, setLoading] = useState(true);
+
 
   useEffect(() => {
     const fetchSummary = async () => {
@@ -102,7 +132,8 @@ export default function LabTechnicianDashboard() {
             {activitiesList.length === 0 ? (
               <p className="text-sm text-slate-500">No recent activity found.</p>
             ) : (
-              activitiesList.map((activity: any, idx: number) => (
+              activitiesList.map((activity: LabActivityItem, idx: number) => (
+
                 <div key={idx} className="flex gap-4">
                   <div className="flex flex-col items-center">
                     <div className={`w-3 h-3 rounded-full mt-1.5 ${

@@ -5,8 +5,17 @@ import { motion } from "framer-motion";
 import { Bell, Check, Trash2 } from "lucide-react";
 import { getDoctorNotifications, markDoctorNotificationRead, clearDoctorNotifications } from "@/lib/session";
 
-export default function Notifications() {
-  const [notifications, setNotifications] = useState<any[]>([]);
+interface DoctorNotif {
+  id: string;
+  is_read?: boolean;
+  message?: string;
+  date?: string;
+  [key: string]: unknown;
+}
+
+export default function DoctorNotifications() {
+  const [notifications, setNotifications] = useState<DoctorNotif[]>([]);
+
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -62,10 +71,10 @@ export default function Notifications() {
       <div className="space-y-4">
         {notifications.length === 0 ? (
           <div className="text-center py-12 bg-white rounded-2xl shadow-sm border border-slate-100 text-slate-500">
-            No notifications. You're all caught up!
+            No notifications. You&apos;re all caught up!
           </div>
         ) : (
-          notifications.map((notif, i) => (
+          notifications.map((notif: DoctorNotif, i: number) => (
             <motion.div
               key={notif.id || i}
               initial={{ opacity: 0, y: 10 }}
@@ -75,8 +84,9 @@ export default function Notifications() {
             >
               <div>
                 <p className={`text-sm ${notif.is_read ? "text-slate-600" : "font-semibold text-slate-800"}`}>{notif.message}</p>
-                <p className="text-xs text-slate-400 mt-1">{new Date(notif.date).toLocaleString()}</p>
+                <p className="text-xs text-slate-400 mt-1">{new Date(notif.date || Date.now()).toLocaleString()}</p>
               </div>
+
               {!notif.is_read && (
                 <button onClick={() => handleMarkRead(notif.id)} className="p-2 text-cyan-600 hover:bg-cyan-50 rounded-xl transition-colors" title="Mark as read">
                   <Check className="w-5 h-5" />

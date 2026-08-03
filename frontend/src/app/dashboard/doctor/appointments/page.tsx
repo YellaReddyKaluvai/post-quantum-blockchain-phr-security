@@ -5,8 +5,18 @@ import { motion } from "framer-motion";
 import { Calendar, Check, X, Clock } from "lucide-react";
 import { getDoctorAppointments, updateAppointmentStatus } from "@/lib/session";
 
+interface DoctorAppointment {
+  id: string;
+  patient_name?: string;
+  status?: string;
+  date?: string;
+  time?: string;
+  [key: string]: unknown;
+}
+
 export default function Appointments() {
-  const [appointments, setAppointments] = useState<any[]>([]);
+  const [appointments, setAppointments] = useState<DoctorAppointment[]>([]);
+
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -54,7 +64,7 @@ export default function Appointments() {
             No appointments found.
           </div>
         ) : (
-          appointments.map((appt, i) => (
+          appointments.map((appt: DoctorAppointment, i: number) => (
             <motion.div
               key={appt.id || i}
               initial={{ opacity: 0, y: 10 }}
@@ -75,10 +85,11 @@ export default function Appointments() {
                   </span>
                 </div>
                 <div className="flex items-center gap-4 text-sm text-slate-600">
-                  <span className="flex items-center gap-1"><Calendar className="w-4 h-4" /> {new Date(appt.date).toLocaleDateString()}</span>
+                  <span className="flex items-center gap-1"><Calendar className="w-4 h-4" /> {new Date(appt.date || Date.now()).toLocaleDateString()}</span>
                   <span className="flex items-center gap-1"><Clock className="w-4 h-4" /> {appt.time}</span>
                 </div>
               </div>
+
 
               <div className="flex gap-2">
                 {(appt.status === "Pending" || appt.status === "Scheduled") && (

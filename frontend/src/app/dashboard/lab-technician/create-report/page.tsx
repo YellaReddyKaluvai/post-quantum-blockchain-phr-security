@@ -2,15 +2,15 @@
 
 import React, { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { FilePlus, Shield, CheckCircle, Activity, Heart, Droplets, Fingerprint, Lock, Loader2, Hospital } from "lucide-react";
+import { Shield, CheckCircle, Fingerprint, Lock, Loader2, Hospital } from "lucide-react";
 import { createStructuredLabReport } from "@/lib/session";
 
 export default function CreateReportPage() {
   const [reportType, setReportType] = useState("");
   const [patientId, setPatientId] = useState("");
-  const [formData, setFormData] = useState<any>({});
+  const [formData, setFormData] = useState<Record<string, string>>({});
+  const [reportId] = useState(() => `REP-${Math.floor(1000 + Math.random() * 9000)}`);
   
-  const [isSubmitting, setIsSubmitting] = useState(false);
   const [showSecurityModal, setShowSecurityModal] = useState(false);
   const [securityStep, setSecurityStep] = useState(0);
 
@@ -22,7 +22,7 @@ export default function CreateReportPage() {
   ];
 
   const handleInputChange = (field: string, value: string) => {
-    setFormData((prev: any) => ({ ...prev, [field]: value }));
+    setFormData((prev) => ({ ...prev, [field]: value }));
   };
 
   const handleFinalize = async () => {
@@ -37,12 +37,13 @@ export default function CreateReportPage() {
       try {
         await createStructuredLabReport({ type: reportType, patientId, ...formData });
         setSecurityStep(5); // Success
-      } catch (e) {
+      } catch {
         setSecurityStep(5); // Show success anyway for demo
       }
       setTimeout(() => setShowSecurityModal(false), 2000);
     }, 6000);
   };
+
 
   const renderDynamicForm = () => {
     if (reportType === "cbc") {
@@ -164,7 +165,7 @@ export default function CreateReportPage() {
               </div>
             </div>
             <div className="text-right">
-              <p className="text-xs font-bold text-slate-700">Report ID: <span className="font-mono text-cyan-700">REP-{Math.floor(Math.random() * 10000)}</span></p>
+              <p className="text-xs font-bold text-slate-700">Report ID: <span className="font-mono text-cyan-700">{reportId}</span></p>
               <p className="text-xs text-slate-500">Date: {new Date().toLocaleDateString()}</p>
             </div>
           </div>

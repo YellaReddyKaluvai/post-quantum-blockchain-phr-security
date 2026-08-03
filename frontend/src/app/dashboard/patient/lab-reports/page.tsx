@@ -5,10 +5,27 @@ import { motion, AnimatePresence } from "framer-motion";
 import { TestTubes, Calendar, User, Eye, X, Activity } from "lucide-react";
 import { getPatientLabReports } from "@/lib/session";
 
+interface LabReportItem {
+  id: string;
+  name?: string;
+  report_name?: string;
+  type?: string;
+  report_type?: string;
+  status?: string;
+  date?: string;
+  upload_date?: string;
+  uploaded_by?: string;
+  uploaded_by_name?: string;
+  findings?: string;
+  normal_range?: string;
+  [key: string]: unknown;
+}
+
 export default function LabReportsPage() {
   const [loading, setLoading] = useState(true);
-  const [reports, setReports] = useState<any[]>([]);
-  const [selectedReport, setSelectedReport] = useState<any | null>(null);
+  const [reports, setReports] = useState<LabReportItem[]>([]);
+  const [selectedReport, setSelectedReport] = useState<LabReportItem | null>(null);
+
 
   useEffect(() => {
     async function loadData() {
@@ -83,7 +100,7 @@ export default function LabReportsPage() {
           animate="show"
           className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"
         >
-          {reports.map((report: any) => (
+          {reports.map((report: LabReportItem) => (
             <motion.div
               key={report.id}
               variants={{ hidden: { opacity: 0, y: 20 }, show: { opacity: 1, y: 0 } }}
@@ -91,10 +108,11 @@ export default function LabReportsPage() {
             >
               <div className="p-5 border-b border-slate-100 flex-1">
                 <div className="flex justify-between items-start mb-4">
-                  <span className={`px-2.5 py-1 rounded-md text-xs font-bold ${getTypeColor(report.type)}`}>
-                    {report.type}
+                  <span className={`px-2.5 py-1 rounded-md text-xs font-bold ${getTypeColor(report.report_type || report.type || "Other")}`}>
+                    {report.report_type || report.type || "Other"}
                   </span>
-                  <span className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${getStatusColor(report.status)}`}>
+                  <span className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${getStatusColor(report.status || "Pending")}`}>
+
                     {report.status}
                   </span>
                 </div>
@@ -103,7 +121,8 @@ export default function LabReportsPage() {
                 <div className="space-y-2 mt-4 text-sm text-slate-500">
                   <div className="flex items-center gap-2">
                     <Calendar className="w-4 h-4 text-slate-400" />
-                    <span>{new Date(report.upload_date).toLocaleDateString()}</span>
+                    <span>{new Date(report.upload_date || Date.now()).toLocaleDateString()}</span>
+
                   </div>
                   <div className="flex items-center gap-2">
                     <User className="w-4 h-4 text-slate-400" />
@@ -148,7 +167,8 @@ export default function LabReportsPage() {
                   </div>
                   <div>
                     <h2 className="text-xl font-bold text-slate-800">{selectedReport.name}</h2>
-                    <p className="text-sm text-slate-500">{new Date(selectedReport.upload_date).toLocaleDateString()} • {selectedReport.type}</p>
+                    <p className="text-sm text-slate-500">{new Date(selectedReport.upload_date || Date.now()).toLocaleDateString()} • {selectedReport.report_type || selectedReport.type}</p>
+
                   </div>
                 </div>
                 <button

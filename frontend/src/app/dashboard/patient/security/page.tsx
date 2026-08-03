@@ -7,7 +7,7 @@ import { getPatientSecurity } from "@/lib/session";
 
 export default function SecurityCenterPage() {
   const [loading, setLoading] = useState(true);
-  const [securityData, setSecurityData] = useState<any>(null);
+  const [securityData, setSecurityData] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
     async function loadData() {

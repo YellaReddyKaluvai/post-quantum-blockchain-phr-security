@@ -6,8 +6,22 @@ import { Users, User, ArrowRight } from "lucide-react";
 import Link from "next/link";
 import { getDoctorPatients } from "@/lib/session";
 
+interface PatientListItem {
+  id: string;
+  full_name?: string;
+  name?: string;
+  email?: string;
+  user_id?: string;
+  gender?: string;
+  blood_group?: string;
+  last_visit?: string;
+  [key: string]: unknown;
+}
+
+
 export default function MyPatients() {
-  const [patients, setPatients] = useState<any[]>([]);
+  const [patients, setPatients] = useState<PatientListItem[]>([]);
+
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -47,7 +61,8 @@ export default function MyPatients() {
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-          {patients.map((patient, i) => (
+          {patients.map((patient: PatientListItem, i: number) => (
+
             <motion.div
               key={patient.id || i}
               initial={{ opacity: 0, y: 10 }}

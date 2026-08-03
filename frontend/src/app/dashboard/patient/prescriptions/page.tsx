@@ -2,12 +2,25 @@
 
 import React, { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Pill, User, Calendar, Clock, AlertCircle } from "lucide-react";
+import { Pill, User, Calendar, Clock, AlertCircle, Activity } from "lucide-react";
 import { getPatientPrescriptions } from "@/lib/session";
+
+interface PrescriptionItem {
+  id: string;
+  medicine_name?: string;
+  prescribing_doctor?: string;
+  dosage?: string;
+  frequency?: string;
+  duration?: string;
+  instructions?: string;
+  date?: string;
+  [key: string]: unknown;
+}
 
 export default function PrescriptionsPage() {
   const [loading, setLoading] = useState(true);
-  const [prescriptions, setPrescriptions] = useState<any[]>([]);
+  const [prescriptions, setPrescriptions] = useState<PrescriptionItem[]>([]);
+
 
   useEffect(() => {
     async function loadData() {
@@ -64,7 +77,7 @@ export default function PrescriptionsPage() {
           animate="show"
           className="grid grid-cols-1 lg:grid-cols-2 gap-6"
         >
-          {prescriptions.map((prescription: any) => (
+          {prescriptions.map((prescription: PrescriptionItem) => (
             <motion.div
               key={prescription.id}
               variants={{ hidden: { opacity: 0, y: 20 }, show: { opacity: 1, y: 0 } }}

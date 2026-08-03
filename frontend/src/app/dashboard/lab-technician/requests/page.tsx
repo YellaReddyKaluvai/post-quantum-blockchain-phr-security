@@ -5,8 +5,30 @@ import { motion } from "framer-motion";
 import { Search, Filter, ClipboardList, CheckCircle, Clock, PlayCircle } from "lucide-react";
 import { getLabTestRequests, updateLabTestRequestStatus } from "@/lib/session";
 
+interface TestRequestItem {
+  id: string;
+  patient_name?: string;
+  patientName?: string;
+  patient_user_id?: string;
+  patientId?: string;
+  patient_id?: string;
+  test_name?: string;
+  testName?: string;
+  doctor_name?: string;
+  doctorName?: string;
+  status?: string;
+  requested_date?: string;
+  requestedDate?: string;
+  priority?: string;
+  date?: string;
+  notes?: string;
+  [key: string]: unknown;
+}
+
+
+
 export default function RequestsPage() {
-  const [requests, setRequests] = useState<any[]>([]);
+  const [requests, setRequests] = useState<TestRequestItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
 
@@ -52,14 +74,15 @@ export default function RequestsPage() {
     return "bg-slate-100 text-slate-700 border-slate-200";
   };
 
-  const filteredRequests = requests.filter(req => {
-    const pName = req.patient_name || req.patientName || "";
-    const pId = req.patient_user_id || req.patientId || "";
-    const tName = req.test_name || req.testName || "";
+  const filteredRequests = requests.filter((req: TestRequestItem) => {
+    const pName = (req.patient_name || req.patientName || "") as string;
+    const pId = (req.patient_user_id || req.patientId || "") as string;
+    const tName = (req.test_name || req.testName || "") as string;
     return pName.toLowerCase().includes(searchTerm.toLowerCase()) || 
            pId.toLowerCase().includes(searchTerm.toLowerCase()) ||
            tName.toLowerCase().includes(searchTerm.toLowerCase());
   });
+
 
   return (
     <div className="space-y-6">
@@ -117,7 +140,7 @@ export default function RequestsPage() {
                   </td>
                 </tr>
               ) : (
-                filteredRequests.map((req, idx) => (
+                filteredRequests.map((req: TestRequestItem, idx: number) => (
                   <motion.tr 
                     key={req.id}
                     initial={{ opacity: 0, y: 10 }}
@@ -139,12 +162,14 @@ export default function RequestsPage() {
                       </p>
                     </td>
                     <td className="px-6 py-4">
-                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${getPriorityColor(req.priority)}`}>
+                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${getPriorityColor(req.priority || "Normal")}`}>
+
                         {req.priority}
                       </span>
                     </td>
                     <td className="px-6 py-4">
-                      <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${getStatusColor(req.status)}`}>
+                      <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${getStatusColor(req.status || "Pending")}`}>
+
                         {req.status === "Pending" && <Clock className="w-3.5 h-3.5" />}
                         {req.status === "Processing" && <PlayCircle className="w-3.5 h-3.5" />}
                         {req.status === "Completed" && <CheckCircle className="w-3.5 h-3.5" />}

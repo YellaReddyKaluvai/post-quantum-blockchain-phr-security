@@ -2,11 +2,49 @@
 
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Film, ZoomIn, Download, X, Search, Activity, FileCheck } from "lucide-react";
+import { Film, ZoomIn, Download, X, Activity, FileCheck } from "lucide-react";
 import { getImagingReports } from "@/lib/session";
 
+interface ImagingReportItem {
+  id: string;
+  title?: string;
+  report_name?: string;
+  scan_type?: string;
+  type?: string;
+  date?: string;
+  upload_date?: string;
+  created_at?: string;
+  patient_name?: string;
+  patientName?: string;
+  patient_user_id?: string;
+  patientId?: string;
+  image_url?: string;
+  image_data?: string;
+  imageUrl?: string;
+  file_url?: string;
+  findings?: string;
+  exam_type?: string;
+  examType?: string;
+  scan_region?: string;
+  scanRegion?: string;
+  clinical_history?: string;
+  history?: string;
+  impression?: string;
+  linkedReport?: string | null;
+
+  [key: string]: unknown;
+}
+
+
+
+
+
+
+
+
 export default function ImagingReportsPage() {
-  const [reports, setReports] = useState<any[]>([]);
+  const [reports, setReports] = useState<ImagingReportItem[]>([]);
+
   const [loading, setLoading] = useState(true);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
 
@@ -70,7 +108,8 @@ export default function ImagingReportsPage() {
             <p>No imaging reports found.</p>
           </div>
         ) : (
-          reports.map((report, idx) => (
+          reports.map((report: ImagingReportItem, idx: number) => (
+
             <motion.div
               key={report.id}
               initial={{ opacity: 0, y: 10 }}
@@ -84,7 +123,8 @@ export default function ImagingReportsPage() {
                     <>
                       <img src={report.image_data || report.imageUrl} alt="Scan" className="w-full h-full object-cover opacity-80 mix-blend-screen" />
                       <button 
-                        onClick={() => setSelectedImage(report.image_data || report.imageUrl)}
+                        onClick={() => setSelectedImage(report.image_data || report.imageUrl || null)}
+
                         className="absolute inset-0 bg-black/40 flex flex-col items-center justify-center opacity-0 hover:opacity-100 transition-opacity"
                       >
                         <ZoomIn className="w-8 h-8 text-white mb-2" />

@@ -1,29 +1,37 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { motion } from "framer-motion";
 import { Search, User, Droplet, FilePlus, FileCheck, Stethoscope } from "lucide-react";
 import { searchPatientsForLab } from "@/lib/session";
 import Link from "next/link";
 
+interface LabPatientItem {
+  id: string;
+  name?: string;
+  full_name?: string;
+  age?: number;
+  gender?: string;
+  bloodGroup?: string;
+  blood_group?: string;
+  assignedDoctor?: string;
+  user_id?: string;
+  [key: string]: unknown;
+}
+
 export default function PatientSearchPage() {
   const [searchTerm, setSearchTerm] = useState("");
-  const [patients, setPatients] = useState<any[]>([]);
+  const [patients, setPatients] = useState<LabPatientItem[]>([]);
+
   const [loading, setLoading] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
 
-  // Mock initial data or handle search
-  useEffect(() => {
-    handleSearch();
-  }, []);
-
-  const handleSearch = async (e?: React.FormEvent) => {
+  const handleSearch = useCallback(async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setLoading(true);
     setHasSearched(true);
     
     try {
-      // If no search term, maybe get a default list or return empty
       const data = await searchPatientsForLab(searchTerm || "all");
       setPatients(data);
     } catch (error) {
@@ -37,7 +45,12 @@ export default function PatientSearchPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [searchTerm]);
+
+  useEffect(() => {
+    handleSearch();
+  }, [handleSearch]);
+
 
   return (
     <div className="space-y-6">
@@ -81,7 +94,8 @@ export default function PatientSearchPage() {
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-          {patients.map((patient, idx) => (
+          {patients.map((patient: LabPatientItem, idx: number) => (
+
             <motion.div
               key={patient.id}
               initial={{ opacity: 0, scale: 0.95 }}

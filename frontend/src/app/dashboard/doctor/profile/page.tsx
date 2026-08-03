@@ -5,8 +5,27 @@ import { motion } from "framer-motion";
 import { User, ShieldCheck } from "lucide-react";
 import { getDoctorProfile } from "@/lib/session";
 
+interface DoctorProfileInfo {
+  id?: string;
+  name?: string;
+  full_name?: string;
+  email?: string;
+  role?: string;
+  gender?: string;
+  specialization?: string;
+  qualification?: string;
+  experience?: string;
+  hospital_branch?: string;
+  contact_number?: string;
+  user_id?: string;
+  status?: string;
+  [key: string]: unknown;
+}
+
+
 export default function Profile() {
-  const [profile, setProfile] = useState<any>(null);
+  const [profile, setProfile] = useState<DoctorProfileInfo | null>(null);
+
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
