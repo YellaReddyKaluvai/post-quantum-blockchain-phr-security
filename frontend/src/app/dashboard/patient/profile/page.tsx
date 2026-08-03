@@ -5,9 +5,32 @@ import { motion } from "framer-motion";
 import { User, Shield, Mail, Calendar, Activity } from "lucide-react";
 import { getPatientProfile } from "@/lib/session";
 
+interface PatientProfilePersonalInfo {
+  name?: string;
+  email?: string;
+  gender?: string;
+  dob?: string;
+  blood_group?: string;
+  [key: string]: unknown;
+}
+
+interface PatientProfileAccountInfo {
+  user_id?: string;
+  registration_date?: string;
+  role?: string;
+  status?: string;
+  [key: string]: unknown;
+}
+
+interface PatientProfileData {
+  personal_info?: PatientProfilePersonalInfo;
+  account_info?: PatientProfileAccountInfo;
+  [key: string]: unknown;
+}
+
 export default function PatientProfilePage() {
   const [loading, setLoading] = useState(true);
-  const [profile, setProfile] = useState<Record<string, unknown> | null>(null);
+  const [profile, setProfile] = useState<PatientProfileData | null>(null);
 
   useEffect(() => {
     async function loadData() {

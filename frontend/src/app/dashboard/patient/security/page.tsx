@@ -5,9 +5,27 @@ import { motion } from "framer-motion";
 import { ShieldCheck, User, Clock, Activity, Key, Shield, Laptop } from "lucide-react";
 import { getPatientSecurity } from "@/lib/session";
 
+interface SecurityAccountInfo {
+  user_id?: string;
+  status?: string;
+  [key: string]: unknown;
+}
+
+interface SecurityInfo {
+  last_login?: string;
+  active_sessions?: number;
+  [key: string]: unknown;
+}
+
+interface SecurityPageData {
+  account_info?: SecurityAccountInfo;
+  security_info?: SecurityInfo;
+  [key: string]: unknown;
+}
+
 export default function SecurityCenterPage() {
   const [loading, setLoading] = useState(true);
-  const [securityData, setSecurityData] = useState<Record<string, unknown> | null>(null);
+  const [securityData, setSecurityData] = useState<SecurityPageData | null>(null);
 
   useEffect(() => {
     async function loadData() {

@@ -91,7 +91,7 @@ export default function PrescriptionsPage() {
                 </div>
                 <div className="text-right sm:text-center">
                   <span className="block text-xs font-bold text-slate-400 uppercase tracking-wide">Prescribed on</span>
-                  <span className="text-sm font-semibold text-slate-700">{new Date(prescription.date).toLocaleDateString()}</span>
+                  <span className="text-sm font-semibold text-slate-700">{new Date(prescription.date || Date.now()).toLocaleDateString()}</span>
                 </div>
               </div>
 
