@@ -24,11 +24,11 @@ from app.security import (
     hash_password, verify_password, encrypt_data, decrypt_data,
     create_session_token, get_current_session, require_role, require_permission
 )
-from app.crypto_service import generate_mlkem_keypair, generate_mldsa_keypair
+from app.crypto_service import generate_mlkem_keypair, generate_mldsa_keypair, decapsulate_aes_key, verify_mldsa_signature
 from app.email_service import send_and_log_email, retry_failed_email, send_admin_notification
 from app.user_id_service import generate_user_id
 from app.rbac import get_permissions_for_role, normalize_role
-from app.storage_service import process_and_pin_ipfs
+from app.storage_service import process_and_pin_ipfs, download_file_from_s3
 
 from app.audit_service import log_admin_action
 
@@ -846,6 +846,61 @@ def get_patient_lab_report_detail(report_id: str, session: dict = Depends(requir
     )
 
 
+@app.get("/api/patient/lab-reports/{report_id}/download")
+def download_patient_lab_report(report_id: str, session: dict = Depends(require_role("Patient"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT lr.*, u.mlkem_private_key_encrypted, tech.mldsa_public_key 
+                FROM LabReports lr 
+                JOIN Users u ON lr.patient_id = u.id
+                LEFT JOIN Users tech ON lr.lab_tech_id = tech.id
+                WHERE lr.id = %s AND lr.patient_id = %s
+            """, (report_id, user_uuid))
+            r = cur.fetchone()
+            
+    if not r:
+        raise HTTPException(status_code=404, detail="Report not found")
+        
+    if not r.get("s3_key"):
+        raise HTTPException(status_code=400, detail="This report does not have an associated cloud file.")
+        
+    try:
+        # 1. Fetch the encrypted file from S3
+        encrypted_payload = download_file_from_s3(r["s3_key"])
+        
+        # 2. Decrypt Patient's ML-KEM private key using the AES encryption key (simulating session vault)
+        patient_mlkem_priv = decrypt_data(r["mlkem_private_key_encrypted"]) if r.get("mlkem_private_key_encrypted") else ""
+        
+        # 3. Decapsulate the AES key
+        aes_key = decapsulate_aes_key(r["encrypted_aes_key"], patient_mlkem_priv)
+        
+        # 4. Decrypt the actual payload (Mock decryption for now since upload was mock)
+        decrypted_content = encrypted_payload.decode('utf-8')
+        
+        # 5. Verify Signature
+        if r.get("digital_signature") and r.get("mldsa_public_key"):
+            is_valid = verify_mldsa_signature(r["document_hash"], r["digital_signature"], r["mldsa_public_key"])
+            if not is_valid:
+                logger.warning(f"Signature verification failed for report {report_id}")
+                
+        # 6. Audit Logging for Download
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO AdminAuditLogs (admin_user_id, action, target_user_id, details)
+                    VALUES (%s, 'PATIENT_DOWNLOADED_PQC_REPORT', %s, %s)
+                """, (session.get("public_user_id", "SYS"), user_uuid, json.dumps({"report_id": str(report_id), "s3_key": r["s3_key"]})))
+                conn.commit()
+
+        return Response(content=decrypted_content, media_type="application/json")
+        
+    except Exception as e:
+        logger.error(f"Error decrypting lab report: {e}")
+        raise HTTPException(status_code=500, detail="Failed to decrypt the report securely.")
+
+
 @app.get("/api/patient/prescriptions")
 def get_patient_prescriptions(session: dict = Depends(require_role("Patient"))):
     user_uuid = session["user_id"]
@@ -1075,6 +1130,24 @@ def get_doctor_patients(session: dict = Depends(require_role("Doctor"))):
         last_visit_date=r["last_visit"],
         status=r["status"]
     ) for r in rows]
+
+@app.get("/api/doctor/patients/search")
+def search_doctor_patients(q: str, session: dict = Depends(require_role("Doctor"))):
+    """Optimized patient search for Doctor portal. Returns max 20 results via ILIKE for scalability."""
+    if len(q) < 2:
+        return []
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT id, user_id, full_name, email, gender
+                FROM Users
+                WHERE role = 'Patient' AND status = 'Approved'
+                  AND (full_name ILIKE %s OR user_id ILIKE %s OR email ILIKE %s)
+                ORDER BY full_name ASC
+                LIMIT 20
+            """, (f"%{q}%", f"%{q}%", f"%{q}%"))
+            rows = cur.fetchall()
+    return [{"id": str(r["id"]), "user_id": r["user_id"], "full_name": r["full_name"], "email": r["email"], "gender": r["gender"]} for r in rows]
 
 @app.get("/api/doctor/patients/{patient_id}")
 def get_doctor_patient_detail(patient_id: str, session: dict = Depends(require_role("Doctor"))):

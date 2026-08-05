@@ -3,11 +3,21 @@
 import React, { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Shield, CheckCircle, Fingerprint, Lock, Loader2, Hospital } from "lucide-react";
-import { createStructuredLabReport } from "@/lib/session";
+import { createStructuredLabReport, searchPatientsForLab } from "@/lib/session";
+import PatientSearchSelect from "@/components/PatientSearchSelect";
+
+interface PatientResult {
+  id: string;
+  user_id: string;
+  full_name: string;
+  email: string;
+  gender: string;
+}
 
 export default function CreateReportPage() {
   const [reportType, setReportType] = useState("");
   const [patientId, setPatientId] = useState("");
+  const [selectedPatient, setSelectedPatient] = useState<PatientResult | null>(null);
   const [formData, setFormData] = useState<Record<string, string>>({});
   const [reportId] = useState(() => `REP-${Math.floor(1000 + Math.random() * 9000)}`);
   
@@ -35,7 +45,7 @@ export default function CreateReportPage() {
     setTimeout(() => setSecurityStep(4), 4500); // Signing
     setTimeout(async () => {
       try {
-        await createStructuredLabReport({ type: reportType, patientId, ...formData });
+        await createStructuredLabReport({ type: reportType, patient_id: patientId, patientId, ...formData });
         setSecurityStep(5); // Success
       } catch {
         setSecurityStep(5); // Show success anyway for demo
@@ -102,13 +112,19 @@ export default function CreateReportPage() {
             
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Patient ID / Request ID</label>
-                <input 
-                  type="text" 
-                  value={patientId}
-                  onChange={(e) => setPatientId(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-500" 
-                  placeholder="e.g. PAT-8821 or REQ-001" 
+                <PatientSearchSelect
+                  searchFn={searchPatientsForLab}
+                  label="Select Patient"
+                  placeholder="Search patient by name or ID..."
+                  selectedPatient={selectedPatient}
+                  onSelect={(patient) => {
+                    setSelectedPatient(patient);
+                    setPatientId(patient.user_id || patient.id);
+                  }}
+                  onClear={() => {
+                    setSelectedPatient(null);
+                    setPatientId("");
+                  }}
                 />
               </div>
 
@@ -173,8 +189,8 @@ export default function CreateReportPage() {
           {/* Patient Info */}
           <div className="grid grid-cols-2 gap-4 mb-6 text-sm bg-slate-50 p-4 rounded-lg border border-slate-200">
             <div>
-              <p><span className="font-semibold text-slate-600">Patient ID:</span> {patientId || "---"}</p>
-              <p><span className="font-semibold text-slate-600">Name:</span> Sample Patient</p>
+               <p><span className="font-semibold text-slate-600">Patient ID:</span> {selectedPatient?.user_id || patientId || "---"}</p>
+               <p><span className="font-semibold text-slate-600">Name:</span> {selectedPatient?.full_name || "Select a patient"}</p>
             </div>
             <div>
               <p><span className="font-semibold text-slate-600">Ref By:</span> Dr. Name Here</p>

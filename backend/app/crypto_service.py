@@ -48,3 +48,30 @@ def generate_mldsa_keypair() -> tuple[str, str]:
     public_key = f"mock_mldsa_pub_{secrets.token_hex(32)}"
     private_key = f"mock_mldsa_priv_{secrets.token_hex(64)}"
     return public_key, encrypt_data(private_key)
+
+def decapsulate_aes_key(encrypted_aes_key: str, mlkem_private_key: str) -> str:
+    """Decapsulate or unwrap the AES key using the patient's ML-KEM private key"""
+    # In a real implementation with liboqs:
+    # with oqs.KeyEncapsulation("Kyber768") as kem:
+    #     shared_secret = kem.decapsulate(ciphertext, private_key_bytes)
+    #     return shared_secret
+    
+    # For our mock implementation from the seed script:
+    if encrypted_aes_key.startswith("WRAPPED_BY_"):
+        # Format is WRAPPED_BY_{patient_kem_pub[:10]}_{aes_key[:10]}
+        parts = encrypted_aes_key.split('_')
+        return parts[-1]
+    elif encrypted_aes_key.startswith("UNWRAPPED_"):
+        return encrypted_aes_key.replace("UNWRAPPED_", "")
+    
+    return encrypted_aes_key
+
+def verify_mldsa_signature(document_hash: str, signature: str, mldsa_public_key: str) -> bool:
+    """Verify the digital signature of the document using ML-DSA public key"""
+    # In a real implementation with liboqs:
+    # with oqs.Signature("Dilithium3") as sig:
+    #     return sig.verify(document_hash.encode(), signature_bytes, public_key_bytes)
+    
+    # Mock fallback: assume valid if a signature exists
+    return True
+

@@ -214,6 +214,12 @@ export async function getPatientLabReportDetail(id: string) {
   return response.json();
 }
 
+export async function downloadPatientLabReport(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/lab-reports/${id}/download`);
+  if (!response.ok) throw new Error("Failed to securely decrypt and download lab report");
+  return response.blob();
+}
+
 export async function getPatientPrescriptions() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/prescriptions`);
   if (!response.ok) throw new Error("Failed to fetch prescriptions");
@@ -257,6 +263,12 @@ export async function getPatientSecurity() {
 }
 
 // ─── Doctor API Functions ────────────────────────────────────────────────────
+
+export async function searchDoctorPatients(query: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/search?q=${encodeURIComponent(query)}`);
+  if (!response.ok) throw new Error("Failed to search patients");
+  return response.json();
+}
 
 export async function getDoctorProfile() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/profile`);

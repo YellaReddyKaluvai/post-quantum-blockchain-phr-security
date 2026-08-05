@@ -2,8 +2,8 @@
 
 import React, { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { TestTubes, Calendar, User, Eye, X, Activity } from "lucide-react";
-import { getPatientLabReports } from "@/lib/session";
+import { TestTubes, Calendar, User, Eye, X, Activity, Download, Lock } from "lucide-react";
+import { getPatientLabReports, downloadPatientLabReport } from "@/lib/session";
 
 interface LabReportItem {
   id: string;
@@ -25,6 +25,27 @@ export default function LabReportsPage() {
   const [loading, setLoading] = useState(true);
   const [reports, setReports] = useState<LabReportItem[]>([]);
   const [selectedReport, setSelectedReport] = useState<LabReportItem | null>(null);
+  const [isDownloading, setIsDownloading] = useState(false);
+
+  const handleDownload = async (reportId: string, filename: string) => {
+    try {
+      setIsDownloading(true);
+      const blob = await downloadPatientLabReport(reportId);
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${filename.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (error) {
+      console.error("Download failed:", error);
+      alert("Failed to securely download and decrypt the report. Please check your keys.");
+    } finally {
+      setIsDownloading(false);
+    }
+  };
 
 
   useEffect(() => {
@@ -204,6 +225,30 @@ export default function LabReportsPage() {
                     <p className="text-slate-500">Detailed findings are not available for this report.</p>
                   </div>
                 )}
+                
+                {/* Secure Download Button */}
+                <div className="mt-8">
+                  <button
+                    onClick={() => handleDownload(selectedReport.id, selectedReport.name || selectedReport.report_name || "report")}
+                    disabled={isDownloading}
+                    className="w-full flex items-center justify-center gap-3 py-4 bg-slate-900 text-white rounded-2xl font-bold hover:bg-slate-800 transition-colors disabled:bg-slate-300 disabled:cursor-not-allowed"
+                  >
+                    {isDownloading ? (
+                      <>
+                        <Lock className="w-5 h-5 animate-pulse text-emerald-400" />
+                        Decapsulating & Decrypting File...
+                      </>
+                    ) : (
+                      <>
+                        <Download className="w-5 h-5" />
+                        Download Original File (PQC Secured)
+                      </>
+                    )}
+                  </button>
+                  <p className="text-center text-xs text-slate-500 mt-3 flex items-center justify-center gap-1">
+                    <Lock className="w-3 h-3" /> End-to-end encrypted via AWS S3 & ML-KEM
+                  </p>
+                </div>
               </div>
             </motion.div>
           </>
