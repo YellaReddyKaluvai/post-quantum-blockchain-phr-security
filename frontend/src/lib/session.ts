@@ -25,6 +25,9 @@ async function fetchWithAuth(url: string, options: RequestInit = {}) {
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
+  if (options.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
   return fetch(url, { ...options, headers });
 }
 
@@ -415,7 +418,7 @@ export async function createStructuredLabReport(data: Record<string, unknown>) {
   const payload = {
     patient_id: data.patient_id || data.patientId || data.patient || "PAT-2026-000001",
     report_name: data.report_name || data.reportName || (typeof data.type === 'string' ? data.type.toUpperCase() + " Report" : "Complete Blood Count"),
-    report_type: data.report_type || (data.type === "cbc" ? "CBC" : data.type === "sugar" ? "Blood Sugar" : "CBC"),
+    report_type: data.report_type || (data.type === "cbc" ? "CBC" : data.type === "sugar" ? "Blood Sugar" : data.type === "lft" ? "Liver Function" : data.type === "urine" ? "Urine Test" : "Other"),
     findings: data.findings || data.remarks || "Test results within standard reference ranges.",
     normal_range: data.normal_range || "Standard Medical Reference",
     structured_data: data.structured_data || data,
