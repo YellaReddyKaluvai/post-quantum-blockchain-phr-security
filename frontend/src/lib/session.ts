@@ -1,10 +1,29 @@
 const backendBaseUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 
+// FastAPI returns `detail` as a plain string for HTTPException, but as an
+// array of {msg, loc} objects for Pydantic validation (422) errors. Always
+// route through this so a validation failure never renders as
+// "[object Object]" in the UI.
+function extractErrorDetail(err: unknown, fallback: string): string {
+  const detail = (err as { detail?: unknown } | null)?.detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail) && detail.length > 0) {
+    return detail.map((d) => (typeof d === "object" && d && "msg" in d ? String((d as { msg: unknown }).msg) : String(d))).join("; ");
+  }
+  return fallback;
+}
+
+// Cookie names shared with the backend (see backend/app/security.py SESSION_COOKIE_NAME)
+// and the Next.js middleware. Keep these three in sync when renaming.
+export const TOKEN_COOKIE = "quantumcare_token";
+export const ROLE_COOKIE = "quantumcare_role";
+export const USER_ID_COOKIE = "quantumcare_user_id";
+
 export function setAuthCookies(accessToken: string, role: string, userId: string) {
   const secure = typeof window !== "undefined" && window.location.protocol === "https:" ? "; Secure" : "";
-  document.cookie = `aegis_access_token=${accessToken}; Path=/; SameSite=Lax${secure}`;
-  document.cookie = `aegis_role=${encodeURIComponent(role)}; Path=/; SameSite=Lax${secure}`;
-  document.cookie = `aegis_user_id=${encodeURIComponent(userId)}; Path=/; SameSite=Lax${secure}`;
+  document.cookie = `${TOKEN_COOKIE}=${accessToken}; Path=/; SameSite=Lax${secure}`;
+  document.cookie = `${ROLE_COOKIE}=${encodeURIComponent(role)}; Path=/; SameSite=Lax${secure}`;
+  document.cookie = `${USER_ID_COOKIE}=${encodeURIComponent(userId)}; Path=/; SameSite=Lax${secure}`;
 }
 
 export function getCookie(name: string): string | null {
@@ -16,7 +35,7 @@ export function getCookie(name: string): string | null {
 }
 
 export function getAuthToken(): string | null {
-  return getCookie("aegis_access_token");
+  return getCookie(TOKEN_COOKIE);
 }
 
 async function fetchWithAuth(url: string, options: RequestInit = {}) {
@@ -63,9 +82,15 @@ export async function logout() {
   } catch (e) {
     console.error("Logout API failed", e);
   }
-  document.cookie = "aegis_access_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;";
-  document.cookie = "aegis_role=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;";
-  document.cookie = "aegis_user_id=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;";
+  const expire = "; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;";
+  for (const name of [TOKEN_COOKIE, ROLE_COOKIE, USER_ID_COOKIE]) {
+    document.cookie = `${name}=${expire}`;
+  }
+  if (typeof localStorage !== "undefined") {
+    localStorage.removeItem(ROLE_COOKIE);
+    localStorage.removeItem(USER_ID_COOKIE);
+    localStorage.removeItem(TOKEN_COOKIE);
+  }
 }
 
 export async function getProfile() {
@@ -219,8 +244,17 @@ export async function getPatientLabReportDetail(id: string) {
 
 export async function downloadPatientLabReport(id: string) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/lab-reports/${id}/download`);
-  if (!response.ok) throw new Error("Failed to securely decrypt and download lab report");
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(err?.detail || "Failed to securely decrypt and download lab report");
+  }
   return response.blob();
+}
+
+export async function verifyPatientLabReport(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/lab-reports/${id}/verify`);
+  if (!response.ok) throw new Error("Failed to verify lab report");
+  return response.json();
 }
 
 export async function getPatientPrescriptions() {
@@ -238,6 +272,30 @@ export async function getPatientConsultations() {
 export async function getPatientAppointments() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/appointments`);
   if (!response.ok) throw new Error("Failed to fetch appointments");
+  return response.json();
+}
+
+export async function getAvailableDoctors() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/doctors`);
+  if (!response.ok) throw new Error("Failed to fetch doctors");
+  return response.json();
+}
+
+export async function createPatientAppointment(data: {
+  doctor_id: string;
+  department: string;
+  appointment_date: string;
+  appointment_time: string;
+  notes?: string;
+}) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/appointments`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(err?.detail?.[0]?.msg || err?.detail || "Failed to book appointment");
+  }
   return response.json();
 }
 
@@ -325,6 +383,52 @@ export async function reviewLabReport(id: string) {
   return response.json();
 }
 
+export async function downloadDoctorLabReport(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/reports/${id}/download`);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(err?.detail || "Failed to securely decrypt and download lab report");
+  }
+  return response.blob();
+}
+
+export async function verifyDoctorLabReport(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/reports/${id}/verify`);
+  if (!response.ok) throw new Error("Failed to verify lab report");
+  return response.json();
+}
+
+export async function getDoctorLabPanels() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/lab-panels`);
+  if (!response.ok) throw new Error("Failed to fetch investigation panels");
+  return response.json();
+}
+
+export async function getDoctorLabRequests(status?: string) {
+  const query = status ? `?status_filter=${encodeURIComponent(status)}` : "";
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/requests${query}`);
+  if (!response.ok) throw new Error("Failed to fetch lab test requests");
+  return response.json();
+}
+
+export async function requestLabTest(data: {
+  patient_id: string;
+  panel_code: string;
+  test_name?: string;
+  priority?: string;
+  clinical_notes?: string;
+}) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/requests`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to request laboratory test"));
+  }
+  return response.json();
+}
+
 export async function getDoctorDocuments() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/documents`);
   if (!response.ok) throw new Error("Failed to fetch documents");
@@ -395,16 +499,28 @@ export async function updateLabTestRequestStatus(id: string, status: string) {
     method: "POST",
     body: JSON.stringify({ status })
   });
-  if (!response.ok) throw new Error("Failed to update test request status");
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to update test request status"));
+  }
   return response.json();
 }
 
-export async function createLabTestRequest(data: Record<string, unknown>) {
-  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/requests`, {
-    method: "POST",
-    body: JSON.stringify(data)
-  });
-  if (!response.ok) throw new Error("Failed to create lab test request");
+export async function getLabTestRequestDetail(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/requests/${id}`);
+  if (!response.ok) throw new Error("Failed to fetch test request detail");
+  return response.json();
+}
+
+export async function getLabReportTemplates() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/report-templates`);
+  if (!response.ok) throw new Error("Failed to fetch report templates");
+  return response.json();
+}
+
+export async function getLabReportTemplate(panelCode: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/report-templates/${panelCode}`);
+  if (!response.ok) throw new Error("Failed to fetch report template");
   return response.json();
 }
 
@@ -414,21 +530,21 @@ export async function searchPatientsForLab(query: string) {
   return response.json();
 }
 
-export async function createStructuredLabReport(data: Record<string, unknown>) {
-  const payload = {
-    patient_id: data.patient_id || data.patientId || data.patient || "PAT-2026-000001",
-    report_name: data.report_name || data.reportName || (typeof data.type === 'string' ? data.type.toUpperCase() + " Report" : "Complete Blood Count"),
-    report_type: data.report_type || (data.type === "cbc" ? "CBC" : data.type === "sugar" ? "Blood Sugar" : data.type === "lft" ? "Liver Function" : data.type === "urine" ? "Urine Test" : "Other"),
-    findings: data.findings || data.remarks || "Test results within standard reference ranges.",
-    normal_range: data.normal_range || "Standard Medical Reference",
-    structured_data: data.structured_data || data,
-    remarks: data.remarks
-  };
+export async function createStructuredLabReport(data: {
+  request_id?: string;
+  patient_id?: string;
+  panel_code: string;
+  values: Record<string, unknown>;
+  remarks?: string;
+}) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/reports/create`, {
     method: "POST",
-    body: JSON.stringify(payload)
+    body: JSON.stringify(data),
   });
-  if (!response.ok) throw new Error("Failed to create structured lab report");
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to finalize the laboratory report"));
+  }
   return response.json();
 }
 

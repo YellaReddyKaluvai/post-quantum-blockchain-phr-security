@@ -59,7 +59,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
               animate={{ opacity: 1, x: 0 }}
               className="flex flex-col"
             >
-              <span className="text-lg font-extrabold tracking-wider text-white">AEGIS</span>
+              <span className="text-lg font-extrabold tracking-wider text-white">QuantumCare</span>
               <span className="text-[10px] font-bold tracking-widest text-cyan-400/70 uppercase">Admin Portal</span>
             </motion.div>
           )}

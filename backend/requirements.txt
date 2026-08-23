@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-pydantic
+pydantic[email]
 pycryptodome
 liboqs-python
 psycopg[binary]
@@ -9,4 +9,6 @@ python-dotenv
 requests
 argon2-cffi
 PyJWT
+boto3
+reportlab
 pytest
