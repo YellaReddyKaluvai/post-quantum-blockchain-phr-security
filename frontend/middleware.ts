@@ -23,8 +23,8 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  const accessToken = readCookie(request, "aegis_access_token");
-  const role = readCookie(request, "aegis_role");
+  const accessToken = readCookie(request, "quantumcare_token");
+  const role = readCookie(request, "quantumcare_role");
 
   if (!accessToken || !role) {
     return NextResponse.redirect(new URL("/login", request.url));

@@ -1,11 +1,21 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { motion } from "framer-motion";
-import { User, Activity, FileText, ChevronLeft, Plus, X } from "lucide-react";
+import { User, Activity, FileText, ChevronLeft, Plus, X, FlaskConical, CheckCircle } from "lucide-react";
 import Link from "next/link";
-import { getDoctorPatientDetail, createDiagnosis, createPrescription } from "@/lib/session";
+import {
+  getDoctorPatientDetail, createDiagnosis, createPrescription,
+  getDoctorLabPanels, requestLabTest,
+} from "@/lib/session";
+
+interface LabPanel {
+  code: string;
+  name: string;
+  short_name: string;
+  category: string;
+}
 
 interface PatientDetailInfo {
   id: string;
@@ -32,19 +42,63 @@ export default function PatientDetails() {
   const [prescriptionModal, setPrescriptionModal] = useState(false);
   const [formData, setFormData] = useState({ description: "", medications: "" });
 
+  const [labModal, setLabModal] = useState(false);
+  const [labPanels, setLabPanels] = useState<LabPanel[]>([]);
+  const [labForm, setLabForm] = useState({ panel_code: "", priority: "Routine", clinical_notes: "" });
+  const [labSubmitting, setLabSubmitting] = useState(false);
+  const [labError, setLabError] = useState("");
+  const [labSuccess, setLabSuccess] = useState<{ panel: string; priority: string } | null>(null);
+
+  const fetchDetail = useCallback(async () => {
+    try {
+      const data = await getDoctorPatientDetail(params.id as string);
+      setPatient(data);
+    } catch (error) {
+      console.error("Error fetching patient detail:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, [params.id]);
+
   useEffect(() => {
-    async function fetchDetail() {
+    fetchDetail();
+  }, [fetchDetail]);
+
+  const openLabModal = async () => {
+    setLabModal(true);
+    setLabSuccess(null);
+    setLabError("");
+    if (labPanels.length === 0) {
       try {
-        const data = await getDoctorPatientDetail(params.id as string);
-        setPatient(data);
-      } catch (error) {
-        console.error("Error fetching patient detail:", error);
-      } finally {
-        setLoading(false);
+        setLabPanels(await getDoctorLabPanels());
+      } catch (e) {
+        console.error(e);
       }
     }
-    fetchDetail();
-  }, [params.id]);
+  };
+
+  const handleRequestTest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!labForm.panel_code) return;
+    setLabSubmitting(true);
+    setLabError("");
+    try {
+      const panel = labPanels.find((p) => p.code === labForm.panel_code);
+      await requestLabTest({
+        patient_id: params.id as string,
+        panel_code: labForm.panel_code,
+        priority: labForm.priority,
+        clinical_notes: labForm.clinical_notes || undefined,
+      });
+      setLabSuccess({ panel: panel?.short_name || labForm.panel_code, priority: labForm.priority });
+      setLabForm({ panel_code: "", priority: "Routine", clinical_notes: "" });
+    } catch (error) {
+      console.error(error);
+      setLabError(error instanceof Error ? error.message : "Failed to request the test");
+    } finally {
+      setLabSubmitting(false);
+    }
+  };
 
   const handleDiagnosis = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -118,6 +172,9 @@ export default function PatientDetails() {
           </button>
           <button onClick={() => setPrescriptionModal(true)} className="flex items-center justify-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold transition-colors">
             <Plus className="w-4 h-4" /> New Prescription
+          </button>
+          <button onClick={openLabModal} className="flex items-center justify-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-bold transition-colors">
+            <FlaskConical className="w-4 h-4" /> Request Lab Test
           </button>
         </div>
       </motion.div>
@@ -204,6 +261,80 @@ export default function PatientDetails() {
               />
               <button type="submit" className="w-full bg-emerald-600 text-white rounded-xl py-2 font-bold hover:bg-emerald-700">Submit</button>
             </form>
+          </div>
+        </div>
+      )}
+
+      {labModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-bold">Request Laboratory Test</h3>
+              <button onClick={() => setLabModal(false)}><X className="w-5 h-5 text-slate-500" /></button>
+            </div>
+
+            {labSuccess ? (
+              <div className="text-center py-4">
+                <CheckCircle className="w-12 h-12 text-emerald-500 mx-auto mb-3" />
+                <p className="font-semibold text-slate-800">{labSuccess.panel} requested</p>
+                <p className="text-sm text-slate-500 mt-1">Priority: {labSuccess.priority}. It now appears in the Lab Technician&apos;s pending queue.</p>
+                <div className="flex gap-2 mt-5">
+                  <button onClick={() => setLabSuccess(null)} className="flex-1 py-2 rounded-xl border border-slate-200 text-sm font-semibold text-slate-700 hover:bg-slate-50">
+                    Request Another
+                  </button>
+                  <button onClick={() => setLabModal(false)} className="flex-1 py-2 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700">
+                    Done
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <form onSubmit={handleRequestTest} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Investigation</label>
+                  <select
+                    required
+                    value={labForm.panel_code}
+                    onChange={(e) => setLabForm({ ...labForm, panel_code: e.target.value })}
+                    className="w-full border border-slate-200 rounded-xl p-3 focus:ring-2 focus:ring-indigo-500 outline-none text-sm"
+                  >
+                    <option value="">Select an investigation…</option>
+                    {labPanels.map((p) => (
+                      <option key={p.code} value={p.code}>{p.name} ({p.category})</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Priority</label>
+                  <select
+                    value={labForm.priority}
+                    onChange={(e) => setLabForm({ ...labForm, priority: e.target.value })}
+                    className="w-full border border-slate-200 rounded-xl p-3 focus:ring-2 focus:ring-indigo-500 outline-none text-sm"
+                  >
+                    <option value="Routine">Routine</option>
+                    <option value="Urgent">Urgent</option>
+                    <option value="Emergency">Emergency</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Clinical Notes (Optional)</label>
+                  <textarea
+                    rows={3}
+                    value={labForm.clinical_notes}
+                    onChange={(e) => setLabForm({ ...labForm, clinical_notes: e.target.value })}
+                    placeholder="Reason for the test, relevant history..."
+                    className="w-full border border-slate-200 rounded-xl p-3 focus:ring-2 focus:ring-indigo-500 outline-none text-sm"
+                  />
+                </div>
+                {labError && <p className="text-sm text-rose-600">{labError}</p>}
+                <button
+                  type="submit"
+                  disabled={labSubmitting || !labForm.panel_code}
+                  className="w-full bg-indigo-600 text-white rounded-xl py-2.5 font-bold hover:bg-indigo-700 disabled:opacity-50"
+                >
+                  {labSubmitting ? "Sending…" : "Send Request to Laboratory"}
+                </button>
+              </form>
+            )}
           </div>
         </div>
       )}

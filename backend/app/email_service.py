@@ -1,11 +1,15 @@
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.utils import formataddr
 import logging
 from datetime import datetime
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# Display name shown to recipients in their inbox.
+SENDER_NAME = "QuantumCare"
 
 def send_and_log_email(
     conn, 
@@ -21,45 +25,38 @@ def send_and_log_email(
     Guarantees exceptions are caught so SMTP failure doesn't rollback account actions.
     """
     if notification_type == "APPROVAL":
-        subject = "Registration Approved - PQC Secure Hospital Management System"
+        subject = "Your QuantumCare Account Has Been Approved"
         body = f"""Dear {full_name},
 
-Congratulations!
+Congratulations! Your registration request has been reviewed and approved by the QuantumCare Hospital Administrator.
 
-Your registration request has been successfully verified and approved by the Hospital Administrator.
-
-Your account has now been activated.
+Your account is now active.
 
 Your Login Details:
 
-User ID:
-{user_id_gen}
+User ID: {user_id_gen}
 
-You can now access the PQC Secure Hospital Management System using your User ID and the password created during registration.
+You can now sign in to QuantumCare using your User ID and the password you created during registration. Your account is protected end-to-end with post-quantum cryptography (ML-KEM / ML-DSA) alongside AES-256 encryption.
 
 For your security:
 
 * Do not share your User ID.
 * Do not share your password.
-* Never share your account credentials with anyone.
+* Never share your account credentials with anyone, including QuantumCare staff.
 
 Regards,
-
-Hospital Administration"""
+The QuantumCare Team"""
     elif notification_type == "REJECTION":
-        subject = "Registration Status Update - PQC Secure Hospital Management System"
+        subject = "Update on Your QuantumCare Registration Request"
         body = f"""Dear {full_name},
 
-Your registration request has not been approved."""
+Thank you for your interest in QuantumCare. After review, your registration request has not been approved at this time."""
         if reason:
             body += f"\n\nReason: {reason}"
-        body += """\n\nPlease contact the Hospital Management or Administrator for more information regarding your registration status.
-
-Thank you.
+        body += """\n\nIf you believe this was in error or would like more information, please contact the QuantumCare Hospital Administration.
 
 Regards,
-
-Hospital Administration"""
+The QuantumCare Team"""
     else:
         raise ValueError(f"Invalid notification type: {notification_type}")
 
@@ -86,14 +83,17 @@ Hospital Administration"""
     sent_timestamp = None
 
     if not settings.SMTP_HOST or not settings.SMTP_USER or not settings.SMTP_PASSWORD:
+        # SMTP is not configured (typical in local dev). Record this honestly as
+        # MOCKED rather than SENT -- the audit trail must not claim delivery that
+        # never happened. The approval/rejection action itself still succeeds.
         logger.info(f"SMTP not configured. Mock sending email to {to_email}")
         logger.info(f"Subject: {subject}\nBody: {body}")
-        sent_status = "SENT"
+        sent_status = "MOCKED"
         sent_timestamp = datetime.now()
     else:
         try:
             msg = MIMEMultipart()
-            msg['From'] = settings.SMTP_USER
+            msg['From'] = formataddr((SENDER_NAME, settings.SMTP_USER))
             msg['To'] = to_email
             msg['Subject'] = subject
             msg.attach(MIMEText(body, 'plain'))
@@ -160,12 +160,12 @@ def retry_failed_email(conn, notification_id: str) -> dict:
 
     if not settings.SMTP_HOST or not settings.SMTP_USER or not settings.SMTP_PASSWORD:
         logger.info(f"SMTP not configured. Mock resending email to {email_address}")
-        sent_status = "SENT"
+        sent_status = "MOCKED"
         sent_timestamp = datetime.now()
     else:
         try:
             msg = MIMEMultipart()
-            msg['From'] = settings.SMTP_USER
+            msg['From'] = formataddr((SENDER_NAME, settings.SMTP_USER))
             msg['To'] = email_address
             msg['Subject'] = subject
             msg.attach(MIMEText(body, 'plain'))
@@ -206,7 +206,7 @@ def send_admin_notification(registration_data: dict):
         logger.info(f"SMTP not configured. Mock admin notification.")
         return
 
-    subject = "PQC Hospital System - New Registration Pending Approval"
+    subject = "QuantumCare - New Registration Pending Approval"
     full_name = registration_data.get('full_name')
     email = registration_data.get('email')
     role = registration_data.get('role')
@@ -215,7 +215,7 @@ def send_admin_notification(registration_data: dict):
     
     try:
         msg = MIMEMultipart()
-        msg['From'] = settings.SMTP_USER
+        msg['From'] = formataddr((SENDER_NAME, settings.SMTP_USER))
         msg['To'] = settings.ADMIN_EMAIL
         msg['Subject'] = subject
         msg.attach(MIMEText(body, 'plain'))

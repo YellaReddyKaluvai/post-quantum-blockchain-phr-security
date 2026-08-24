@@ -2,6 +2,7 @@
 
 import React, { createContext, useContext, useMemo, useState, useEffect } from "react";
 import { normalizeRole, type AppRole, rolePermissions, dashboardRouteMap } from "@/lib/iam";
+import { TOKEN_COOKIE, ROLE_COOKIE, USER_ID_COOKIE } from "@/lib/session";
 
 type AuthState = {
   isAuthenticated: boolean;
@@ -30,14 +31,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     // Read from cookies or localStorage only after mount (client-side)
-    const cookieRole = normalizeRole(readCookie("aegis_role") || localStorage.getItem("aegis_role"));
-    
+    const cookieRole = normalizeRole(readCookie(ROLE_COOKIE) || localStorage.getItem(ROLE_COOKIE));
+
     // Defer to avoid synchronous cascading render warnings
     queueMicrotask(() => {
       setRole(cookieRole);
       setPermissions(cookieRole ? rolePermissions[cookieRole] : []);
-      setUserId(readCookie("aegis_user_id") || localStorage.getItem("aegis_user_id"));
-      setAccessToken(readCookie("aegis_access_token") || localStorage.getItem("aegis_access_token"));
+      setUserId(readCookie(USER_ID_COOKIE) || localStorage.getItem(USER_ID_COOKIE));
+      setAccessToken(readCookie(TOKEN_COOKIE) || localStorage.getItem(TOKEN_COOKIE));
       setIsMounted(true);
     });
   }, []);
