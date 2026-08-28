@@ -20,8 +20,8 @@ interface LabReportItem {
   findings?: string;
   normal_range?: string;
   file_data?: string;
-  txHash?: string;
   blockchain_tx_hash?: string;
+  anchored_on?: string;
   ipfs_cid?: string;
   docHash?: string;
   s3_key?: string;
@@ -38,6 +38,7 @@ export default function LabReportsPage() {
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedAudit, setSelectedAudit] = useState<LabReportItem | null>(null);
+  const [loadError, setLoadError] = useState("");
 
 
 
@@ -48,11 +49,12 @@ export default function LabReportsPage() {
         setReports(data);
       } catch (error) {
         console.error(error);
-        setReports([
-          { id: "REP-9921", patientName: "John Doe", type: "Complete Blood Count", date: "2026-07-25 10:30 AM", status: "Verified", txHash: "0x8f2a...39c1", docHash: "a2c5...99f4" },
-          { id: "REP-9922", patientName: "Jane Smith", type: "Liver Function Test", date: "2026-07-24 14:15 PM", status: "Verified", txHash: "0x3b1c...72a5", docHash: "b8f1...44e2" },
-          { id: "REP-9923", patientName: "Mark Johnson", type: "Blood Sugar (Fasting)", date: "2026-07-23 09:00 AM", status: "Pending Review", txHash: "0x5d9e...11b8", docHash: "c4d3...22a1" },
-        ]);
+        // Deliberately no placeholder reports here. Inventing rows with
+        // fabricated transaction and document hashes would put fake
+        // cryptographic provenance in the audit trail, which is worse than
+        // showing nothing.
+        setReports([]);
+        setLoadError("Could not load reports. Check that the backend is running.");
       } finally {
         setLoading(false);
       }
@@ -78,6 +80,12 @@ export default function LabReportsPage() {
           <p className="text-sm text-slate-500">Manage and audit finalized laboratory reports.</p>
         </div>
       </div>
+
+      {loadError && (
+        <div className="p-3 rounded-xl bg-rose-50 border border-rose-100 text-rose-700 text-sm font-semibold">
+          {loadError}
+        </div>
+      )}
 
       <div className="bg-white/80 backdrop-blur-md rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
         <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row gap-4 justify-between bg-slate-50/50">
@@ -206,28 +214,48 @@ export default function LabReportsPage() {
                       <Activity className="w-4 h-4 text-emerald-500" />
                       <span className="text-sm font-bold text-slate-700">Blockchain Transaction Hash</span>
                     </div>
+                    {/* A locally-simulated anchor must never read as an on-chain one. */}
+                    {selectedAudit.anchored_on && (
+                      <span
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                          selectedAudit.anchored_on === "local-simulated"
+                            ? "text-amber-700 bg-amber-50"
+                            : "text-emerald-700 bg-emerald-50"
+                        }`}
+                      >
+                        {selectedAudit.anchored_on === "local-simulated"
+                          ? "SIMULATED"
+                          : `ON-CHAIN · ${String(selectedAudit.anchored_on).toUpperCase()}`}
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs font-mono text-slate-600 break-all bg-white p-2 rounded border border-slate-200">
-                    {selectedAudit.txHash || selectedAudit.blockchain_tx_hash || "0x8f2a39c1...39c1"}
+                    {selectedAudit.blockchain_tx_hash || "Not anchored"}
                   </p>
+                  {selectedAudit.anchored_on === "local-simulated" && (
+                    <p className="text-[11px] text-amber-700 mt-1.5">
+                      Recorded locally because no chain was reachable. Not a blockchain transaction.
+                    </p>
+                  )}
                 </div>
 
                 <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
                   <div className="flex items-center justify-between mb-1">
                     <div className="flex items-center gap-2">
                       <Hash className="w-4 h-4 text-cyan-500" />
-                      <span className="text-sm font-bold text-slate-700">IPFS Content Identifier (CID)</span>
+                      <span className="text-sm font-bold text-slate-700">Content Identifier (CIDv0)</span>
                     </div>
-                    <span className="text-[10px] font-bold text-cyan-600 bg-cyan-50 px-2 py-0.5 rounded">PINNED</span>
+                    <span className="text-[10px] font-bold text-slate-600 bg-slate-200 px-2 py-0.5 rounded">SHA-256 · BASE58</span>
                   </div>
-                  <a
-                    href={`https://gateway.pinata.cloud/ipfs/${selectedAudit.ipfs_cid || selectedAudit.docHash || "QmXoypizjW3WknFiJnKLwHCnL72vedxjQkDDP1mXWo6uco"}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-xs font-mono text-cyan-600 hover:underline break-all bg-white p-2 rounded border border-slate-200 block"
-                  >
-                    ipfs://{selectedAudit.ipfs_cid || selectedAudit.docHash || "QmXoypizjW3WknFiJnKLwHCnL72vedxjQkDDP1mXWo6uco"}
-                  </a>
+                  {/* Deliberately not a link: this is a content address computed
+                      the way IPFS computes one, but nothing is pinned to the
+                      IPFS network, so a public gateway URL would not resolve. */}
+                  <p className="text-xs font-mono text-slate-600 break-all bg-white p-2 rounded border border-slate-200">
+                    {selectedAudit.ipfs_cid || "Not computed"}
+                  </p>
+                  <p className="text-[11px] text-slate-500 mt-1.5">
+                    Deterministic fingerprint of the encrypted document. Not published to the IPFS network.
+                  </p>
                 </div>
 
                 <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
@@ -236,10 +264,12 @@ export default function LabReportsPage() {
                       <Lock className="w-4 h-4 text-blue-500" />
                       <span className="text-sm font-bold text-slate-700">AWS Cloud Storage (S3)</span>
                     </div>
-                    <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded">AWS S3 ENCRYPTED</span>
+                    {selectedAudit.s3_key && (
+                      <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded">AWS S3 ENCRYPTED</span>
+                    )}
                   </div>
                   <p className="text-xs font-mono text-slate-600 break-all bg-white p-2 rounded border border-slate-200">
-                    {selectedAudit.s3_key || "phr_records/encrypted_medical_report.enc"}
+                    {selectedAudit.s3_key || "No cloud copy stored"}
                   </p>
                 </div>
 

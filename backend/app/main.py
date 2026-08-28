@@ -50,7 +50,7 @@ from app.email_service import send_and_log_email, retry_failed_email, send_admin
 from app.user_id_service import generate_user_id, generate_report_number
 from app.rbac import get_permissions_for_role, normalize_role
 from app.storage_service import (
-    process_and_pin_ipfs, download_file_from_s3, storage_status, StorageError,
+    store_encrypted_document, download_file_from_s3, storage_status, StorageError,
 )
 
 from app.audit_service import log_admin_action
@@ -1485,16 +1485,157 @@ def get_doctor_documents(session: dict = Depends(require_role("Doctor"))):
     ) for r in rows]
 
 @app.post("/api/doctor/documents")
-def create_medical_document(req: CreateDocumentRequest, session: dict = Depends(require_role("Doctor"))):
+def create_medical_document(
+    req: CreateDocumentRequest,
+    request: Request,
+    session: dict = Depends(require_role("Doctor")),
+):
+    """Author a medical document under the same protection as every other record.
+
+    Discharge summaries, referral letters and medical certificates previously
+    stored their body as plaintext and never reached cloud storage, bypassing
+    the pipeline entirely. They now follow it: AES-256-GCM encrypts the body,
+    ML-KEM-768 protects the key against the patient's public key, ML-DSA-65
+    signs the digest, and only ciphertext is written to cloud storage.
+    """
+    user_uuid = session["user_id"]
+
+    if not req.content:
+        raise HTTPException(status_code=400, detail="Document content is required.")
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT id, user_id, mlkem_public_key FROM Users WHERE id = %s AND role = 'Patient'",
+                (req.patient_id,),
+            )
+            patient = cur.fetchone()
+            if not patient:
+                raise HTTPException(status_code=404, detail="Patient not found")
+            if not patient["mlkem_public_key"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Patient has no ML-KEM public key; the document cannot be protected.",
+                )
+
+            cur.execute("SELECT mldsa_private_key_encrypted FROM Users WHERE id = %s", (user_uuid,))
+            doctor = cur.fetchone()
+
+            content_bytes = req.content.encode("utf-8")
+            document_hash = sha256_hex(content_bytes)
+
+            try:
+                kem_ciphertext, shared_secret = encapsulate_aes_key(patient["mlkem_public_key"])
+                aes_key = derive_aes_key(shared_secret)
+                encrypted = encrypt_document(content_bytes, aes_key)
+                signature = sign_document_hash(document_hash, doctor["mldsa_private_key_encrypted"])
+            except PQCUnavailableError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+            # Only ciphertext leaves the process.
+            content_cid, s3_key = store_encrypted_document(
+                encrypted["ciphertext"].encode("utf-8"), f"{req.document_name}_{req.document_type}"
+            )
+
+            cur.execute("""
+                INSERT INTO MedicalDocuments (
+                    patient_id, doctor_id, document_name, document_type, status,
+                    encrypted_content, encrypted_aes_key, encryption_nonce, encryption_tag,
+                    document_hash, digital_signature, kem_algorithm, signature_algorithm,
+                    ipfs_cid, s3_key
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                req.patient_id, user_uuid, req.document_name, req.document_type, req.status,
+                encrypted["ciphertext"], kem_ciphertext, encrypted["nonce"], encrypted["tag"],
+                document_hash, signature, ML_KEM_ALG, ML_DSA_ALG,
+                content_cid, s3_key,
+            ))
+            document_id = cur.fetchone()["id"]
+
+            cur.execute("""
+                INSERT INTO Notifications (user_id, notification_type, title, body)
+                VALUES (%s, 'DOCUMENT_READY', 'New Medical Document Available',
+                        'Your doctor has issued a ' || %s || '.')
+            """, (req.patient_id, req.document_type))
+            conn.commit()
+
+        anchor = anchor_document(
+            conn,
+            document_type="MedicalDocument", document_id=str(document_id),
+            document_hash=document_hash, action="DOCUMENT_ISSUED",
+            patient_id=str(req.patient_id), actor_id=user_uuid,
+            actor_public_id=session.get("public_user_id"),
+        )
+
+        with conn.cursor() as cur:
+            cur.execute("UPDATE MedicalDocuments SET blockchain_tx_hash = %s WHERE id = %s",
+                        (anchor["tx_hash"], document_id))
+            conn.commit()
+
+    return {
+        "status": "success",
+        "document_id": str(document_id),
+        "patient_user_id": patient["user_id"],
+        "document_hash": document_hash,
+        "kem_algorithm": ML_KEM_ALG,
+        "signature_algorithm": ML_DSA_ALG,
+        "blockchain_tx_hash": anchor["tx_hash"],
+        "anchored_on": anchor["anchored_on"],
+        "s3_key": s3_key,
+    }
+
+
+@app.get("/api/doctor/documents/{document_id}/content")
+def get_medical_document_content(document_id: str, session: dict = Depends(require_role("Doctor"))):
+    """Decrypt one document the requesting doctor authored.
+
+    Falls back to the S3 copy if the database ciphertext is missing, and
+    re-checks the digest against the value recorded at signing before release.
+    """
     user_uuid = session["user_id"]
     with get_db() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
-                INSERT INTO MedicalDocuments (patient_id, doctor_id, document_name, document_type, content, status)
-                VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
-            """, (req.patient_id, user_uuid, req.document_name, req.document_type, req.content, req.status))
-            conn.commit()
-    return {"status": "success"}
+                SELECT m.*, u.mlkem_private_key_encrypted
+                FROM MedicalDocuments m
+                JOIN Users u ON m.patient_id = u.id
+                WHERE m.id = %s AND m.doctor_id = %s
+            """, (document_id, user_uuid))
+            r = cur.fetchone()
+
+    if not r:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Rows predating encryption kept their plaintext body in `content`.
+    if not r.get("encrypted_content"):
+        if r.get("content"):
+            return {"content": r["content"], "encrypted": False}
+        raise HTTPException(status_code=404, detail="No content stored for this document.")
+
+    ciphertext = r["encrypted_content"]
+    if not ciphertext and r.get("s3_key"):
+        try:
+            ciphertext = download_file_from_s3(r["s3_key"]).decode("utf-8")
+        except StorageError as exc:
+            logger.error("S3 recovery failed for document %s: %s", document_id, exc)
+
+    try:
+        shared_secret = decapsulate_aes_key(r["encrypted_aes_key"], r["mlkem_private_key_encrypted"])
+        content_bytes = decrypt_document(
+            ciphertext, derive_aes_key(shared_secret),
+            r["encryption_nonce"], r["encryption_tag"],
+        )
+    except PQCUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="Document failed its integrity check.") from exc
+
+    if sha256_hex(content_bytes) != r.get("document_hash"):
+        raise HTTPException(status_code=409, detail="Document digest does not match the recorded hash.")
+
+    return {"content": content_bytes.decode("utf-8"), "encrypted": True}
 
 @app.get("/api/doctor/appointments")
 def get_doctor_appointments(session: dict = Depends(require_role("Doctor"))):
@@ -2121,7 +2262,7 @@ def create_structured_lab_report(
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
 
             # 5. Store only the ciphertext in cloud storage.
-            ipfs_cid, ipfs_gateway_url, s3_key = process_and_pin_ipfs(
+            ipfs_cid, s3_key = store_encrypted_document(
                 encrypted["ciphertext"].encode("utf-8"), f"{report_no}_{panel['code']}"
             )
 
@@ -2374,20 +2515,29 @@ def get_lab_tech_reports(session: dict = Depends(require_role("Lab Technician"))
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
-                SELECT lr.*, u.full_name as uploaded_by_name
+                SELECT lr.*, u.full_name as uploaded_by_name,
+                       (SELECT anchored_on FROM DocumentAnchors
+                         WHERE document_id = lr.id ORDER BY created_at DESC LIMIT 1) AS anchored_on
                 FROM LabReports lr
                 LEFT JOIN Users u ON lr.patient_id = u.id
                 WHERE lr.lab_tech_id = %s OR lr.uploaded_by = %s
                 ORDER BY lr.upload_date DESC
             """, (user_uuid, user_uuid))
             rows = cur.fetchall()
-            
+
     return [LabReportItem(
         id=str(r["id"]), report_name=r["report_name"], report_type=r["report_type"],
         report_id_public=r["report_id_public"], findings=r["findings"],
         normal_range=r["normal_range"], status=r["status"],
         uploaded_by_name=r["uploaded_by_name"],  # Reusing for patient name in tech view
-        upload_date=r["upload_date"]
+        upload_date=r["upload_date"],
+        document_hash=r.get("document_hash"),
+        blockchain_tx_hash=r.get("blockchain_tx_hash"),
+        anchored_on=r.get("anchored_on"),
+        ipfs_cid=r.get("ipfs_cid"),
+        s3_key=r.get("s3_key"),
+        kem_algorithm=r.get("kem_algorithm"),
+        signature_algorithm=r.get("signature_algorithm"),
     ) for r in rows]
 
 @app.get("/api/lab-tech/reports/{report_id}")
@@ -2416,7 +2566,6 @@ def get_lab_tech_report_detail(report_id: str, session: dict = Depends(require_r
         "blockchain_tx_hash": r.get("blockchain_tx_hash"),
         "ipfs_cid": r.get("ipfs_cid"),
         "s3_key": r.get("s3_key"),
-        "ipfs_gateway_url": f"https://gateway.pinata.cloud/ipfs/{r.get('ipfs_cid')}" if r.get("ipfs_cid") else None,
         "status": r["status"], "upload_date": r["upload_date"]
     }
 
@@ -2469,7 +2618,7 @@ def upload_imaging_report(
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
 
             # Only ciphertext leaves the process.
-            ipfs_cid, ipfs_gateway_url, s3_key = process_and_pin_ipfs(
+            ipfs_cid, s3_key = store_encrypted_document(
                 encrypted["ciphertext"].encode("utf-8"), f"{req.exam_type}_{req.scan_region}"
             )
 

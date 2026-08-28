@@ -107,9 +107,14 @@ def reset_client() -> None:
 def generate_ipfs_cid_v0(content_bytes: bytes) -> str:
     """Compute an IPFS CIDv0 (``Qm...``) for the given bytes.
 
-    This is pure content addressing — a Base58-encoded sha2-256 multihash. It
-    identifies the ciphertext and never requires a network call, so it is
-    always available even when S3 is not.
+    This is pure content addressing — a Base58-encoded sha2-256 multihash,
+    computed exactly as IPFS would compute it. It identifies the ciphertext and
+    needs no network call, so it is always available even when S3 is not.
+
+    It does NOT mean the content is on the IPFS network. Nothing here pins to
+    IPFS, so a public gateway URL built from this CID will not resolve. The CID
+    is a deterministic fingerprint, useful for deduplication and integrity, and
+    it should be presented as exactly that.
     """
     sha256_hash = hashlib.sha256(content_bytes).digest()
     multihash_bytes = b"\x12\x20" + sha256_hash  # 0x12 = sha2-256, 0x20 = 32 bytes
@@ -194,32 +199,32 @@ def s3_object_exists(s3_key: str) -> bool:
         return False
 
 
-def process_and_pin_ipfs(
+def store_encrypted_document(
     encrypted_bytes: bytes, document_name: str
-) -> Tuple[str, str, Optional[str]]:
-    """Compute the IPFS CID and store the ciphertext in S3.
+) -> Tuple[str, Optional[str]]:
+    """Content-address the ciphertext and store it in S3.
 
-    Returns ``(ipfs_cid, ipfs_gateway_url, s3_key)``. ``s3_key`` is **None**
-    when the upload did not happen, so a missing cloud copy is recorded
-    truthfully instead of as a dead pointer. The CID is always returned: it is
-    derived from the content itself and needs no network.
+    Returns ``(content_cid, s3_key)``. ``s3_key`` is **None** when the upload
+    did not happen, so a missing cloud copy is recorded truthfully instead of
+    as a dead pointer. The CID is always returned: it is derived from the
+    content itself and needs no network.
+
+    Formerly ``process_and_pin_ipfs``, which was a misnomer — it never pinned
+    anything to IPFS and returned a public gateway URL that could not resolve.
     """
-    settings = get_settings()
+    content_cid = generate_ipfs_cid_v0(encrypted_bytes)
 
-    ipfs_cid = generate_ipfs_cid_v0(encrypted_bytes)
-    ipfs_gateway_url = f"{settings.IPFS_GATEWAY_URL}{ipfs_cid}"
-
-    file_name = f"{ipfs_cid}_{document_name.replace(' ', '_')}.enc"
+    file_name = f"{content_cid}_{document_name.replace(' ', '_')}.enc"
     try:
         s3_key, _ = upload_to_aws_s3(encrypted_bytes, file_name)
     except StorageError as exc:
         # The database copy is authoritative, so the clinical action proceeds;
         # but the missing cloud copy is logged loudly and stored as NULL.
         logger.error("Cloud copy NOT stored for %s: %s", document_name, exc)
-        return ipfs_cid, ipfs_gateway_url, None
+        return content_cid, None
 
-    logger.info("IPFS CID %s -> S3 key %s", ipfs_cid, s3_key)
-    return ipfs_cid, ipfs_gateway_url, s3_key
+    logger.info("content CID %s -> S3 key %s", content_cid, s3_key)
+    return content_cid, s3_key
 
 
 def storage_status() -> dict:

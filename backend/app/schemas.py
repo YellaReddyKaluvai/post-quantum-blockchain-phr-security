@@ -233,6 +233,16 @@ class LabReportItem(BaseModel):
     patient_name: Optional[str] = None
     patient_user_id: Optional[str] = None
     upload_date: Optional[datetime] = None
+    # Audit provenance. Absent values are meaningful — they mean the report
+    # genuinely was not anchored or has no cloud copy — so the UI must render
+    # them as such rather than substituting a plausible-looking placeholder.
+    document_hash: Optional[str] = None
+    blockchain_tx_hash: Optional[str] = None
+    anchored_on: Optional[str] = None
+    ipfs_cid: Optional[str] = None
+    s3_key: Optional[str] = None
+    kem_algorithm: Optional[str] = None
+    signature_algorithm: Optional[str] = None
 
 class PrescriptionRecord(BaseModel):
     id: str

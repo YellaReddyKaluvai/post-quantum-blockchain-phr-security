@@ -480,6 +480,23 @@ CREATE TABLE IF NOT EXISTS MedicationAdministration (
 );
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Doctor-authored documents (discharge summaries, referral letters, medical
+-- certificates) previously stored their body as plaintext in `content` and
+-- never reached cloud storage at all, bypassing the security pipeline that
+-- every other document type goes through. They now carry the same hybrid
+-- material. `content` is retained only for rows predating encryption.
+-- ─────────────────────────────────────────────────────────────────────────────
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS encrypted_content TEXT;
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS encrypted_aes_key TEXT;
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS encryption_nonce TEXT;
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS encryption_tag TEXT;
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS document_hash VARCHAR(64);
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS digital_signature TEXT;
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS kem_algorithm VARCHAR(32);
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS signature_algorithm VARCHAR(32);
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS blockchain_tx_hash VARCHAR(66);
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- Imaging reports carry the same hybrid-encryption material as lab reports.
 -- Previously the image payload was uploaded to cloud storage as plaintext and
 -- stored plaintext in image_data, which contradicts the rule that the cloud

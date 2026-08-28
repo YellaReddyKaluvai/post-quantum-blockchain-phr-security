@@ -24,8 +24,11 @@ class Settings(BaseModel):
     AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY", "mock_aws_secret_key_quantumcare_pqc")
     AWS_REGION: str = os.getenv("AWS_REGION", "ap-south-1")
     AWS_S3_BUCKET: str = os.getenv("AWS_S3_BUCKET", "quantumcare-pqc-phr-storage")
-    IPFS_GATEWAY_URL: str = os.getenv("IPFS_GATEWAY_URL", "https://gateway.pinata.cloud/ipfs/")
-    IPFS_PINNING_API_KEY: str = os.getenv("IPFS_PINNING_API_KEY", "")
+    # No IPFS gateway or pinning settings: nothing is published to the IPFS
+    # network. The system computes an IPFS-style CIDv0 purely as a content
+    # address for the encrypted document (see storage_service), which needs no
+    # network and no account. Keeping a gateway URL here would imply a
+    # retrievable public link that does not exist.
 
     # ─── Blockchain audit anchoring ──────────────────────────────────────────
     # Defaults target a local dev chain (anvil) so every developer gets real
