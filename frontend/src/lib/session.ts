@@ -355,11 +355,23 @@ export async function getDoctorPatientDetail(id: string) {
   return response.json();
 }
 
+function extractErrorMessage(body: unknown, fallback: string): string {
+  const detail = (body as { detail?: unknown } | null)?.detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail) && detail.length > 0) {
+    return detail.map((d: { msg?: string }) => d.msg).filter(Boolean).join("; ") || fallback;
+  }
+  return fallback;
+}
+
 export async function createDiagnosis(patientId: string, data: Record<string, unknown>) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${patientId}/diagnosis`, {
     method: "POST", body: JSON.stringify(data)
   });
-  if (!response.ok) throw new Error("Failed to create diagnosis");
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorMessage(err, "Failed to create diagnosis"));
+  }
   return response.json();
 }
 
@@ -367,7 +379,10 @@ export async function createPrescription(patientId: string, data: Record<string,
   const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${patientId}/prescription`, {
     method: "POST", body: JSON.stringify(data)
   });
-  if (!response.ok) throw new Error("Failed to create prescription");
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorMessage(err, "Failed to create prescription"));
+  }
   return response.json();
 }
 
@@ -591,6 +606,89 @@ export async function markLabNotificationRead(id: string) {
 
 export async function clearLabNotifications() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/notifications/clear`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to clear notifications");
+  return response.json();
+}
+
+// ─── Nurse ────────────────────────────────────────────────────────────────
+
+export async function getNurseProfile() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/profile`);
+  if (!response.ok) throw new Error("Failed to fetch profile");
+  return response.json();
+}
+
+export async function getNurseDashboardSummary() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/dashboard/summary`);
+  if (!response.ok) throw new Error("Failed to fetch dashboard summary");
+  return response.json();
+}
+
+export async function getNursePatients() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients`);
+  if (!response.ok) throw new Error("Failed to fetch patients");
+  return response.json();
+}
+
+export async function searchNursePatients(query: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients/search?q=${encodeURIComponent(query)}`);
+  if (!response.ok) throw new Error("Failed to search patients");
+  return response.json();
+}
+
+export async function getNursePatientDetail(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients/${id}`);
+  if (!response.ok) throw new Error("Failed to fetch patient details");
+  return response.json();
+}
+
+export async function recordPatientVitals(patientId: string, data: Record<string, unknown>) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients/${patientId}/vitals`, {
+    method: "POST", body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorMessage(err, "Failed to record vitals"));
+  }
+  return response.json();
+}
+
+export async function addNursingNote(patientId: string, data: Record<string, unknown>) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients/${patientId}/notes`, {
+    method: "POST", body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorMessage(err, "Failed to add note"));
+  }
+  return response.json();
+}
+
+export async function administerMedication(patientId: string, prescriptionId: string, data: Record<string, unknown>) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients/${patientId}/medications/${prescriptionId}/administer`, {
+    method: "POST", body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorMessage(err, "Failed to record administration"));
+  }
+  return response.json();
+}
+
+export async function getNurseNotifications() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/notifications`);
+  if (!response.ok) throw new Error("Failed to fetch notifications");
+  return response.json();
+}
+
+export async function markNurseNotificationRead(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/notifications/${id}/read`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to mark notification as read");
+  return response.json();
+}
+
+export async function clearNurseNotifications() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/notifications/clear`, { method: "POST" });
   if (!response.ok) throw new Error("Failed to clear notifications");
   return response.json();
 }

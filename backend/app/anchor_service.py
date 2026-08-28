@@ -6,17 +6,16 @@ which document, when, and the SHA-256 digest of the document at that moment.
 Never the document itself, and never key material — that is the whole point of
 anchoring rather than storing.
 
-Current state
+How it writes
 -------------
-Entries are written to the ``DocumentAnchors`` table and the transaction hash
-is derived deterministically from the anchor payload. This is a *local
-simulation*, not an on-chain write: ``anchored_on`` records which it was, so
-nothing downstream can mistake a simulated anchor for a real one.
+Anchors are submitted on-chain to ``contracts/PHR.sol`` via ``chain_client``,
+and the resulting transaction hash and block number are stored alongside the
+row in ``DocumentAnchors``.
 
-``contracts/PHR.sol`` already defines the on-chain audit contract. The
-integration point is ``_submit_to_chain`` below: give it a Web3 RPC endpoint
-and a funded signer, have it call the contract's audit function with the same
-payload, and return the real transaction hash. No other code needs to change.
+If no chain is reachable the anchor still gets written, but with a
+deterministic locally-derived hash and ``anchored_on='local-simulated'``. That
+distinction is recorded on every row precisely so nothing downstream can
+mistake a simulated anchor for a real on-chain one.
 """
 
 import hashlib
@@ -27,17 +26,42 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 ANCHOR_LOCAL = "local-simulated"
-ANCHOR_CHAIN = "ethereum"
 
 
-def _submit_to_chain(payload: dict) -> Optional[str]:
-    """Submit an anchor on-chain and return its transaction hash.
+def _submit_to_chain(payload: dict) -> Optional[dict]:
+    """Submit an anchor on-chain.
 
-    INTEGRATION POINT — currently unimplemented. Wire a Web3 client to
-    ``contracts/PHR.sol`` here and return the real tx hash; returning None
-    makes the caller fall back to a simulated local anchor.
+    Returns ``{"tx_hash", "block_number", "network"}`` on success, or None when
+    the chain is unavailable so the caller can fall back to a local anchor.
     """
-    return None
+    from app.chain_client import get_chain_client
+    from app.config import get_settings
+
+    client = get_chain_client()
+    if client is None:
+        return None
+
+    try:
+        receipt = client.log_data_access(
+            actor_public_id=payload.get("actor_public_id") or "SYSTEM",
+            action=payload["action"],
+            document_hash=payload["document_hash"],
+        )
+        if receipt["status"] != 1:
+            logger.error("Anchor transaction reverted for %s", payload.get("document_id"))
+            return None
+
+        tx_hash = receipt["tx_hash"]
+        if not tx_hash.startswith("0x"):
+            tx_hash = "0x" + tx_hash
+        return {
+            "tx_hash": tx_hash,
+            "block_number": receipt["block_number"],
+            "network": get_settings().BLOCKCHAIN_NETWORK_NAME,
+        }
+    except Exception as exc:
+        logger.error("On-chain anchor submission failed: %s", exc)
+        return None
 
 
 def _simulated_tx_hash(payload: dict) -> str:
@@ -79,22 +103,34 @@ def anchor_document(
         "document_hash": document_hash,
     }
 
-    tx_hash = _submit_to_chain(payload)
-    anchored_on = ANCHOR_CHAIN if tx_hash else ANCHOR_LOCAL
-    if not tx_hash:
+    receipt = _submit_to_chain(payload)
+    if receipt:
+        tx_hash = receipt["tx_hash"]
+        anchored_on = receipt["network"]
+        block_number = receipt["block_number"]
+    else:
         tx_hash = _simulated_tx_hash(payload)
+        anchored_on = ANCHOR_LOCAL
+        block_number = None
 
     try:
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO DocumentAnchors
                     (document_type, document_id, report_id_public, patient_id,
-                     actor_id, actor_public_id, action, document_hash, tx_hash, anchored_on)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     actor_id, actor_public_id, action, document_hash, tx_hash,
+                     anchored_on, block_number)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (document_type, document_id, report_id_public, patient_id,
-                  actor_id, actor_public_id, action, document_hash, tx_hash, anchored_on))
+                  actor_id, actor_public_id, action, document_hash, tx_hash,
+                  anchored_on, block_number))
             conn.commit()
     except Exception as exc:
         logger.error("Failed to write document anchor for %s: %s", document_id, exc)
 
-    return {"tx_hash": tx_hash, "anchored_on": anchored_on, "document_hash": document_hash}
+    return {
+        "tx_hash": tx_hash,
+        "anchored_on": anchored_on,
+        "document_hash": document_hash,
+        "block_number": block_number,
+    }

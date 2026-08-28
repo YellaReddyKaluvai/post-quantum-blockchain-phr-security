@@ -27,8 +27,13 @@ from app.schemas import (
     LabTechProfile, LabTechDashboardSummary, LabTestRequestItem,
     CreateLabTestRequest, CreateStructuredLabReportRequest,
     CreateImagingReportRequest, ImagingReportItem,
-    LabPanelSummary, FinalizedReportResponse, ReportVerification
+    LabPanelSummary, FinalizedReportResponse, ReportVerification,
+    NurseProfile, NurseDashboardSummary, NursePatientListItem,
+    PatientVitalsRecord, CreateVitalsRequest, NursingNoteRecord, CreateNursingNoteRequest,
+    ActivePrescriptionForNurse, MedicationAdministrationRecord, CreateMedicationAdministrationRequest,
+    NursePatientDetail,
 )
+from app.config import get_settings
 from app.database import get_db, init_db
 from app.security import (
     hash_password, verify_password, encrypt_data, decrypt_data,
@@ -696,8 +701,75 @@ def resend_failed_email_endpoint(notification_id: str, session: dict = Depends(r
         
     if res["sent_status"] == "FAILED":
         raise HTTPException(status_code=400, detail=f"Failed to resend email: {res['error_message']}")
-        
+
     return {"message": "Email resent successfully", "status": res["sent_status"]}
+
+
+@app.get("/api/admin/blockchain/status")
+def get_blockchain_status(session: dict = Depends(require_role("Administrator"))):
+    """Live state of the audit-anchor chain, plus a real-vs-simulated breakdown.
+
+    Surfaces honestly whether anchors are actually reaching a chain: if the node
+    is unreachable the system keeps working, but anchors are only locally
+    simulated and that must be visible rather than silently assumed.
+    """
+    from app.chain_client import get_chain_client
+
+    settings = get_settings()
+    client = get_chain_client()
+
+    connected = client is not None
+    chain_info: dict = {
+        "enabled": settings.BLOCKCHAIN_ENABLED,
+        "connected": connected,
+        "network": settings.BLOCKCHAIN_NETWORK_NAME,
+        "rpc_url": settings.BLOCKCHAIN_RPC_URL,
+        "chain_id": settings.BLOCKCHAIN_CHAIN_ID,
+        "contract_address": settings.BLOCKCHAIN_CONTRACT_ADDRESS or None,
+        "explorer_url": settings.BLOCKCHAIN_EXPLORER_URL or None,
+    }
+
+    if connected:
+        try:
+            chain_info["latest_block"] = client.web3.eth.block_number
+            chain_info["onchain_audit_entries"] = client.audit_trail_count()
+        except Exception as exc:
+            logger.error("Failed reading chain state: %s", exc)
+            chain_info["connected"] = False
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE anchored_on <> 'local-simulated') AS on_chain,
+                       COUNT(*) FILTER (WHERE anchored_on = 'local-simulated') AS simulated
+                FROM DocumentAnchors
+            """)
+            counts = cur.fetchone()
+
+            cur.execute("""
+                SELECT document_type, action, tx_hash, anchored_on, block_number,
+                       report_id_public, created_at
+                FROM DocumentAnchors ORDER BY created_at DESC LIMIT 10
+            """)
+            recent = cur.fetchall()
+
+    chain_info["anchors"] = {
+        "total": counts["total"],
+        "on_chain": counts["on_chain"],
+        "simulated": counts["simulated"],
+    }
+    chain_info["recent_anchors"] = [{
+        "document_type": r["document_type"],
+        "action": r["action"],
+        "tx_hash": r["tx_hash"],
+        "anchored_on": r["anchored_on"],
+        "block_number": r["block_number"],
+        "report_id_public": r["report_id_public"],
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+    } for r in recent]
+
+    return chain_info
 
 
 # ─── Patient Dashboard Endpoints ─────────────────────────────────────────────
@@ -2161,8 +2233,43 @@ def _decrypt_report_pdf(report: dict) -> bytes:
     return pdf_bytes
 
 
+def _verify_against_chain(report: dict) -> Optional[bool]:
+    """Compare the stored digest against the one anchored on-chain.
+
+    This is the check the database cannot fake: even an attacker who rewrites
+    ``document_hash`` in Postgres cannot alter the digest already committed to
+    the chain, so the two stop agreeing.
+
+    Returns True/False when an on-chain anchor exists and could be read, or
+    None when the report was only locally anchored or the chain is unreachable
+    (unknown, which must not be reported as "verified").
+    """
+    from app.chain_client import get_chain_client
+
+    tx_hash = report.get("blockchain_tx_hash")
+    anchored_on = report.get("anchored_on")
+    if not tx_hash or not anchored_on or anchored_on == "local-simulated":
+        return None
+
+    client = get_chain_client()
+    if client is None:
+        return None
+
+    try:
+        receipt = client.web3.eth.get_transaction_receipt(tx_hash)
+        # The contract emits AuditLogged(userUUID, actionType, resourceHash, ts);
+        # resourceHash is the document digest we anchored.
+        events = client.contract.events.AuditLogged().process_receipt(receipt)
+        if not events:
+            return False
+        return any(e["args"]["resourceHash"] == report.get("document_hash") for e in events)
+    except Exception as exc:
+        logger.error("On-chain verification failed for %s: %s", report.get("id"), exc)
+        return None
+
+
 def _verify_report(report: dict) -> ReportVerification:
-    """Check a stored report's digest and ML-DSA signature."""
+    """Check a stored report's digest, ML-DSA signature, and on-chain anchor."""
     hash_matches = False
     detail = "Signature could not be verified."
 
@@ -2178,9 +2285,16 @@ def _verify_report(report: dict) -> ReportVerification:
         report.get("signer_mldsa_public_key") or "",
     )
 
+    blockchain_verified = _verify_against_chain(report)
+
     if hash_matches and signature_valid:
         detail = ("Document digest matches and the ML-DSA signature is valid. "
                   "The report is authentic and unaltered.")
+        if blockchain_verified is True:
+            detail += " The digest also matches the immutable blockchain anchor."
+        elif blockchain_verified is False:
+            detail = ("INTEGRITY ALERT: the stored digest does not match the digest "
+                      "anchored on the blockchain. This report may have been altered.")
     elif hash_matches and not signature_valid:
         detail = "Document is intact but its signature could not be validated."
 
@@ -2188,6 +2302,7 @@ def _verify_report(report: dict) -> ReportVerification:
         report_id=str(report["id"]), report_no=report.get("report_id_public"),
         document_hash=report.get("document_hash"),
         hash_matches=hash_matches, signature_valid=signature_valid,
+        blockchain_verified=blockchain_verified,
         signature_algorithm=report.get("signature_algorithm"),
         kem_algorithm=report.get("kem_algorithm"),
         signed_by=report.get("signer_name"),
@@ -2329,6 +2444,319 @@ def clear_lab_tech_notifications(session: dict = Depends(require_role("Lab Techn
             cur.execute("DELETE FROM Notifications WHERE user_id = %s AND read_at IS NOT NULL", (user_uuid,))
             conn.commit()
     return {"status": "success"}
+
+
+# ─── Nurse Dashboard Endpoints ───────────────────────────────────────────────
+#
+# Nurses aren't "assigned" to patients the way doctors are (via diagnoses).
+# Any approved nurse can search and open any approved patient's chart to record
+# vitals, notes, or medication administration; the nurse's own "My Patients"
+# list is simply "who I've recorded something for", mirroring how the Lab
+# Technician's queue is scoped to their own work rather than a formal roster.
+
+def _vitals_out_of_range(req: CreateVitalsRequest) -> list[str]:
+    """Plain-language flags for readings outside a normal adult range.
+
+    Used only to decide whether the attending doctor gets paged immediately;
+    the recorded values themselves are never altered.
+    """
+    flags = []
+    if req.temperature_celsius is not None and (req.temperature_celsius >= 38.0 or req.temperature_celsius <= 35.0):
+        flags.append(f"temperature {req.temperature_celsius}°C")
+    if req.heart_rate is not None and (req.heart_rate > 100 or req.heart_rate < 50):
+        flags.append(f"heart rate {req.heart_rate} bpm")
+    if req.spo2 is not None and req.spo2 < 92:
+        flags.append(f"SpO2 {req.spo2}%")
+    if req.blood_pressure_systolic is not None and (req.blood_pressure_systolic > 140 or req.blood_pressure_systolic < 90):
+        flags.append(f"systolic BP {req.blood_pressure_systolic} mmHg")
+    if req.blood_pressure_diastolic is not None and (req.blood_pressure_diastolic > 90 or req.blood_pressure_diastolic < 60):
+        flags.append(f"diastolic BP {req.blood_pressure_diastolic} mmHg")
+    if req.respiratory_rate is not None and (req.respiratory_rate > 24 or req.respiratory_rate < 10):
+        flags.append(f"respiratory rate {req.respiratory_rate}/min")
+    return flags
+
+
+@app.get("/api/nurse/profile")
+def get_nurse_profile(session: dict = Depends(require_role("Nurse"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT * FROM Users WHERE id = %s", (user_uuid,))
+            user = cur.fetchone()
+    if not user:
+        raise HTTPException(status_code=404, detail="Nurse not found")
+    return NurseProfile(
+        id=str(user["id"]), user_id=user["user_id"], full_name=user["full_name"],
+        email=user["email"], role=user["role"], gender=user["gender"],
+        status=user["status"], created_at=user["created_at"],
+    )
+
+
+@app.get("/api/nurse/dashboard/summary")
+def get_nurse_dashboard_summary(session: dict = Depends(require_role("Nurse"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT COUNT(DISTINCT patient_id) as cnt FROM (
+                    SELECT patient_id FROM PatientVitals WHERE nurse_id = %s AND recorded_at::date = CURRENT_DATE
+                    UNION SELECT patient_id FROM NursingNotes WHERE nurse_id = %s AND created_at::date = CURRENT_DATE
+                    UNION SELECT patient_id FROM MedicationAdministration WHERE nurse_id = %s AND administered_at::date = CURRENT_DATE
+                ) as attended
+            """, (user_uuid, user_uuid, user_uuid))
+            patients_attended = cur.fetchone()["cnt"]
+
+            cur.execute("SELECT COUNT(*) as cnt FROM PatientVitals WHERE nurse_id = %s AND recorded_at::date = CURRENT_DATE", (user_uuid,))
+            vitals_today = cur.fetchone()["cnt"]
+
+            cur.execute("SELECT COUNT(*) as cnt FROM NursingNotes WHERE nurse_id = %s AND created_at::date = CURRENT_DATE", (user_uuid,))
+            notes_today = cur.fetchone()["cnt"]
+
+            cur.execute("SELECT COUNT(*) as cnt FROM MedicationAdministration WHERE nurse_id = %s AND administered_at::date = CURRENT_DATE", (user_uuid,))
+            meds_today = cur.fetchone()["cnt"]
+
+            cur.execute("SELECT title, body, created_at FROM Notifications WHERE user_id = %s ORDER BY created_at DESC LIMIT 5", (user_uuid,))
+            activities = cur.fetchall()
+
+    return NurseDashboardSummary(
+        patients_attended_today=patients_attended,
+        vitals_recorded_today=vitals_today,
+        notes_added_today=notes_today,
+        medications_administered_today=meds_today,
+        recent_activities=[
+            PatientActivityItem(title=a["title"], description=a["body"], created_at=a["created_at"])
+            for a in activities
+        ],
+    )
+
+
+@app.get("/api/nurse/patients")
+def get_nurse_patients(session: dict = Depends(require_role("Nurse"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT u.*,
+                    GREATEST(
+                        COALESCE((SELECT MAX(recorded_at) FROM PatientVitals WHERE patient_id = u.id AND nurse_id = %s), 'epoch'::timestamptz),
+                        COALESCE((SELECT MAX(created_at) FROM NursingNotes WHERE patient_id = u.id AND nurse_id = %s), 'epoch'::timestamptz),
+                        COALESCE((SELECT MAX(administered_at) FROM MedicationAdministration WHERE patient_id = u.id AND nurse_id = %s), 'epoch'::timestamptz)
+                    ) as last_recorded_at
+                FROM Users u
+                JOIN (
+                    SELECT patient_id FROM PatientVitals WHERE nurse_id = %s
+                    UNION SELECT patient_id FROM NursingNotes WHERE nurse_id = %s
+                    UNION SELECT patient_id FROM MedicationAdministration WHERE nurse_id = %s
+                ) as attended ON u.id = attended.patient_id
+                WHERE u.role = 'Patient'
+                ORDER BY last_recorded_at DESC
+            """, (user_uuid, user_uuid, user_uuid, user_uuid, user_uuid, user_uuid))
+            rows = cur.fetchall()
+
+    return [NursePatientListItem(
+        id=str(r["id"]), user_id=r["user_id"], full_name=r["full_name"], gender=r["gender"],
+        blood_group=decrypt_data(r["blood_group_encrypted"]) if r.get("blood_group_encrypted") else None,
+        last_recorded_at=r["last_recorded_at"], status=r["status"],
+    ) for r in rows]
+
+
+@app.get("/api/nurse/patients/search")
+def search_nurse_patients(q: str, session: dict = Depends(require_role("Nurse"))):
+    if len(q) < 2:
+        return []
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT id, user_id, full_name, email, gender
+                FROM Users
+                WHERE role = 'Patient' AND status = 'Approved'
+                  AND (full_name ILIKE %s OR user_id ILIKE %s OR email ILIKE %s)
+                ORDER BY full_name ASC
+                LIMIT 20
+            """, (f"%{q}%", f"%{q}%", f"%{q}%"))
+            rows = cur.fetchall()
+    return [{"id": str(r["id"]), "user_id": r["user_id"], "full_name": r["full_name"], "email": r["email"], "gender": r["gender"]} for r in rows]
+
+
+@app.get("/api/nurse/patients/{patient_id}", response_model=NursePatientDetail)
+def get_nurse_patient_detail(patient_id: str, session: dict = Depends(require_role("Nurse"))):
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT * FROM Users WHERE id = %s AND role = 'Patient'", (patient_id,))
+            user = cur.fetchone()
+            if not user:
+                raise HTTPException(status_code=404, detail="Patient not found")
+
+            cur.execute("""
+                SELECT v.*, n.full_name as nurse_name FROM PatientVitals v
+                LEFT JOIN Users n ON v.nurse_id = n.id
+                WHERE v.patient_id = %s ORDER BY v.recorded_at DESC LIMIT 10
+            """, (patient_id,))
+            vitals = cur.fetchall()
+
+            cur.execute("""
+                SELECT nn.*, n.full_name as nurse_name FROM NursingNotes nn
+                LEFT JOIN Users n ON nn.nurse_id = n.id
+                WHERE nn.patient_id = %s ORDER BY nn.created_at DESC LIMIT 10
+            """, (patient_id,))
+            notes = cur.fetchall()
+
+            cur.execute("""
+                SELECT p.*,
+                    (SELECT ma.administered_at FROM MedicationAdministration ma WHERE ma.prescription_id = p.id ORDER BY ma.administered_at DESC LIMIT 1) as last_administered_at,
+                    (SELECT ma.status FROM MedicationAdministration ma WHERE ma.prescription_id = p.id ORDER BY ma.administered_at DESC LIMIT 1) as last_administered_status
+                FROM Prescriptions p
+                WHERE p.patient_id = %s
+                ORDER BY p.prescribed_date DESC LIMIT 10
+            """, (patient_id,))
+            prescriptions = cur.fetchall()
+
+    return NursePatientDetail(
+        profile=NursePatientListItem(
+            id=str(user["id"]), user_id=user["user_id"], full_name=user["full_name"], gender=user["gender"],
+            blood_group=decrypt_data(user["blood_group_encrypted"]) if user.get("blood_group_encrypted") else None,
+            last_recorded_at=None, status=user["status"],
+        ),
+        vitals_history=[
+            PatientVitalsRecord(
+                id=str(v["id"]), temperature_celsius=v["temperature_celsius"],
+                blood_pressure_systolic=v["blood_pressure_systolic"], blood_pressure_diastolic=v["blood_pressure_diastolic"],
+                heart_rate=v["heart_rate"], spo2=v["spo2"], respiratory_rate=v["respiratory_rate"],
+                weight_kg=v["weight_kg"], height_cm=v["height_cm"], notes=v["notes"],
+                recorded_at=v["recorded_at"], nurse_name=v["nurse_name"],
+            ) for v in vitals
+        ],
+        nursing_notes=[
+            NursingNoteRecord(id=str(n["id"]), note_type=n["note_type"], content=n["content"], created_at=n["created_at"], nurse_name=n["nurse_name"])
+            for n in notes
+        ],
+        active_prescriptions=[
+            ActivePrescriptionForNurse(
+                id=str(p["id"]), medicine_name=p["medicine_name"], dosage=p["dosage"], frequency=p["frequency"],
+                duration=p["duration"], instructions=p["instructions"], prescribed_date=p["prescribed_date"],
+                last_administered_at=p["last_administered_at"], last_administered_status=p["last_administered_status"],
+            ) for p in prescriptions
+        ],
+    )
+
+
+@app.post("/api/nurse/patients/{patient_id}/vitals")
+def record_patient_vitals(patient_id: str, req: CreateVitalsRequest, session: dict = Depends(require_role("Nurse"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT id FROM Users WHERE id = %s AND role = 'Patient'", (patient_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Patient not found")
+
+            cur.execute("""
+                INSERT INTO PatientVitals
+                    (patient_id, nurse_id, temperature_celsius, blood_pressure_systolic, blood_pressure_diastolic,
+                     heart_rate, spo2, respiratory_rate, weight_kg, height_cm, notes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                patient_id, user_uuid, req.temperature_celsius, req.blood_pressure_systolic, req.blood_pressure_diastolic,
+                req.heart_rate, req.spo2, req.respiratory_rate, req.weight_kg, req.height_cm, req.notes,
+            ))
+            vitals_id = cur.fetchone()["id"]
+
+            cur.execute("""
+                INSERT INTO Notifications (user_id, notification_type, title, body)
+                VALUES (%s, 'VITALS_RECORDED', 'Vitals Recorded', 'A nurse recorded your vitals.')
+            """, (patient_id,))
+
+            flags = _vitals_out_of_range(req)
+            if flags:
+                cur.execute("""
+                    SELECT doctor_id FROM (
+                        SELECT doctor_id, visit_date as event_date FROM Diagnoses WHERE patient_id = %s AND doctor_id IS NOT NULL
+                        UNION ALL
+                        SELECT doctor_id, appointment_date as event_date FROM Appointments WHERE patient_id = %s AND doctor_id IS NOT NULL
+                    ) as recent ORDER BY event_date DESC LIMIT 1
+                """, (patient_id, patient_id))
+                doc_row = cur.fetchone()
+                if doc_row and doc_row["doctor_id"]:
+                    cur.execute("""
+                        INSERT INTO Notifications (user_id, notification_type, title, body)
+                        VALUES (%s, 'ABNORMAL_VITALS', 'Abnormal Vitals Alert', %s)
+                    """, (doc_row["doctor_id"], f"Out-of-range reading(s) for your patient: {', '.join(flags)}."))
+
+            conn.commit()
+
+    return {"status": "success", "id": str(vitals_id), "flags": flags}
+
+
+@app.post("/api/nurse/patients/{patient_id}/notes")
+def add_nursing_note(patient_id: str, req: CreateNursingNoteRequest, session: dict = Depends(require_role("Nurse"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT id FROM Users WHERE id = %s AND role = 'Patient'", (patient_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Patient not found")
+
+            cur.execute("""
+                INSERT INTO NursingNotes (patient_id, nurse_id, note_type, content)
+                VALUES (%s, %s, %s, %s) RETURNING id
+            """, (patient_id, user_uuid, req.note_type, req.content))
+            note_id = cur.fetchone()["id"]
+            conn.commit()
+
+    return {"status": "success", "id": str(note_id)}
+
+
+@app.post("/api/nurse/patients/{patient_id}/medications/{prescription_id}/administer")
+def administer_medication(patient_id: str, prescription_id: str, req: CreateMedicationAdministrationRequest, session: dict = Depends(require_role("Nurse"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT id FROM Prescriptions WHERE id = %s AND patient_id = %s", (prescription_id, patient_id))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Prescription not found for this patient")
+
+            cur.execute("""
+                INSERT INTO MedicationAdministration (prescription_id, patient_id, nurse_id, status, remarks)
+                VALUES (%s, %s, %s, %s, %s) RETURNING id
+            """, (prescription_id, patient_id, user_uuid, req.status, req.remarks))
+            admin_id = cur.fetchone()["id"]
+            conn.commit()
+
+    return {"status": "success", "id": str(admin_id)}
+
+
+@app.get("/api/nurse/notifications")
+def get_nurse_notifications(session: dict = Depends(require_role("Nurse"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT * FROM Notifications WHERE user_id = %s ORDER BY created_at DESC", (user_uuid,))
+            rows = cur.fetchall()
+    return [NotificationItem(
+        id=str(r["notification_id"]), notification_type=r["notification_type"],
+        title=r["title"], body=r["body"], read_at=r["read_at"], created_at=r["created_at"]
+    ) for r in rows]
+
+
+@app.post("/api/nurse/notifications/{notification_id}/read")
+def mark_nurse_notification_read(notification_id: str, session: dict = Depends(require_role("Nurse"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE Notifications SET read_at = CURRENT_TIMESTAMP WHERE notification_id = %s AND user_id = %s AND read_at IS NULL", (notification_id, user_uuid))
+            conn.commit()
+    return {"status": "success"}
+
+
+@app.post("/api/nurse/notifications/clear")
+def clear_nurse_notifications(session: dict = Depends(require_role("Nurse"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM Notifications WHERE user_id = %s AND read_at IS NOT NULL", (user_uuid,))
+            conn.commit()
+    return {"status": "success"}
+
 
 if __name__ == "__main__":
     import uvicorn

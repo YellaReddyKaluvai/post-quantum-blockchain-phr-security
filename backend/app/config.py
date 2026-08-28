@@ -27,6 +27,27 @@ class Settings(BaseModel):
     IPFS_GATEWAY_URL: str = os.getenv("IPFS_GATEWAY_URL", "https://gateway.pinata.cloud/ipfs/")
     IPFS_PINNING_API_KEY: str = os.getenv("IPFS_PINNING_API_KEY", "")
 
+    # ─── Blockchain audit anchoring ──────────────────────────────────────────
+    # Defaults target a local dev chain (anvil) so every developer gets real
+    # on-chain writes with no accounts, no funds and no internet. Point these at
+    # a public testnet (e.g. Sepolia) to share one ledger across the team:
+    #   BLOCKCHAIN_RPC_URL=https://sepolia.infura.io/v3/<key>
+    #   BLOCKCHAIN_CHAIN_ID=11155111
+    #   BLOCKCHAIN_PRIVATE_KEY=<testnet-only key, never a real-funds key>
+    #   BLOCKCHAIN_EXPLORER_URL=https://sepolia.etherscan.io/tx/
+    BLOCKCHAIN_ENABLED: bool = os.getenv("BLOCKCHAIN_ENABLED", "true").lower() == "true"
+    BLOCKCHAIN_RPC_URL: str = os.getenv("BLOCKCHAIN_RPC_URL", "http://127.0.0.1:8545")
+    BLOCKCHAIN_CHAIN_ID: int = int(os.getenv("BLOCKCHAIN_CHAIN_ID", "31337"))
+    BLOCKCHAIN_CONTRACT_ADDRESS: str = os.getenv("BLOCKCHAIN_CONTRACT_ADDRESS", "")
+    # anvil's first well-known dev account. Public, unfunded outside local dev,
+    # and safe to commit as a default — never use it on a real network.
+    BLOCKCHAIN_PRIVATE_KEY: str = os.getenv(
+        "BLOCKCHAIN_PRIVATE_KEY",
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+    )
+    BLOCKCHAIN_EXPLORER_URL: str = os.getenv("BLOCKCHAIN_EXPLORER_URL", "")
+    BLOCKCHAIN_NETWORK_NAME: str = os.getenv("BLOCKCHAIN_NETWORK_NAME", "anvil-local")
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings()

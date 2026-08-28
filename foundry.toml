@@ -1,0 +1,8 @@
+# Foundry config for the PHR audit-anchor contract.
+# `src` points at the existing contracts/ directory rather than Foundry's
+# default src/, so the repo layout is unchanged.
+[profile.default]
+src = "contracts"
+out = "contracts/out"
+libs = []
+solc_version = "0.8.20"

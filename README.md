@@ -93,6 +93,13 @@ AWS_SECRET_ACCESS_KEY="your_aws_secret_key"
 AWS_REGION="eu-north-1"
 AWS_S3_BUCKET="postquantumcryptography"
 IPFS_GATEWAY_URL="https://gateway.pinata.cloud/ipfs/"
+
+# Blockchain audit anchoring (defaults target a local dev chain)
+BLOCKCHAIN_ENABLED="true"
+BLOCKCHAIN_RPC_URL="http://127.0.0.1:8545"
+BLOCKCHAIN_CHAIN_ID="31337"
+BLOCKCHAIN_NETWORK_NAME="anvil-local"
+BLOCKCHAIN_CONTRACT_ADDRESS="0x5FbDB2315678afecb367f032d93F642f64180aa3"
 ```
 
 ### 3. Run Backend API Server
@@ -108,6 +115,53 @@ cd frontend
 npm install
 npm run dev
 ```
+
+### 5. Blockchain Audit Trail
+
+Document digests are anchored on-chain via `contracts/PHR.sol`. Every developer
+runs their own local chain — no accounts, no funds, no internet required.
+
+Install [Foundry](https://getfoundry.sh), then:
+
+```bash
+# From the repository root — compile the contract
+forge build
+
+# Start a local chain (leave running)
+anvil --port 8545 --chain-id 31337
+
+# Deploy, then copy the printed address into backend/.env
+cd backend && python3 deploy_contract.py
+```
+
+The deploy address is deterministic, so the value already in `.env` works as
+long as you deploy to a fresh chain as the first transaction.
+
+**Verifying it is genuinely on-chain** — `GET /api/admin/blockchain/status`
+reports live connection state and an `on_chain` vs `simulated` anchor count.
+Each report's `/verify` endpoint returns `blockchain_verified`, which re-reads
+the digest from the chain and compares it to the stored one. That check is what
+catches tampering: an attacker who rewrites `document_hash` in Postgres cannot
+alter the digest already committed to the chain, so the two stop agreeing.
+
+If no chain is reachable the system keeps working, but anchors are written with
+`anchored_on='local-simulated'` and no block number — deliberately visible, so a
+simulated anchor is never mistaken for a real one.
+
+**Sharing one ledger across the team** (e.g. for a demo with a public block
+explorer), point every developer at the same testnet instead:
+
+```env
+BLOCKCHAIN_RPC_URL="https://sepolia.infura.io/v3/<your-key>"
+BLOCKCHAIN_CHAIN_ID="11155111"
+BLOCKCHAIN_NETWORK_NAME="sepolia"
+BLOCKCHAIN_PRIVATE_KEY="<testnet-only key, funded from a faucet>"
+BLOCKCHAIN_EXPLORER_URL="https://sepolia.etherscan.io/tx/"
+BLOCKCHAIN_CONTRACT_ADDRESS="<address from deploy_contract.py>"
+```
+
+Deploy once, share the resulting contract address. Use a throwaway key funded
+only with faucet ETH — never a key that holds real funds.
 
 Visit **http://localhost:3000** to log in to the platform!
 

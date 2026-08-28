@@ -475,6 +475,10 @@ class ReportVerification(BaseModel):
     document_hash: Optional[str] = None
     hash_matches: bool
     signature_valid: bool
+    # True/False when an on-chain anchor was actually read back and compared;
+    # None when the report was only locally anchored or the chain is
+    # unreachable — "unknown" must never be presented as "verified".
+    blockchain_verified: Optional[bool] = None
     signature_algorithm: Optional[str] = None
     kem_algorithm: Optional[str] = None
     signed_by: Optional[str] = None
@@ -505,3 +509,138 @@ class ImagingReportItem(BaseModel):
     recommendations: Optional[str] = None
     image_data: Optional[str] = None
     created_at: Optional[datetime] = None
+
+
+# ─── Nurse module ─────────────────────────────────────────────────────────────
+
+class NurseProfile(BaseModel):
+    id: str
+    user_id: Optional[str] = None
+    full_name: str
+    email: str
+    role: str
+    gender: str
+    ward: str = "General Ward"
+    status: str
+    created_at: Optional[datetime] = None
+
+
+class NurseDashboardSummary(BaseModel):
+    patients_attended_today: int = 0
+    vitals_recorded_today: int = 0
+    notes_added_today: int = 0
+    medications_administered_today: int = 0
+    recent_activities: list[PatientActivityItem] = []
+
+
+class NursePatientListItem(BaseModel):
+    id: str
+    user_id: Optional[str] = None
+    full_name: str
+    gender: str
+    blood_group: Optional[str] = None
+    last_recorded_at: Optional[datetime] = None
+    status: str
+
+
+class PatientVitalsRecord(BaseModel):
+    id: str
+    temperature_celsius: Optional[float] = None
+    blood_pressure_systolic: Optional[int] = None
+    blood_pressure_diastolic: Optional[int] = None
+    heart_rate: Optional[int] = None
+    spo2: Optional[int] = None
+    respiratory_rate: Optional[int] = None
+    weight_kg: Optional[float] = None
+    height_cm: Optional[float] = None
+    notes: Optional[str] = None
+    recorded_at: Optional[datetime] = None
+    nurse_name: Optional[str] = None
+
+
+# Bounds catch fat-finger entry (e.g. "990" instead of "99" for SpO2) at the
+# point of capture, since these numbers can directly steer clinical decisions.
+class CreateVitalsRequest(BaseModel):
+    temperature_celsius: Optional[float] = Field(default=None, ge=25.0, le=45.0)
+    blood_pressure_systolic: Optional[int] = Field(default=None, ge=40, le=300)
+    blood_pressure_diastolic: Optional[int] = Field(default=None, ge=20, le=200)
+    heart_rate: Optional[int] = Field(default=None, ge=20, le=300)
+    spo2: Optional[int] = Field(default=None, ge=0, le=100)
+    respiratory_rate: Optional[int] = Field(default=None, ge=4, le=80)
+    weight_kg: Optional[float] = Field(default=None, gt=0, le=500)
+    height_cm: Optional[float] = Field(default=None, gt=0, le=300)
+    notes: Optional[str] = None
+
+    @model_validator(mode="after")
+    def at_least_one_reading(self):
+        fields = (
+            self.temperature_celsius, self.blood_pressure_systolic, self.blood_pressure_diastolic,
+            self.heart_rate, self.spo2, self.respiratory_rate, self.weight_kg, self.height_cm,
+        )
+        if all(v is None for v in fields):
+            raise ValueError("At least one vital reading must be provided.")
+        return self
+
+
+class NursingNoteRecord(BaseModel):
+    id: str
+    note_type: str
+    content: str
+    created_at: Optional[datetime] = None
+    nurse_name: Optional[str] = None
+
+
+class CreateNursingNoteRequest(BaseModel):
+    note_type: str = "Observation"
+    content: str = Field(min_length=1)
+
+    @field_validator("note_type")
+    @classmethod
+    def valid_note_type(cls, v: str) -> str:
+        allowed = {"Observation", "Care", "Incident"}
+        if v not in allowed:
+            raise ValueError(f"note_type must be one of {sorted(allowed)}")
+        return v
+
+
+class ActivePrescriptionForNurse(BaseModel):
+    id: str
+    medicine_name: str
+    dosage: str
+    frequency: str
+    duration: str
+    instructions: Optional[str] = None
+    prescribed_date: Optional[date] = None
+    last_administered_at: Optional[datetime] = None
+    last_administered_status: Optional[str] = None
+
+
+class MedicationAdministrationRecord(BaseModel):
+    id: str
+    prescription_id: str
+    medicine_name: str
+    dosage: str
+    status: str
+    remarks: Optional[str] = None
+    administered_at: Optional[datetime] = None
+    nurse_name: Optional[str] = None
+
+
+class CreateMedicationAdministrationRequest(BaseModel):
+    status: str = "Administered"
+    remarks: Optional[str] = None
+
+    @field_validator("status")
+    @classmethod
+    def valid_status(cls, v: str) -> str:
+        allowed = {"Administered", "Refused", "Held", "Missed"}
+        if v not in allowed:
+            raise ValueError(f"status must be one of {sorted(allowed)}")
+        return v
+
+
+class NursePatientDetail(BaseModel):
+    profile: NursePatientListItem
+    vitals_history: list[PatientVitalsRecord] = []
+    nursing_notes: list[NursingNoteRecord] = []
+    active_prescriptions: list[ActivePrescriptionForNurse] = []

@@ -17,30 +17,78 @@ interface LabPanel {
   category: string;
 }
 
-interface PatientDetailInfo {
+interface PatientProfileInfo {
   id: string;
-  name?: string;
+  user_id?: string;
+  full_name?: string;
   email?: string;
   gender?: string;
   blood_group?: string;
   date_of_birth?: string;
-  dob?: string;
-  diagnoses?: Record<string, unknown>[];
-  prescriptions?: Record<string, unknown>[];
-  [key: string]: unknown;
 }
+
+interface DiagnosisEntry {
+  id: string;
+  title: string;
+  description?: string | null;
+  symptoms?: string | null;
+  doctor_notes?: string | null;
+  recommended_tests?: string | null;
+  visit_date?: string | null;
+  created_at?: string | null;
+}
+
+interface PrescriptionEntry {
+  id: string;
+  medicine_name: string;
+  dosage: string;
+  frequency: string;
+  duration: string;
+  instructions?: string | null;
+  prescribed_date?: string | null;
+}
+
+interface PatientDetailResponse {
+  profile: PatientProfileInfo;
+  diagnoses: DiagnosisEntry[];
+  prescriptions: PrescriptionEntry[];
+}
+
+const todayStr = () => new Date().toISOString().split("T")[0];
+
+const emptyDiagnosisForm = {
+  title: "",
+  description: "",
+  symptoms: "",
+  doctor_notes: "",
+  recommended_tests: "",
+  visit_date: todayStr(),
+};
+
+const emptyPrescriptionForm = {
+  medicine_name: "",
+  dosage: "",
+  frequency: "",
+  duration: "",
+  instructions: "",
+  prescribed_date: todayStr(),
+};
 
 
 export default function PatientDetails() {
   const params = useParams();
-  const [patient, setPatient] = useState<PatientDetailInfo | null>(null);
+  const [patient, setPatient] = useState<PatientDetailResponse | null>(null);
 
   const [loading, setLoading] = useState(true);
 
-
   const [diagnosisModal, setDiagnosisModal] = useState(false);
   const [prescriptionModal, setPrescriptionModal] = useState(false);
-  const [formData, setFormData] = useState({ description: "", medications: "" });
+  const [diagnosisForm, setDiagnosisForm] = useState(emptyDiagnosisForm);
+  const [prescriptionForm, setPrescriptionForm] = useState(emptyPrescriptionForm);
+  const [diagnosisSubmitting, setDiagnosisSubmitting] = useState(false);
+  const [prescriptionSubmitting, setPrescriptionSubmitting] = useState(false);
+  const [diagnosisError, setDiagnosisError] = useState("");
+  const [prescriptionError, setPrescriptionError] = useState("");
 
   const [labModal, setLabModal] = useState(false);
   const [labPanels, setLabPanels] = useState<LabPanel[]>([]);
@@ -102,25 +150,47 @@ export default function PatientDetails() {
 
   const handleDiagnosis = async (e: React.FormEvent) => {
     e.preventDefault();
+    setDiagnosisError("");
+    setDiagnosisSubmitting(true);
     try {
-      await createDiagnosis(params.id as string, { description: formData.description });
+      await createDiagnosis(params.id as string, {
+        title: diagnosisForm.title,
+        description: diagnosisForm.description || undefined,
+        symptoms: diagnosisForm.symptoms || undefined,
+        doctor_notes: diagnosisForm.doctor_notes || undefined,
+        recommended_tests: diagnosisForm.recommended_tests || undefined,
+        visit_date: diagnosisForm.visit_date,
+      });
       setDiagnosisModal(false);
-      setFormData({ ...formData, description: "" });
-      // Refresh logic would go here
+      setDiagnosisForm(emptyDiagnosisForm);
+      await fetchDetail();
     } catch (error) {
-      console.error(error);
+      setDiagnosisError(error instanceof Error ? error.message : "Failed to create diagnosis.");
+    } finally {
+      setDiagnosisSubmitting(false);
     }
   };
 
   const handlePrescription = async (e: React.FormEvent) => {
     e.preventDefault();
+    setPrescriptionError("");
+    setPrescriptionSubmitting(true);
     try {
-      await createPrescription(params.id as string, { medications: formData.medications });
+      await createPrescription(params.id as string, {
+        medicine_name: prescriptionForm.medicine_name,
+        dosage: prescriptionForm.dosage,
+        frequency: prescriptionForm.frequency,
+        duration: prescriptionForm.duration,
+        instructions: prescriptionForm.instructions || undefined,
+        prescribed_date: prescriptionForm.prescribed_date,
+      });
       setPrescriptionModal(false);
-      setFormData({ ...formData, medications: "" });
-      // Refresh logic would go here
+      setPrescriptionForm(emptyPrescriptionForm);
+      await fetchDetail();
     } catch (error) {
-      console.error(error);
+      setPrescriptionError(error instanceof Error ? error.message : "Failed to create prescription.");
+    } finally {
+      setPrescriptionSubmitting(false);
     }
   };
 
@@ -147,23 +217,23 @@ export default function PatientDetails() {
         <div className="flex-1 grid grid-cols-2 md:grid-cols-4 gap-4 w-full">
           <div>
             <p className="text-xs text-slate-400 uppercase tracking-wider">Name</p>
-            <p className="text-lg font-bold text-slate-800">{patient.name || "Unknown"}</p>
+            <p className="text-lg font-bold text-slate-800">{patient.profile.full_name || "Unknown"}</p>
           </div>
           <div>
             <p className="text-xs text-slate-400 uppercase tracking-wider">Email</p>
-            <p className="text-sm font-medium text-slate-700">{patient.email || "N/A"}</p>
+            <p className="text-sm font-medium text-slate-700">{patient.profile.email || "N/A"}</p>
           </div>
           <div>
             <p className="text-xs text-slate-400 uppercase tracking-wider">Gender</p>
-            <p className="text-sm font-medium text-slate-700">{patient.gender || "N/A"}</p>
+            <p className="text-sm font-medium text-slate-700">{patient.profile.gender || "N/A"}</p>
           </div>
           <div>
             <p className="text-xs text-slate-400 uppercase tracking-wider">Blood Group</p>
-            <p className="text-sm font-medium text-slate-700">{patient.blood_group || "N/A"}</p>
+            <p className="text-sm font-medium text-slate-700">{patient.profile.blood_group || "N/A"}</p>
           </div>
           <div>
             <p className="text-xs text-slate-400 uppercase tracking-wider">DOB</p>
-            <p className="text-sm font-medium text-slate-700">{patient.dob || "N/A"}</p>
+            <p className="text-sm font-medium text-slate-700">{patient.profile.date_of_birth || "N/A"}</p>
           </div>
         </div>
         <div className="flex flex-col gap-2 w-full md:w-auto">
@@ -187,11 +257,16 @@ export default function PatientDetails() {
             <h2 className="text-lg font-bold text-slate-800">Previous Diagnoses</h2>
           </div>
           <div className="space-y-4">
-            {patient.diagnoses && (patient.diagnoses as Record<string, unknown>[]).length > 0 ? (
-              (patient.diagnoses as Record<string, unknown>[]).map((d: Record<string, unknown>, i: number) => (
-                <div key={i} className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-                  <p className="text-sm text-slate-700">{d.description as string}</p>
-                  <p className="text-xs text-slate-400 mt-2">{new Date(d.date as string).toLocaleString()}</p>
+            {patient.diagnoses && patient.diagnoses.length > 0 ? (
+              patient.diagnoses.map((d) => (
+                <div key={d.id} className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                  <p className="text-sm font-semibold text-slate-800">{d.title}</p>
+                  {d.description && <p className="text-sm text-slate-600 mt-1">{d.description}</p>}
+                  {d.symptoms && <p className="text-xs text-slate-500 mt-1"><span className="font-medium">Symptoms:</span> {d.symptoms}</p>}
+                  {d.recommended_tests && <p className="text-xs text-slate-500 mt-1"><span className="font-medium">Recommended tests:</span> {d.recommended_tests}</p>}
+                  <p className="text-xs text-slate-400 mt-2">
+                    {d.visit_date ? new Date(d.visit_date).toLocaleDateString() : (d.created_at ? new Date(d.created_at).toLocaleDateString() : "")}
+                  </p>
                 </div>
               ))
             ) : (
@@ -206,11 +281,13 @@ export default function PatientDetails() {
             <h2 className="text-lg font-bold text-slate-800">Previous Prescriptions</h2>
           </div>
           <div className="space-y-4">
-            {patient.prescriptions && (patient.prescriptions as Record<string, unknown>[]).length > 0 ? (
-              (patient.prescriptions as Record<string, unknown>[]).map((p: Record<string, unknown>, i: number) => (
-                <div key={i} className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-                  <p className="text-sm text-slate-700">{p.medications as string}</p>
-                  <p className="text-xs text-slate-400 mt-2">{new Date(p.date as string).toLocaleString()}</p>
+            {patient.prescriptions && patient.prescriptions.length > 0 ? (
+              patient.prescriptions.map((p) => (
+                <div key={p.id} className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                  <p className="text-sm font-semibold text-slate-800">{p.medicine_name} — {p.dosage}</p>
+                  <p className="text-xs text-slate-500 mt-1">{p.frequency} · {p.duration}</p>
+                  {p.instructions && <p className="text-xs text-slate-500 mt-1">{p.instructions}</p>}
+                  <p className="text-xs text-slate-400 mt-2">{p.prescribed_date ? new Date(p.prescribed_date).toLocaleDateString() : ""}</p>
                 </div>
               ))
             ) : (
@@ -223,21 +300,77 @@ export default function PatientDetails() {
       {/* Modals */}
       {diagnosisModal && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-bold">New Diagnosis</h3>
               <button onClick={() => setDiagnosisModal(false)}><X className="w-5 h-5 text-slate-500" /></button>
             </div>
-            <form onSubmit={handleDiagnosis}>
-              <textarea
-                required
-                className="w-full border border-slate-200 rounded-xl p-3 mb-4 focus:ring-2 focus:ring-cyan-500 outline-none"
-                rows={4}
-                placeholder="Enter diagnosis details..."
-                value={formData.description}
-                onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-              />
-              <button type="submit" className="w-full bg-cyan-600 text-white rounded-xl py-2 font-bold hover:bg-cyan-700">Submit</button>
+            {diagnosisError && <div className="p-3 mb-4 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-semibold">{diagnosisError}</div>}
+            <form onSubmit={handleDiagnosis} className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Title *</label>
+                <input
+                  required
+                  type="text"
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-cyan-500 outline-none"
+                  placeholder="e.g. Type 2 Diabetes Mellitus"
+                  value={diagnosisForm.title}
+                  onChange={(e) => setDiagnosisForm({ ...diagnosisForm, title: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Visit Date *</label>
+                <input
+                  required
+                  type="date"
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-cyan-500 outline-none"
+                  value={diagnosisForm.visit_date}
+                  onChange={(e) => setDiagnosisForm({ ...diagnosisForm, visit_date: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Description</label>
+                <textarea
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-cyan-500 outline-none"
+                  rows={2}
+                  placeholder="Diagnosis summary..."
+                  value={diagnosisForm.description}
+                  onChange={(e) => setDiagnosisForm({ ...diagnosisForm, description: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Symptoms</label>
+                <textarea
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-cyan-500 outline-none"
+                  rows={2}
+                  placeholder="Reported symptoms..."
+                  value={diagnosisForm.symptoms}
+                  onChange={(e) => setDiagnosisForm({ ...diagnosisForm, symptoms: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Doctor Notes</label>
+                <textarea
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-cyan-500 outline-none"
+                  rows={2}
+                  placeholder="Clinical notes..."
+                  value={diagnosisForm.doctor_notes}
+                  onChange={(e) => setDiagnosisForm({ ...diagnosisForm, doctor_notes: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Recommended Tests</label>
+                <input
+                  type="text"
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-cyan-500 outline-none"
+                  placeholder="e.g. Fasting Blood Sugar, HbA1c"
+                  value={diagnosisForm.recommended_tests}
+                  onChange={(e) => setDiagnosisForm({ ...diagnosisForm, recommended_tests: e.target.value })}
+                />
+              </div>
+              <button type="submit" disabled={diagnosisSubmitting} className="w-full bg-cyan-600 text-white rounded-xl py-2.5 font-bold hover:bg-cyan-700 disabled:opacity-60">
+                {diagnosisSubmitting ? "Saving..." : "Submit"}
+              </button>
             </form>
           </div>
         </div>
@@ -245,21 +378,84 @@ export default function PatientDetails() {
 
       {prescriptionModal && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-bold">New Prescription</h3>
               <button onClick={() => setPrescriptionModal(false)}><X className="w-5 h-5 text-slate-500" /></button>
             </div>
-            <form onSubmit={handlePrescription}>
-              <textarea
-                required
-                className="w-full border border-slate-200 rounded-xl p-3 mb-4 focus:ring-2 focus:ring-emerald-500 outline-none"
-                rows={4}
-                placeholder="Enter medications (e.g. Paracetamol 500mg, 1x/day)"
-                value={formData.medications}
-                onChange={(e) => setFormData({ ...formData, medications: e.target.value })}
-              />
-              <button type="submit" className="w-full bg-emerald-600 text-white rounded-xl py-2 font-bold hover:bg-emerald-700">Submit</button>
+            {prescriptionError && <div className="p-3 mb-4 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-semibold">{prescriptionError}</div>}
+            <form onSubmit={handlePrescription} className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Medicine Name *</label>
+                <input
+                  required
+                  type="text"
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                  placeholder="e.g. Metformin"
+                  value={prescriptionForm.medicine_name}
+                  onChange={(e) => setPrescriptionForm({ ...prescriptionForm, medicine_name: e.target.value })}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Dosage *</label>
+                  <input
+                    required
+                    type="text"
+                    className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                    placeholder="e.g. 500mg"
+                    value={prescriptionForm.dosage}
+                    onChange={(e) => setPrescriptionForm({ ...prescriptionForm, dosage: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Frequency *</label>
+                  <input
+                    required
+                    type="text"
+                    className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                    placeholder="e.g. Twice daily"
+                    value={prescriptionForm.frequency}
+                    onChange={(e) => setPrescriptionForm({ ...prescriptionForm, frequency: e.target.value })}
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Duration *</label>
+                  <input
+                    required
+                    type="text"
+                    className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                    placeholder="e.g. 90 days"
+                    value={prescriptionForm.duration}
+                    onChange={(e) => setPrescriptionForm({ ...prescriptionForm, duration: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Prescribed Date *</label>
+                  <input
+                    required
+                    type="date"
+                    className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                    value={prescriptionForm.prescribed_date}
+                    onChange={(e) => setPrescriptionForm({ ...prescriptionForm, prescribed_date: e.target.value })}
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Instructions</label>
+                <textarea
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                  rows={2}
+                  placeholder="e.g. Take after meals"
+                  value={prescriptionForm.instructions}
+                  onChange={(e) => setPrescriptionForm({ ...prescriptionForm, instructions: e.target.value })}
+                />
+              </div>
+              <button type="submit" disabled={prescriptionSubmitting} className="w-full bg-emerald-600 text-white rounded-xl py-2.5 font-bold hover:bg-emerald-700 disabled:opacity-60">
+                {prescriptionSubmitting ? "Saving..." : "Submit"}
+              </button>
             </form>
           </div>
         </div>
