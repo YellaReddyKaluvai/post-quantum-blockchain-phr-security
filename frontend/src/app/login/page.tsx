@@ -1,22 +1,26 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, Suspense } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ShieldCheck, User, Lock, ArrowRight, Loader2 } from "lucide-react";
+import { ShieldCheck, User, Lock, ArrowRight, Loader2, Clock } from "lucide-react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { login, setAuthCookies } from "../../lib/session";
 import { normalizeRole, dashboardRouteMap } from "../../lib/iam";
 import { useAuth } from "../../context/AuthContext";
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { setSession } = useAuth();
   const [userId, setUserId] = useState("");
   const [password, setPassword] = useState("");
-  
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  const sessionExpired = searchParams.get("reason") === "expired";
+  const returnTo = searchParams.get("from");
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -33,7 +37,13 @@ export default function LoginPage() {
         });
         const appRole = normalizeRole(result.role);
         const dashPath = appRole ? dashboardRouteMap[appRole] : "/login";
-        router.push(dashPath);
+        // Return them to the page the expired session interrupted, but only if
+        // their role is actually allowed there — a stale `from` must never
+        // become a way around the role routing.
+        const allowedPrefix = appRole ? dashboardRouteMap[appRole] : null;
+        const canReturn =
+          returnTo && allowedPrefix && returnTo.startsWith(allowedPrefix);
+        router.push(canReturn ? returnTo : dashPath);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : "Network Error");
       } finally {
@@ -89,6 +99,15 @@ export default function LoginPage() {
                 <p className="text-slate-500 text-sm mt-2 font-medium">Authenticate to access your secure portal.</p>
               </div>
 
+              {sessionExpired && !error && (
+                <div className="mb-5 p-3.5 rounded-xl bg-amber-50 border border-amber-100 text-amber-800 text-xs font-semibold flex items-start gap-2.5">
+                  <Clock className="w-4 h-4 flex-shrink-0 mt-px" />
+                  <span>
+                    Your session timed out for security. Sign in again
+                    {returnTo ? " to pick up where you left off." : "."}
+                  </span>
+                </div>
+              )}
               {error && <div className="mb-5 p-3.5 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-semibold">{error}</div>}
 
               <form onSubmit={handleLoginSubmit} className="space-y-5 mt-6">
@@ -125,5 +144,13 @@ export default function LoginPage() {
         </p>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={null}>
+      <LoginForm />
+    </Suspense>
   );
 }

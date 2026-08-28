@@ -38,6 +38,38 @@ export function getAuthToken(): string | null {
   return getCookie(TOKEN_COOKIE);
 }
 
+export function clearAuthCookies() {
+  [TOKEN_COOKIE, ROLE_COOKIE, USER_ID_COOKIE].forEach((name) => {
+    document.cookie = `${name}=; Path=/; Max-Age=0; SameSite=Lax`;
+  });
+}
+
+// Sessions expire after 30 minutes. Without this, an expired token surfaced as
+// an empty list or a blank card — indistinguishable from "you have no data" —
+// so the app looked broken rather than logged out. Redirect once, with a note
+// explaining why, and preserve where they were so they land back there.
+let redirectingToLogin = false;
+
+function handleSessionExpired() {
+  if (typeof window === "undefined" || redirectingToLogin) return;
+  redirectingToLogin = true;
+  clearAuthCookies();
+  const from = window.location.pathname + window.location.search;
+  const params = new URLSearchParams({ reason: "expired" });
+  // Only round-trip in-app paths, never an absolute URL from elsewhere.
+  if (from.startsWith("/") && !from.startsWith("//") && !from.startsWith("/login")) {
+    params.set("from", from);
+  }
+  window.location.replace(`/login?${params.toString()}`);
+}
+
+export class SessionExpiredError extends Error {
+  constructor() {
+    super("Your session has expired. Please sign in again.");
+    this.name = "SessionExpiredError";
+  }
+}
+
 async function fetchWithAuth(url: string, options: RequestInit = {}) {
   const token = getAuthToken();
   const headers = new Headers(options.headers || {});
@@ -47,7 +79,17 @@ async function fetchWithAuth(url: string, options: RequestInit = {}) {
   if (options.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  return fetch(url, { ...options, headers });
+  const response = await fetch(url, { ...options, headers });
+
+  // 401 means the token is gone or expired. 403 is a genuine permission
+  // decision and must NOT be treated as expiry — that would bounce a user to
+  // login for something they simply aren't allowed to do.
+  if (response.status === 401) {
+    handleSessionExpired();
+    throw new SessionExpiredError();
+  }
+
+  return response;
 }
 
 export async function register(data: Record<string, unknown>) {

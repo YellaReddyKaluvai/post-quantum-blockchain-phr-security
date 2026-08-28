@@ -30,11 +30,11 @@ The architecture combines **Post-Quantum Key Encapsulation (ML-KEM)**, **Quantum
 
 ### 3. 🧪 Laboratory Technician Dashboard (LIMS) (`/dashboard/lab-technician`)
 - **Laboratory Information Management System (LIMS)**: Complete portal for receiving test requests, searching patient directories, and uploading medical documents.
-- **Structured Report Form Builder**: Form templates for CBC, Blood Sugar, Urine Analysis, LFT, ECG, and Imaging.
+- **Structured Report Form Builder**: Nine panels — CBC, Blood Sugar, LFT, KFT, Lipid, Thyroid, Urine, ECG and Radiology — each driving both the data-entry form and the printed report.
 - **Live Hospital Document Preview**: Dynamic preview rendering official hospital letterhead and test result ranges.
-- **12-Step PQC Security Pipeline**: Automated SHA-256 hashing, AES-256-GCM payload encryption, ML-KEM key wrapping, ML-DSA digital signing, and IPFS multihash pinning.
+- **PQC Security Pipeline**: SHA-256 hashing, AES-256-GCM payload encryption, ML-KEM key encapsulation, ML-DSA digital signing, and an on-chain integrity anchor. Only ciphertext reaches cloud storage.
 - **Imaging Gallery**: High-resolution gallery for X-Rays, MRIs, CT Scans, and Ultrasounds with interactive zoom.
-- **Blockchain Audit Trail Modal**: View cryptographic transaction hashes, IPFS CIDs (`ipfs://Qm...`), and AWS S3 storage keys.
+- **Blockchain Audit Trail Modal**: Transaction hash with its network, the document's content CID, and the AWS S3 object key — each shown only when it genuinely exists.
 
 ### 4. 👤 Patient Dashboard (`/dashboard/patient`)
 - **Personal Health Record (PHR)**: Medical records, diagnosis timeline, active prescriptions, and lab report history.
@@ -53,7 +53,7 @@ The architecture combines **Post-Quantum Key Encapsulation (ML-KEM)**, **Quantum
 | **Key Encapsulation** | **ML-KEM (Kyber-768)** | Post-Quantum Key Encapsulation (FIPS 203) for payload AES keys |
 | **Digital Signatures** | **ML-DSA (Dilithium-3)** | Post-Quantum Digital Signature (FIPS 204) for document authenticity |
 | **Cloud Storage** | **AWS S3** | Resilient cloud storage bucket (`postquantumcryptography`) |
-| **Decentralized Storage** | **IPFS (v0 Multihash)** | Content-addressed storage CID (`ipfs://Qm...`) |
+| **Content Addressing** | **CIDv0 (IPFS multihash format)** | Deterministic fingerprint of the encrypted document. Computed locally — **not** published to the IPFS network |
 | **Audit Logging** | **Blockchain Metadata** | Immutable audit logging in `AdminAuditLogs` |
 
 ---
@@ -63,7 +63,7 @@ The architecture combines **Post-Quantum Key Encapsulation (ML-KEM)**, **Quantum
 - **Backend**: FastAPI (Python 3.11/3.13), Uvicorn, PostgreSQL, `psycopg3`, `boto3`, `liboqs-python`
 - **Frontend**: Next.js 16 (App Router), TailwindCSS v4, Framer Motion 12, Lucide React
 - **Database**: PostgreSQL 15+ (`pqc_hospital`)
-- **Cloud & Storage**: AWS S3, IPFS Gateway (Pinata)
+- **Cloud & Storage**: AWS S3 (encrypted objects only)
 
 ---
 
@@ -92,7 +92,6 @@ AWS_ACCESS_KEY_ID="your_aws_access_key"
 AWS_SECRET_ACCESS_KEY="your_aws_secret_key"
 AWS_REGION="eu-north-1"
 AWS_S3_BUCKET="postquantumcryptography"
-IPFS_GATEWAY_URL="https://gateway.pinata.cloud/ipfs/"
 
 # Blockchain audit anchoring (defaults target a local dev chain)
 BLOCKCHAIN_ENABLED="true"
@@ -116,7 +115,34 @@ npm install
 npm run dev
 ```
 
-### 5. Blockchain Audit Trail
+### 5. Running the Tests
+
+```bash
+cd backend
+python3 -m pytest
+```
+
+75 tests, no database or running server required — they exercise pure functions
+so they fail for exactly one reason.
+
+What they cover, and why these specific assertions: every test asserts a
+*refusal* as well as a success, because a happy-path-only suite would pass
+against a verifier that always returns true. That is not hypothetical — this
+codebase previously shipped one.
+
+| Area | The property being protected |
+|---|---|
+| `test_crypto_pipeline.py` | A tampered digest fails verification; a forged signature fails; a mock key never verifies; wrong-key decryption raises; ciphertext does not leak plaintext |
+| `test_storage_and_anchoring.py` | A failed upload records no object key; a failed download raises instead of returning placeholder bytes; placeholder credentials read as *unconfigured*; an unreachable chain yields a clearly-labelled local anchor |
+| `test_clinical_validation.py` | Impossible vitals (SpO₂ 990%) are rejected while abnormal-but-real ones (SpO₂ 88%) are accepted; past appointment dates are refused |
+| `test_rbac_parity.py` | The backend permission matrix and the frontend IAM map cannot drift apart |
+
+The suite was checked by mutation: reintroducing three real past bugs — a
+signature verifier that always returned true, an upload that recorded a key it
+never wrote, and a dropped vitals validator — made 7, 1 and 2 tests fail
+respectively.
+
+### 6. Blockchain Audit Trail
 
 Document digests are anchored on-chain via `contracts/PHR.sol`. Every developer
 runs their own local chain — no accounts, no funds, no internet required.
