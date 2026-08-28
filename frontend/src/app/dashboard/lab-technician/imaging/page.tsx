@@ -83,34 +83,10 @@ export default function ImagingReportsPage() {
         setReports(data);
       } catch (error) {
         console.error(error);
-        setReports([
-          {
-            id: "IMG-001",
-            patientName: "Jane Smith",
-            patientId: "PAT-9932",
-            scanRegion: "Brain",
-            examType: "MRI without Contrast",
-            history: "Persistent headaches, dizzy spells.",
-            findings: "No acute intracranial hemorrhage or mass effect. Ventricular system is unremarkable.",
-            impression: "Normal MRI Brain.",
-            date: "2026-07-24",
-            imageUrl: "https://images.unsplash.com/photo-1559757175-5700dde675bc?w=800&auto=format&fit=crop&q=60",
-            linkedReport: "REP-9922"
-          },
-          {
-            id: "IMG-002",
-            patientName: "Mark Johnson",
-            patientId: "PAT-1123",
-            scanRegion: "Chest",
-            examType: "X-Ray PA View",
-            history: "Cough for 2 weeks, mild fever.",
-            findings: "Clear lung fields. No pleural effusion or pneumothorax.",
-            impression: "Normal Chest X-Ray.",
-            date: "2026-07-25",
-            imageUrl: "https://images.unsplash.com/photo-1516069675273-df2676b10702?w=800&auto=format&fit=crop&q=60",
-            linkedReport: null
-          }
-        ]);
+        // No placeholder studies. These previously used stock photographs as
+        // stand-in medical scans, which is indefensible in a clinical record.
+        setReports([]);
+        setDecryptError("Could not load imaging reports. Check that the backend is running.");
       } finally {
         setLoading(false);
       }

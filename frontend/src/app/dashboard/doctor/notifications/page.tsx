@@ -5,11 +5,16 @@ import { motion } from "framer-motion";
 import { Bell, Check, Trash2 } from "lucide-react";
 import { getDoctorNotifications, markDoctorNotificationRead, clearDoctorNotifications } from "@/lib/session";
 
+// Mirrors the backend NotificationItem exactly. An earlier version read
+// `message`, `date` and `is_read`, none of which the API returns — so every
+// notification rendered with empty text and never showed as read.
 interface DoctorNotif {
   id: string;
-  is_read?: boolean;
-  message?: string;
-  date?: string;
+  notification_type?: string;
+  title?: string;
+  body?: string;
+  read_at?: string | null;
+  created_at?: string;
   [key: string]: unknown;
 }
 
@@ -35,7 +40,7 @@ export default function DoctorNotifications() {
   const handleMarkRead = async (id: string) => {
     try {
       await markDoctorNotificationRead(id);
-      setNotifications(notifications.map(n => n.id === id ? { ...n, is_read: true } : n));
+      setNotifications(notifications.map(n => n.id === id ? { ...n, read_at: new Date().toISOString() } : n));
     } catch (error) {
       console.error(error);
     }
@@ -80,14 +85,17 @@ export default function DoctorNotifications() {
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: i * 0.05 }}
-              className={`p-4 rounded-2xl border transition-all flex items-start justify-between gap-4 ${notif.is_read ? "bg-slate-50 border-slate-100" : "bg-white border-cyan-200 shadow-sm"}`}
+              className={`p-4 rounded-2xl border transition-all flex items-start justify-between gap-4 ${notif.read_at ? "bg-slate-50 border-slate-100" : "bg-white border-cyan-200 shadow-sm"}`}
             >
               <div>
-                <p className={`text-sm ${notif.is_read ? "text-slate-600" : "font-semibold text-slate-800"}`}>{notif.message}</p>
-                <p className="text-xs text-slate-400 mt-1">{new Date(notif.date || Date.now()).toLocaleString()}</p>
+                <p className={`text-sm ${notif.read_at ? "text-slate-600" : "font-semibold text-slate-800"}`}>{notif.title}</p>
+                {notif.body && <p className="text-sm text-slate-500 mt-0.5">{notif.body}</p>}
+                <p className="text-xs text-slate-400 mt-1">
+                  {notif.created_at ? new Date(notif.created_at).toLocaleString() : ""}
+                </p>
               </div>
 
-              {!notif.is_read && (
+              {!notif.read_at && (
                 <button onClick={() => handleMarkRead(notif.id)} className="p-2 text-cyan-600 hover:bg-cyan-50 rounded-xl transition-colors" title="Mark as read">
                   <Check className="w-5 h-5" />
                 </button>

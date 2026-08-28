@@ -2059,14 +2059,27 @@ def search_patients(q: str, session: dict = Depends(require_role("Lab Technician
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
-                SELECT id, user_id, full_name, email, gender 
-                FROM Users 
-                WHERE role = 'Patient' AND (full_name ILIKE %s OR user_id ILIKE %s)
-                LIMIT 10
+                SELECT id, user_id, full_name, email, gender,
+                       blood_group_encrypted, date_of_birth_encrypted
+                FROM Users
+                WHERE role = 'Patient' AND status = 'Approved'
+                  AND (full_name ILIKE %s OR user_id ILIKE %s)
+                ORDER BY full_name ASC
+                LIMIT 20
             """, (f"%{q}%", f"%{q}%"))
             rows = cur.fetchall()
-            
-    return [{"id": str(r["id"]), "user_id": r["user_id"], "full_name": r["full_name"], "email": r["email"], "gender": r["gender"]} for r in rows]
+
+    # Blood group and age are decrypted here because a technician needs both to
+    # interpret results against the correct reference ranges.
+    return [{
+        "id": str(r["id"]),
+        "user_id": r["user_id"],
+        "full_name": r["full_name"],
+        "email": r["email"],
+        "gender": r["gender"],
+        "blood_group": decrypt_data(r["blood_group_encrypted"]) if r.get("blood_group_encrypted") else None,
+        "age": _age_display(decrypt_data(r["date_of_birth_encrypted"]) if r.get("date_of_birth_encrypted") else None) or None,
+    } for r in rows]
 
 @app.get("/api/lab-tech/report-templates")
 def get_report_templates(session: dict = Depends(require_role("Lab Technician"))):

@@ -60,19 +60,19 @@ export default function Profile() {
         
         <div className="relative z-10 flex flex-col md:flex-row items-center md:items-start gap-8">
           <div className="w-24 h-24 rounded-full bg-gradient-to-br from-cyan-400 to-teal-500 flex items-center justify-center shadow-lg shadow-cyan-900/20 flex-shrink-0 text-white text-3xl font-bold">
-            {profile?.name?.charAt(0) || "D"}
+            {profile?.full_name?.charAt(0) || "D"}
           </div>
           
           <div className="flex-1 w-full space-y-6">
             <div>
-              <h2 className="text-2xl font-bold text-slate-800">{profile?.name || "Dr. John Doe"}</h2>
-              <p className="text-cyan-600 font-semibold">{profile?.specialization || "General Physician"}</p>
+              <h2 className="text-2xl font-bold text-slate-800">{profile?.full_name || "—"}</h2>
+              <p className="text-cyan-600 font-semibold">{profile?.specialization || "—"}</p>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
               <div>
                 <p className="text-xs text-slate-400 uppercase tracking-wider mb-1">Doctor ID</p>
-                <p className="text-sm font-medium text-slate-700 bg-slate-50 py-2 px-3 rounded-xl border border-slate-100">{profile?.id || "N/A"}</p>
+                <p className="text-sm font-medium text-slate-700 bg-slate-50 py-2 px-3 rounded-xl border border-slate-100">{profile?.user_id || "N/A"}</p>
               </div>
               <div>
                 <p className="text-xs text-slate-400 uppercase tracking-wider mb-1">Email</p>
