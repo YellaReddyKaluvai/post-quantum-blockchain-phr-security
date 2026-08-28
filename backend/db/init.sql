@@ -479,6 +479,23 @@ CREATE TABLE IF NOT EXISTS MedicationAdministration (
     administered_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Imaging reports carry the same hybrid-encryption material as lab reports.
+-- Previously the image payload was uploaded to cloud storage as plaintext and
+-- stored plaintext in image_data, which contradicts the rule that the cloud
+-- never holds unencrypted medical content. image_data is retained only for
+-- rows predating encryption; new rows populate the encrypted_* columns.
+-- ─────────────────────────────────────────────────────────────────────────────
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS encrypted_image TEXT;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS encrypted_aes_key TEXT;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS encryption_nonce TEXT;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS encryption_tag TEXT;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS document_hash VARCHAR(64);
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS digital_signature TEXT;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS kem_algorithm VARCHAR(32);
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS signature_algorithm VARCHAR(32);
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS blockchain_tx_hash VARCHAR(66);
+
 CREATE INDEX IF NOT EXISTS idx_vitals_patient ON PatientVitals(patient_id);
 CREATE INDEX IF NOT EXISTS idx_vitals_nurse ON PatientVitals(nurse_id);
 CREATE INDEX IF NOT EXISTS idx_vitals_recorded ON PatientVitals(recorded_at DESC);

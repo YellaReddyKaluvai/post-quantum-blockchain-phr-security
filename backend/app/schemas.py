@@ -507,7 +507,15 @@ class ImagingReportItem(BaseModel):
     findings: Optional[str] = None
     impression: Optional[str] = None
     recommendations: Optional[str] = None
-    image_data: Optional[str] = None
+    # The image itself is never included in list responses: it is encrypted at
+    # rest and decrypting every study just to render a list would be both
+    # wasteful and an unnecessary exposure. Fetch it per-study from
+    # /api/lab-tech/imaging/{id}/image instead.
+    has_image: bool = False
+    document_hash: Optional[str] = None
+    kem_algorithm: Optional[str] = None
+    signature_algorithm: Optional[str] = None
+    blockchain_tx_hash: Optional[str] = None
     created_at: Optional[datetime] = None
 
 

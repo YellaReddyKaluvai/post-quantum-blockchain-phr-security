@@ -2,8 +2,8 @@
 
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Film, ZoomIn, Download, X, Activity, FileCheck } from "lucide-react";
-import { getImagingReports } from "@/lib/session";
+import { Film, ZoomIn, Download, X, Activity, FileCheck, Lock, Loader2 } from "lucide-react";
+import { getImagingReports, getImagingImage } from "@/lib/session";
 
 interface ImagingReportItem {
   id: string;
@@ -19,8 +19,14 @@ interface ImagingReportItem {
   patient_user_id?: string;
   patientId?: string;
   image_url?: string;
-  image_data?: string;
   imageUrl?: string;
+  // The payload itself is never in the list response; this only says whether
+  // an encrypted image exists to decrypt.
+  has_image?: boolean;
+  document_hash?: string;
+  kem_algorithm?: string;
+  signature_algorithm?: string;
+  blockchain_tx_hash?: string;
   file_url?: string;
   findings?: string;
   exam_type?: string;
@@ -47,6 +53,28 @@ export default function ImagingReportsPage() {
 
   const [loading, setLoading] = useState(true);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  // Decrypted images, keyed by study id. Populated only when a study is opened.
+  const [decrypted, setDecrypted] = useState<Record<string, string>>({});
+  const [decrypting, setDecrypting] = useState<string | null>(null);
+  const [decryptError, setDecryptError] = useState<string | null>(null);
+
+  const handleViewImage = async (id: string) => {
+    setDecryptError(null);
+    if (decrypted[id]) {
+      setSelectedImage(decrypted[id]);
+      return;
+    }
+    setDecrypting(id);
+    try {
+      const { image_data } = await getImagingImage(id);
+      setDecrypted((prev) => ({ ...prev, [id]: image_data }));
+      setSelectedImage(image_data);
+    } catch (err) {
+      setDecryptError(err instanceof Error ? err.message : "Failed to decrypt image");
+    } finally {
+      setDecrypting(null);
+    }
+  };
 
   useEffect(() => {
     const fetchReports = async () => {
@@ -95,9 +123,15 @@ export default function ImagingReportsPage() {
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-800">Imaging Reports</h1>
-          <p className="text-sm text-slate-500">View and manage uploaded medical imaging scans.</p>
+          <p className="text-sm text-slate-500">Scans are encrypted at rest and decrypted only when opened.</p>
         </div>
       </div>
+
+      {decryptError && (
+        <div className="p-3 rounded-xl bg-rose-50 border border-rose-100 text-rose-700 text-sm font-semibold">
+          {decryptError}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {loading ? (
@@ -119,18 +153,37 @@ export default function ImagingReportsPage() {
             >
               <div className="flex border-b border-slate-100">
                 <div className="w-1/3 relative bg-slate-900 overflow-hidden flex items-center justify-center min-h-[200px]">
-                  {(report.image_data || report.imageUrl) ? (
+                  {decrypted[report.id] ? (
                     <>
-                      <img src={report.image_data || report.imageUrl} alt="Scan" className="w-full h-full object-cover opacity-80 mix-blend-screen" />
-                      <button 
-                        onClick={() => setSelectedImage(report.image_data || report.imageUrl || null)}
-
+                      <img src={decrypted[report.id]} alt="Scan" className="w-full h-full object-cover opacity-80 mix-blend-screen" />
+                      <button
+                        onClick={() => setSelectedImage(decrypted[report.id])}
                         className="absolute inset-0 bg-black/40 flex flex-col items-center justify-center opacity-0 hover:opacity-100 transition-opacity"
                       >
                         <ZoomIn className="w-8 h-8 text-white mb-2" />
                         <span className="text-xs text-white font-bold">View Full</span>
                       </button>
                     </>
+                  ) : report.has_image ? (
+                    // Encrypted at rest: decrypted only on explicit request.
+                    <button
+                      onClick={() => handleViewImage(report.id)}
+                      disabled={decrypting === report.id}
+                      className="absolute inset-0 flex flex-col items-center justify-center text-slate-400 hover:text-cyan-300 transition-colors disabled:opacity-60"
+                    >
+                      {decrypting === report.id ? (
+                        <>
+                          <Loader2 className="w-8 h-8 mb-2 animate-spin" />
+                          <span className="text-[11px] font-bold">Decrypting…</span>
+                        </>
+                      ) : (
+                        <>
+                          <Lock className="w-8 h-8 mb-2" />
+                          <span className="text-[11px] font-bold">Encrypted</span>
+                          <span className="text-[10px] mt-1 underline">Decrypt &amp; view</span>
+                        </>
+                      )}
+                    </button>
                   ) : (
                     <Film className="w-12 h-12 text-slate-700" />
                   )}

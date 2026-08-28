@@ -592,6 +592,17 @@ export async function getImagingReports() {
   return response.json();
 }
 
+// Images are encrypted at rest and are not included in the list response, so
+// they are decrypted one at a time, only when actually viewed.
+export async function getImagingImage(id: string): Promise<{ image_data: string; encrypted: boolean }> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/imaging/${id}/image`);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorMessage(err, "Failed to decrypt image"));
+  }
+  return response.json();
+}
+
 export async function getLabTechNotifications() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/notifications`);
   if (!response.ok) throw new Error("Failed to fetch notifications");

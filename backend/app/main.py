@@ -2421,21 +2421,109 @@ def get_lab_tech_report_detail(report_id: str, session: dict = Depends(require_r
     }
 
 @app.post("/api/lab-tech/imaging/upload")
-def upload_imaging_report(req: CreateImagingReportRequest, session: dict = Depends(require_role("Lab Technician"))):
+def upload_imaging_report(
+    req: CreateImagingReportRequest,
+    request: Request,
+    session: dict = Depends(require_role("Lab Technician")),
+):
+    """Store an imaging study under the same hybrid protection as lab reports.
+
+    The image is AES-256-GCM encrypted, its key is protected with the patient's
+    ML-KEM public key, the digest is signed with the technician's ML-DSA key,
+    and only ciphertext is written to cloud storage. The previous version
+    uploaded the raw image and — when no image was supplied — 32 random bytes
+    standing in for one, which put unencrypted medical content in the bucket.
+    """
     user_uuid = session["user_id"]
-    
-    # Process IPFS CID & S3 key for imaging payload
-    image_bytes = req.image_data.encode('utf-8') if req.image_data else os.urandom(32)
-    ipfs_cid, ipfs_gateway_url, s3_key = process_and_pin_ipfs(image_bytes, f"{req.exam_type}_{req.scan_region}")
+
+    if not req.image_data:
+        raise HTTPException(status_code=400, detail="image_data is required.")
 
     with get_db() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT id, user_id, full_name, mlkem_public_key FROM Users WHERE id = %s AND role = 'Patient'",
+                (req.patient_id,),
+            )
+            patient = cur.fetchone()
+            if not patient:
+                raise HTTPException(status_code=404, detail="Patient not found")
+            if not patient["mlkem_public_key"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Patient has no ML-KEM public key; the study cannot be protected.",
+                )
+
+            cur.execute("SELECT mldsa_private_key_encrypted FROM Users WHERE id = %s", (user_uuid,))
+            technician = cur.fetchone()
+
+            image_bytes = req.image_data.encode("utf-8")
+            document_hash = sha256_hex(image_bytes)
+
+            try:
+                kem_ciphertext, shared_secret = encapsulate_aes_key(patient["mlkem_public_key"])
+                aes_key = derive_aes_key(shared_secret)
+                encrypted = encrypt_document(image_bytes, aes_key)
+                signature = sign_document_hash(document_hash, technician["mldsa_private_key_encrypted"])
+            except PQCUnavailableError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+            # Only ciphertext leaves the process.
+            ipfs_cid, ipfs_gateway_url, s3_key = process_and_pin_ipfs(
+                encrypted["ciphertext"].encode("utf-8"), f"{req.exam_type}_{req.scan_region}"
+            )
+
             cur.execute("""
-                INSERT INTO ImagingReports (patient_id, lab_tech_id, scan_region, exam_type, clinical_history, findings, impression, recommendations, image_data, ipfs_cid, s3_key)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
-            """, (req.patient_id, user_uuid, req.scan_region, req.exam_type, req.clinical_history, req.findings, req.impression, req.recommendations, req.image_data, ipfs_cid, s3_key))
+                INSERT INTO ImagingReports (
+                    patient_id, lab_tech_id, scan_region, exam_type, clinical_history,
+                    findings, impression, recommendations,
+                    encrypted_image, encrypted_aes_key, encryption_nonce, encryption_tag,
+                    document_hash, digital_signature, kem_algorithm, signature_algorithm,
+                    ipfs_cid, s3_key
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                req.patient_id, user_uuid, req.scan_region, req.exam_type, req.clinical_history,
+                req.findings, req.impression, req.recommendations,
+                encrypted["ciphertext"], kem_ciphertext, encrypted["nonce"], encrypted["tag"],
+                document_hash, signature, ML_KEM_ALG, ML_DSA_ALG,
+                ipfs_cid, s3_key,
+            ))
+            imaging_id = cur.fetchone()["id"]
+
+            cur.execute("""
+                INSERT INTO Notifications (user_id, notification_type, title, body)
+                VALUES (%s, 'IMAGING_READY', 'New Imaging Report Available',
+                        'Your ' || %s || ' (' || %s || ') study is ready to view.')
+            """, (req.patient_id, req.exam_type, req.scan_region))
             conn.commit()
-    return {"status": "success", "ipfs_cid": ipfs_cid, "s3_key": s3_key}
+
+        anchor = anchor_document(
+            conn,
+            document_type="ImagingReport", document_id=str(imaging_id),
+            document_hash=document_hash, action="IMAGING_FINALIZED",
+            patient_id=str(req.patient_id), actor_id=user_uuid,
+            actor_public_id=session.get("public_user_id"),
+        )
+
+        with conn.cursor() as cur:
+            cur.execute("UPDATE ImagingReports SET blockchain_tx_hash = %s WHERE id = %s",
+                        (anchor["tx_hash"], imaging_id))
+            conn.commit()
+
+    return {
+        "status": "success",
+        "imaging_id": str(imaging_id),
+        "patient_user_id": patient["user_id"],
+        "document_hash": document_hash,
+        "kem_algorithm": ML_KEM_ALG,
+        "signature_algorithm": ML_DSA_ALG,
+        "blockchain_tx_hash": anchor["tx_hash"],
+        "anchored_on": anchor["anchored_on"],
+        "ipfs_cid": ipfs_cid,
+        "s3_key": s3_key,
+    }
 
 
 @app.get("/api/lab-tech/imaging")
@@ -2456,8 +2544,67 @@ def get_imaging_reports(session: dict = Depends(require_role("Lab Technician")))
         id=str(r["id"]), patient_name=r["patient_name"], patient_user_id=r["patient_user_id"],
         scan_region=r["scan_region"], exam_type=r["exam_type"], clinical_history=r["clinical_history"],
         findings=r["findings"], impression=r["impression"], recommendations=r["recommendations"],
-        image_data=r["image_data"], created_at=r["created_at"]
+        has_image=bool(r.get("encrypted_image") or r.get("image_data")),
+        document_hash=r.get("document_hash"),
+        kem_algorithm=r.get("kem_algorithm"),
+        signature_algorithm=r.get("signature_algorithm"),
+        blockchain_tx_hash=r.get("blockchain_tx_hash"),
+        created_at=r["created_at"],
     ) for r in rows]
+
+
+@app.get("/api/lab-tech/imaging/{imaging_id}/image")
+def get_imaging_image(imaging_id: str, session: dict = Depends(require_role("Lab Technician"))):
+    """Decrypt and return one imaging study's payload.
+
+    Mirrors the lab-report release path: the AES key is recovered only by
+    decapsulating the stored ML-KEM ciphertext with the patient's private key,
+    and the GCM tag proves the stored bytes were not altered. The digest is
+    re-checked against the value recorded at signing before anything is
+    released.
+    """
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT ir.*, u.mlkem_private_key_encrypted
+                FROM ImagingReports ir
+                JOIN Users u ON ir.patient_id = u.id
+                WHERE ir.id = %s AND ir.lab_tech_id = %s
+            """, (imaging_id, user_uuid))
+            r = cur.fetchone()
+
+    if not r:
+        raise HTTPException(status_code=404, detail="Imaging report not found")
+
+    # Rows predating encryption kept their plaintext payload in image_data.
+    if not r.get("encrypted_image"):
+        if r.get("image_data"):
+            return {"image_data": r["image_data"], "encrypted": False}
+        raise HTTPException(status_code=404, detail="No image stored for this study.")
+
+    ciphertext = r["encrypted_image"]
+    if not ciphertext and r.get("s3_key"):
+        try:
+            ciphertext = download_file_from_s3(r["s3_key"]).decode("utf-8")
+        except StorageError as exc:
+            logger.error("S3 recovery failed for imaging %s: %s", imaging_id, exc)
+
+    try:
+        shared_secret = decapsulate_aes_key(r["encrypted_aes_key"], r["mlkem_private_key_encrypted"])
+        image_bytes = decrypt_document(
+            ciphertext, derive_aes_key(shared_secret),
+            r["encryption_nonce"], r["encryption_tag"],
+        )
+    except PQCUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="Image failed its integrity check.") from exc
+
+    if sha256_hex(image_bytes) != r.get("document_hash"):
+        raise HTTPException(status_code=409, detail="Image digest does not match the recorded hash.")
+
+    return {"image_data": image_bytes.decode("utf-8"), "encrypted": True}
 
 @app.get("/api/lab-tech/notifications")
 def get_lab_tech_notifications(session: dict = Depends(require_role("Lab Technician"))):
