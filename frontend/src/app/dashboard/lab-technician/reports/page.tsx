@@ -2,8 +2,8 @@
 
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Search, Filter, FileText, Download, Shield, Eye, X, Activity, Hash, Lock, CheckCircle, Clock } from "lucide-react";
-import { getLabTechReports } from "@/lib/session";
+import { Search, Filter, FileText, Download, Shield, Eye, X, Activity, Hash, Lock, CheckCircle, Clock, Loader2 } from "lucide-react";
+import { getLabTechReports, downloadLabTechReport } from "@/lib/session";
 
 interface LabReportItem {
   id: string;
@@ -39,6 +39,33 @@ export default function LabReportsPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedAudit, setSelectedAudit] = useState<LabReportItem | null>(null);
   const [loadError, setLoadError] = useState("");
+  const [busyReport, setBusyReport] = useState<string | null>(null);
+
+  // The PDF only exists decrypted in memory: it is fetched, shown or saved,
+  // then the object URL is released so it does not linger.
+  const handleOpenReport = async (id: string, mode: "view" | "download") => {
+    setLoadError("");
+    setBusyReport(id);
+    try {
+      const blob = await downloadLabTechReport(id);
+      const url = URL.createObjectURL(blob);
+      if (mode === "view") {
+        window.open(url, "_blank", "noopener");
+      } else {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${id}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "Could not open the report.");
+    } finally {
+      setBusyReport(null);
+    }
+  };
 
 
 
@@ -151,11 +178,19 @@ export default function LabReportsPage() {
                 </div>
 
                 <div className="grid grid-cols-3 gap-2 border-t border-slate-100 pt-4">
-                  <button className="flex flex-col items-center justify-center gap-1 p-2 rounded-lg hover:bg-slate-50 text-slate-600 transition-colors">
-                    <Eye className="w-4 h-4" />
+                  <button
+                    onClick={() => handleOpenReport(report.id, "view")}
+                    disabled={busyReport === report.id}
+                    className="flex flex-col items-center justify-center gap-1 p-2 rounded-lg hover:bg-slate-50 text-slate-600 transition-colors disabled:opacity-50"
+                  >
+                    {busyReport === report.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Eye className="w-4 h-4" />}
                     <span className="text-[10px] font-semibold">View</span>
                   </button>
-                  <button className="flex flex-col items-center justify-center gap-1 p-2 rounded-lg hover:bg-slate-50 text-slate-600 transition-colors">
+                  <button
+                    onClick={() => handleOpenReport(report.id, "download")}
+                    disabled={busyReport === report.id}
+                    className="flex flex-col items-center justify-center gap-1 p-2 rounded-lg hover:bg-slate-50 text-slate-600 transition-colors disabled:opacity-50"
+                  >
                     <Download className="w-4 h-4" />
                     <span className="text-[10px] font-semibold">PDF</span>
                   </button>

@@ -18,7 +18,8 @@ import {
   Menu,
   X,
   ChevronLeft,
-  Heart
+  Heart,
+  Activity
 } from "lucide-react";
 import { logout } from "@/lib/session";
 import { useAuth } from "@/context/AuthContext";
@@ -28,6 +29,7 @@ const navItems = [
   { label: "My Profile", icon: User, href: "/dashboard/patient/profile" },
   { label: "Medical Records", icon: FileHeart, href: "/dashboard/patient/medical-records" },
   { label: "Lab Reports", icon: TestTubes, href: "/dashboard/patient/lab-reports" },
+  { label: "My Vitals", icon: Activity, href: "/dashboard/patient/vitals" },
   { label: "Prescriptions", icon: Pill, href: "/dashboard/patient/prescriptions" },
   { label: "Consultations", icon: Stethoscope, href: "/dashboard/patient/consultations" },
   { label: "Appointments", icon: Calendar, href: "/dashboard/patient/appointments" },

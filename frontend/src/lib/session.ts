@@ -223,6 +223,18 @@ export async function getAuditLogs(params: { action?: string; page?: number; per
   return response.json();
 }
 
+export async function getBlockchainStatus() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/blockchain/status`);
+  if (!response.ok) throw new Error("Failed to fetch blockchain status");
+  return response.json();
+}
+
+export async function getStorageStatus() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/storage/status`);
+  if (!response.ok) throw new Error("Failed to fetch storage status");
+  return response.json();
+}
+
 export async function getSecurityStats() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/security/stats`);
   if (!response.ok) throw new Error("Failed to fetch security stats");
@@ -451,6 +463,15 @@ export async function downloadDoctorLabReport(id: string) {
   if (!response.ok) {
     const err = await response.json().catch(() => null);
     throw new Error(err?.detail || "Failed to securely decrypt and download lab report");
+  }
+  return response.blob();
+}
+
+export async function downloadLabTechReport(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/reports/${id}/download`);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to decrypt and open the report"));
   }
   return response.blob();
 }

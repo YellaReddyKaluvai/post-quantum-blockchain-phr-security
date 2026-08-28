@@ -2627,6 +2627,43 @@ def get_lab_tech_report_detail(report_id: str, session: dict = Depends(require_r
         "status": r["status"], "upload_date": r["upload_date"]
     }
 
+
+@app.get("/api/lab-tech/reports/{report_id}/download")
+def download_lab_tech_report(report_id: str, request: Request, session: dict = Depends(require_role("Lab Technician"))):
+    """Release a report as PDF to the technician who produced it.
+
+    Scoped to their own work, exactly like the list view — a technician can
+    re-open what they issued, not the whole laboratory's output.
+    """
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                _REPORT_SELECT + " WHERE lr.id = %s AND (lr.lab_tech_id = %s OR lr.uploaded_by = %s)",
+                (report_id, user_uuid, user_uuid),
+            )
+            report = cur.fetchone()
+
+        if not report:
+            raise HTTPException(status_code=404, detail="Report not found or not authorised")
+
+        pdf_bytes = _decrypt_report_pdf(report)
+
+        anchor_document(
+            conn, document_type="LabReport", document_id=str(report["id"]),
+            document_hash=report.get("document_hash") or "", action="TECHNICIAN_ACCESSED_REPORT",
+            patient_id=str(report["patient_id"]), actor_id=user_uuid,
+            actor_public_id=session.get("public_user_id"),
+            report_id_public=report.get("report_id_public"),
+        )
+
+    filename = f"{report.get('report_id_public') or 'report'}.pdf"
+    return Response(
+        content=pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
 @app.post("/api/lab-tech/imaging/upload")
 def upload_imaging_report(
     req: CreateImagingReportRequest,

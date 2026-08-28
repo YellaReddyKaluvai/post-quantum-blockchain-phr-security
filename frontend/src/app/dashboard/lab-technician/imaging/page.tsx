@@ -2,8 +2,9 @@
 
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Film, ZoomIn, Download, X, Activity, FileCheck, Lock, Loader2 } from "lucide-react";
-import { getImagingReports, getImagingImage } from "@/lib/session";
+import { Film, ZoomIn, Download, X, Activity, FileCheck, Lock, Loader2, Plus, Upload } from "lucide-react";
+import { getImagingReports, getImagingImage, uploadImagingReport, searchPatientsForLab } from "@/lib/session";
+import PatientSearchSelect from "@/components/PatientSearchSelect";
 
 interface ImagingReportItem {
   id: string;
@@ -48,6 +49,157 @@ interface ImagingReportItem {
 
 
 
+
+interface SelectedPatient {
+  id: string;
+  user_id: string;
+  full_name: string;
+  email: string;
+  gender: string;
+}
+
+const EXAM_TYPES = ["X-Ray", "MRI", "CT Scan", "Ultrasound", "Mammography", "PET Scan"];
+
+function UploadImagingModal({ onClose, onUploaded }: { onClose: () => void; onUploaded: () => void }) {
+  const [patient, setPatient] = useState<SelectedPatient | null>(null);
+  const [form, setForm] = useState({
+    scan_region: "", exam_type: "X-Ray", clinical_history: "",
+    findings: "", impression: "", recommendations: "",
+  });
+  const [imageData, setImageData] = useState("");
+  const [fileName, setFileName] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  // Read the scan into a data URI. The file never leaves the browser
+  // unencrypted: the server AES-encrypts it before anything is stored.
+  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 4 * 1024 * 1024) {
+      setError("Image must be 4 MB or smaller.");
+      return;
+    }
+    setError("");
+    setFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = () => setImageData(String(reader.result));
+    reader.onerror = () => setError("Could not read that file.");
+    reader.readAsDataURL(file);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    if (!patient) { setError("Select a patient."); return; }
+    if (!imageData) { setError("Attach the scan image."); return; }
+    if (!form.scan_region.trim()) { setError("Enter the scan region."); return; }
+    setSubmitting(true);
+    try {
+      await uploadImagingReport({
+        patient_id: patient.id,
+        scan_region: form.scan_region,
+        exam_type: form.exam_type,
+        clinical_history: form.clinical_history || undefined,
+        findings: form.findings || undefined,
+        impression: form.impression || undefined,
+        recommendations: form.recommendations || undefined,
+        image_data: imageData,
+      });
+      onUploaded();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Upload failed.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const inputClass = "w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-cyan-500 outline-none";
+  const labelClass = "block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide";
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
+        <div className="flex justify-between items-center mb-1">
+          <h3 className="text-lg font-bold">Upload Imaging Study</h3>
+          <button onClick={onClose}><X className="w-5 h-5 text-slate-500" /></button>
+        </div>
+        <p className="text-xs text-slate-500 mb-4">
+          The scan is encrypted before storage — only ciphertext reaches the cloud.
+        </p>
+
+        {error && <div className="p-3 mb-4 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-semibold">{error}</div>}
+
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <PatientSearchSelect
+            onSelect={(p) => setPatient(p as SelectedPatient)}
+            searchFn={searchPatientsForLab}
+            selectedPatient={patient}
+            onClear={() => setPatient(null)}
+            label="Patient *"
+          />
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className={labelClass}>Exam Type *</label>
+              <select className={inputClass} value={form.exam_type}
+                onChange={(e) => setForm({ ...form, exam_type: e.target.value })}>
+                {EXAM_TYPES.map((x) => <option key={x} value={x}>{x}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={labelClass}>Scan Region *</label>
+              <input type="text" required className={inputClass} placeholder="e.g. Chest"
+                value={form.scan_region}
+                onChange={(e) => setForm({ ...form, scan_region: e.target.value })} />
+            </div>
+          </div>
+
+          <div>
+            <label className={labelClass}>Scan Image *</label>
+            <label className="flex items-center gap-2 border border-dashed border-slate-300 rounded-xl p-3 cursor-pointer hover:bg-slate-50 transition-colors">
+              <Upload className="w-4 h-4 text-slate-400 flex-shrink-0" />
+              <span className="text-sm text-slate-600 truncate">{fileName || "Choose an image (max 4 MB)"}</span>
+              <input type="file" accept="image/*" className="hidden" onChange={handleFile} />
+            </label>
+          </div>
+
+          <div>
+            <label className={labelClass}>Clinical History</label>
+            <textarea className={inputClass} rows={2} placeholder="Reason for the examination"
+              value={form.clinical_history}
+              onChange={(e) => setForm({ ...form, clinical_history: e.target.value })} />
+          </div>
+          <div>
+            <label className={labelClass}>Findings</label>
+            <textarea className={inputClass} rows={3} placeholder="Systematic description of the findings"
+              value={form.findings}
+              onChange={(e) => setForm({ ...form, findings: e.target.value })} />
+          </div>
+          <div>
+            <label className={labelClass}>Impression</label>
+            <textarea className={inputClass} rows={2} placeholder="Summary conclusion"
+              value={form.impression}
+              onChange={(e) => setForm({ ...form, impression: e.target.value })} />
+          </div>
+          <div>
+            <label className={labelClass}>Recommendations</label>
+            <input type="text" className={inputClass} placeholder="e.g. Follow-up imaging in 3 months"
+              value={form.recommendations}
+              onChange={(e) => setForm({ ...form, recommendations: e.target.value })} />
+          </div>
+
+          <button type="submit" disabled={submitting}
+            className="w-full bg-cyan-600 text-white rounded-xl py-2.5 font-bold hover:bg-cyan-700 disabled:opacity-60 flex items-center justify-center gap-2">
+            {submitting ? <><Loader2 className="w-4 h-4 animate-spin" /> Encrypting and uploading…</> : "Upload Study"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 export default function ImagingReportsPage() {
   const [reports, setReports] = useState<ImagingReportItem[]>([]);
 
@@ -57,6 +209,7 @@ export default function ImagingReportsPage() {
   const [decrypted, setDecrypted] = useState<Record<string, string>>({});
   const [decrypting, setDecrypting] = useState<string | null>(null);
   const [decryptError, setDecryptError] = useState<string | null>(null);
+  const [uploadOpen, setUploadOpen] = useState(false);
 
   const handleViewImage = async (id: string) => {
     setDecryptError(null);
@@ -101,7 +254,26 @@ export default function ImagingReportsPage() {
           <h1 className="text-2xl font-bold text-slate-800">Imaging Reports</h1>
           <p className="text-sm text-slate-500">Scans are encrypted at rest and decrypted only when opened.</p>
         </div>
+        <button
+          onClick={() => setUploadOpen(true)}
+          className="flex items-center gap-2 px-5 py-2.5 bg-cyan-600 hover:bg-cyan-700 text-white rounded-xl text-sm font-bold shadow-sm transition-colors"
+        >
+          <Plus className="w-4 h-4" /> Upload Study
+        </button>
       </div>
+
+      {uploadOpen && (
+        <UploadImagingModal
+          onClose={() => setUploadOpen(false)}
+          onUploaded={() => {
+            setLoading(true);
+            getImagingReports()
+              .then(setReports)
+              .catch(() => setDecryptError("Uploaded, but the list could not be refreshed."))
+              .finally(() => setLoading(false));
+          }}
+        />
+      )}
 
       {decryptError && (
         <div className="p-3 rounded-xl bg-rose-50 border border-rose-100 text-rose-700 text-sm font-semibold">
