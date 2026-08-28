@@ -49,7 +49,9 @@ from app.crypto_service import (
 from app.email_service import send_and_log_email, retry_failed_email, send_admin_notification
 from app.user_id_service import generate_user_id, generate_report_number
 from app.rbac import get_permissions_for_role, normalize_role
-from app.storage_service import process_and_pin_ipfs, download_file_from_s3
+from app.storage_service import (
+    process_and_pin_ipfs, download_file_from_s3, storage_status, StorageError,
+)
 
 from app.audit_service import log_admin_action
 from app.anchor_service import anchor_document
@@ -703,6 +705,33 @@ def resend_failed_email_endpoint(notification_id: str, session: dict = Depends(r
         raise HTTPException(status_code=400, detail=f"Failed to resend email: {res['error_message']}")
 
     return {"message": "Email resent successfully", "status": res["sent_status"]}
+
+
+@app.get("/api/admin/storage/status")
+def get_storage_status(session: dict = Depends(require_role("Administrator"))):
+    """Live cloud-storage health, plus how many reports actually have a cloud copy.
+
+    ``reports_without_cloud_copy`` counts reports whose S3 upload did not
+    happen. Those are still readable (the database copy is authoritative) but
+    have no off-database redundancy, so the number should be visible rather
+    than assumed to be zero.
+    """
+    status = storage_status()
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE s3_key IS NOT NULL) AS with_cloud_copy,
+                       COUNT(*) FILTER (WHERE s3_key IS NULL) AS without_cloud_copy
+                FROM LabReports
+            """)
+            counts = cur.fetchone()
+
+    status["reports_total"] = counts["total"]
+    status["reports_with_cloud_copy"] = counts["with_cloud_copy"]
+    status["reports_without_cloud_copy"] = counts["without_cloud_copy"]
+    return status
 
 
 @app.get("/api/admin/blockchain/status")
@@ -2198,7 +2227,22 @@ def _decrypt_report_pdf(report: dict) -> bytes:
     with the patient's private key, so possession of the ciphertext alone is
     not enough. GCM's tag check then proves the stored bytes were not altered.
     """
-    if not report.get("encrypted_document"):
+    ciphertext = report.get("encrypted_document")
+
+    # The database holds the authoritative copy. If it is missing, fall back to
+    # the S3 copy of the same ciphertext — that redundancy is the reason the
+    # cloud copy exists. The GCM tag check below still has to pass either way,
+    # so a substituted or corrupted object cannot slip through.
+    if not ciphertext and report.get("s3_key"):
+        try:
+            ciphertext = download_file_from_s3(report["s3_key"]).decode("utf-8")
+            logger.warning(
+                "Report %s recovered from S3; database copy was missing.", report.get("id")
+            )
+        except StorageError as exc:
+            logger.error("S3 recovery failed for report %s: %s", report.get("id"), exc)
+
+    if not ciphertext:
         raise HTTPException(status_code=404, detail="No encrypted document is stored for this report.")
     if not report.get("mlkem_private_key_encrypted"):
         raise HTTPException(status_code=409, detail="Patient decryption key unavailable.")
@@ -2209,7 +2253,7 @@ def _decrypt_report_pdf(report: dict) -> bytes:
         )
         aes_key = derive_aes_key(shared_secret)
         pdf_bytes = decrypt_document(
-            report["encrypted_document"], aes_key,
+            ciphertext, aes_key,
             report["encryption_nonce"], report["encryption_tag"],
         )
     except PQCUnavailableError as exc:
