@@ -3,7 +3,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { motion } from "framer-motion";
-import { User, Activity, FileText, ChevronLeft, Plus, X, FlaskConical, CheckCircle } from "lucide-react";
+import { User, Activity, FileText, ChevronLeft, Plus, X, FlaskConical, CheckCircle, HeartPulse } from "lucide-react";
 import Link from "next/link";
 import {
   getDoctorPatientDetail, createDiagnosis, createPrescription,
@@ -48,10 +48,46 @@ interface PrescriptionEntry {
   prescribed_date?: string | null;
 }
 
+interface VitalsEntry {
+  id: string;
+  temperature_celsius?: number | null;
+  blood_pressure_systolic?: number | null;
+  blood_pressure_diastolic?: number | null;
+  heart_rate?: number | null;
+  spo2?: number | null;
+  respiratory_rate?: number | null;
+  notes?: string | null;
+  recorded_at?: string | null;
+  nurse_name?: string | null;
+}
+
+interface NursingNoteEntry {
+  id: string;
+  note_type: string;
+  content: string;
+  created_at?: string | null;
+  nurse_name?: string | null;
+}
+
 interface PatientDetailResponse {
   profile: PatientProfileInfo;
   diagnoses: DiagnosisEntry[];
   prescriptions: PrescriptionEntry[];
+  vitals: VitalsEntry[];
+  nursing_notes: NursingNoteEntry[];
+}
+
+// Same thresholds the backend uses to decide whether to alert the doctor.
+function isAbnormal(key: string, value: number): boolean {
+  switch (key) {
+    case "temperature_celsius": return value >= 38.0 || value <= 35.0;
+    case "heart_rate": return value > 100 || value < 50;
+    case "spo2": return value < 92;
+    case "blood_pressure_systolic": return value > 140 || value < 90;
+    case "blood_pressure_diastolic": return value > 90 || value < 60;
+    case "respiratory_rate": return value > 24 || value < 10;
+    default: return false;
+  }
 }
 
 const todayStr = () => new Date().toISOString().split("T")[0];
@@ -247,6 +283,112 @@ export default function PatientDetails() {
             <FlaskConical className="w-4 h-4" /> Request Lab Test
           </button>
         </div>
+      </motion.div>
+
+      {/* Nursing observations — recorded by nurses, read here by the treating doctor */}
+      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.05 }}
+        className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+        <div className="flex items-center gap-3 mb-5 border-b border-slate-100 pb-4">
+          <HeartPulse className="w-5 h-5 text-rose-500" />
+          <h2 className="text-lg font-bold text-slate-800">Nursing Observations</h2>
+          {patient.vitals?.[0]?.recorded_at && (
+            <span className="ml-auto text-xs text-slate-400">
+              Last reading {new Date(patient.vitals[0].recorded_at).toLocaleString()}
+              {patient.vitals[0].nurse_name ? ` · ${patient.vitals[0].nurse_name}` : ""}
+            </span>
+          )}
+        </div>
+
+        {!patient.vitals || patient.vitals.length === 0 ? (
+          <p className="text-sm text-slate-500">No vitals recorded by nursing staff.</p>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
+              {([
+                { key: "temperature_celsius", label: "Temp", unit: "°C" },
+                { key: "heart_rate", label: "Heart Rate", unit: "bpm" },
+                { key: "spo2", label: "SpO₂", unit: "%" },
+                { key: "blood_pressure_systolic", label: "BP Sys", unit: "mmHg" },
+                { key: "blood_pressure_diastolic", label: "BP Dia", unit: "mmHg" },
+                { key: "respiratory_rate", label: "Resp", unit: "/min" },
+              ] as const).map((c) => {
+                const v = patient.vitals[0][c.key] as number | null | undefined;
+                const has = v !== null && v !== undefined;
+                const abnormal = has && isAbnormal(c.key, Number(v));
+                return (
+                  <div key={c.key} className={`p-3 rounded-xl border ${abnormal ? "bg-amber-50 border-amber-200" : "bg-slate-50 border-slate-100"}`}>
+                    <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wide">{c.label}</p>
+                    <p className={`text-lg font-bold tabular-nums ${abnormal ? "text-amber-700" : "text-slate-800"}`}>
+                      {has ? v : "—"}{has && <span className="text-xs font-medium ml-0.5">{c.unit}</span>}
+                    </p>
+                    {abnormal && <p className="text-[10px] font-bold text-amber-600 mt-0.5">Out of range</p>}
+                  </div>
+                );
+              })}
+            </div>
+
+            {patient.vitals.length > 1 && (
+              <details className="group">
+                <summary className="cursor-pointer text-xs font-bold text-slate-500 hover:text-slate-700 select-none">
+                  Show {patient.vitals.length - 1} earlier reading{patient.vitals.length > 2 ? "s" : ""}
+                </summary>
+                <div className="overflow-x-auto mt-3">
+                  <table className="w-full text-sm min-w-[560px]">
+                    <thead>
+                      <tr className="text-left text-[10px] uppercase tracking-wide text-slate-400 border-b border-slate-100">
+                        <th className="py-2 pr-4 font-bold">Recorded</th>
+                        <th className="py-2 pr-4 font-bold">Temp</th>
+                        <th className="py-2 pr-4 font-bold">HR</th>
+                        <th className="py-2 pr-4 font-bold">SpO₂</th>
+                        <th className="py-2 pr-4 font-bold">BP</th>
+                        <th className="py-2 font-bold">By</th>
+                      </tr>
+                    </thead>
+                    <tbody className="tabular-nums">
+                      {patient.vitals.slice(1).map((v) => (
+                        <tr key={v.id} className="border-b border-slate-50 last:border-0">
+                          <td className="py-2 pr-4 text-slate-600 whitespace-nowrap">
+                            {v.recorded_at ? new Date(v.recorded_at).toLocaleString() : "—"}
+                          </td>
+                          <td className="py-2 pr-4 text-slate-800">{v.temperature_celsius ?? "—"}</td>
+                          <td className="py-2 pr-4 text-slate-800">{v.heart_rate ?? "—"}</td>
+                          <td className="py-2 pr-4 text-slate-800">{v.spo2 ?? "—"}</td>
+                          <td className="py-2 pr-4 text-slate-800">
+                            {v.blood_pressure_systolic && v.blood_pressure_diastolic
+                              ? `${v.blood_pressure_systolic}/${v.blood_pressure_diastolic}` : "—"}
+                          </td>
+                          <td className="py-2 text-slate-500">{v.nurse_name || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            )}
+          </>
+        )}
+
+        {patient.nursing_notes && patient.nursing_notes.length > 0 && (
+          <div className="mt-5 pt-5 border-t border-slate-100 space-y-2">
+            <p className="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Nursing Notes</p>
+            {patient.nursing_notes.map((n) => (
+              <div key={n.id} className="p-3 bg-slate-50 rounded-xl border border-slate-100">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wide ${
+                    n.note_type === "Incident" ? "bg-rose-100 text-rose-700"
+                      : n.note_type === "Care" ? "bg-blue-100 text-blue-700"
+                      : "bg-slate-200 text-slate-600"
+                  }`}>{n.note_type}</span>
+                  <span className="text-[11px] text-slate-400 ml-auto">
+                    {n.created_at ? new Date(n.created_at).toLocaleString() : ""}
+                  </span>
+                </div>
+                <p className="text-sm text-slate-700">{n.content}</p>
+                {n.nurse_name && <p className="text-[11px] text-slate-400 mt-1">— {n.nurse_name}</p>}
+              </div>
+            ))}
+          </div>
+        )}
       </motion.div>
 
       {/* Middle Section */}

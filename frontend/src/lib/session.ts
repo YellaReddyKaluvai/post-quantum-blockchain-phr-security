@@ -275,6 +275,12 @@ export async function getPatientAppointments() {
   return response.json();
 }
 
+export async function getPatientVitals() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/vitals`);
+  if (!response.ok) throw new Error("Failed to fetch vitals");
+  return response.json();
+}
+
 export async function getAvailableDoctors() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/doctors`);
   if (!response.ok) throw new Error("Failed to fetch doctors");

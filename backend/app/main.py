@@ -1104,6 +1104,26 @@ def get_patient_appointments(session: dict = Depends(require_role("Patient"))):
     ) for r in rows]
 
 
+@app.get("/api/patient/vitals")
+def get_patient_vitals(session: dict = Depends(require_role("Patient"))):
+    """A patient's own nurse-recorded vitals.
+
+    These are observations about the patient, so the patient can read them.
+    Nursing notes are deliberately not exposed here: they are clinical
+    handover between staff and are surfaced to the treating doctor instead.
+    """
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT v.*, n.full_name AS nurse_name FROM PatientVitals v
+                LEFT JOIN Users n ON v.nurse_id = n.id
+                WHERE v.patient_id = %s ORDER BY v.recorded_at DESC LIMIT 50
+            """, (user_uuid,))
+            rows = cur.fetchall()
+    return [_vitals_record(r) for r in rows]
+
+
 @app.get("/api/patient/doctors")
 def get_available_doctors(session: dict = Depends(require_role("Patient"))):
     """List active doctors a patient can request an appointment with."""
@@ -1366,7 +1386,25 @@ def get_doctor_patient_detail(patient_id: str, session: dict = Depends(require_r
 
             cur.execute("SELECT * FROM Prescriptions WHERE patient_id = %s ORDER BY prescribed_date DESC LIMIT 5", (patient_id,))
             prescriptions = cur.fetchall()
-            
+
+            # Nursing observations. Recording vitals is only useful if the
+            # treating clinician can read them — previously these were visible
+            # solely to the nurse who entered them, so the doctor received the
+            # abnormal-vitals alert but could not open the reading behind it.
+            cur.execute("""
+                SELECT v.*, n.full_name AS nurse_name FROM PatientVitals v
+                LEFT JOIN Users n ON v.nurse_id = n.id
+                WHERE v.patient_id = %s ORDER BY v.recorded_at DESC LIMIT 10
+            """, (patient_id,))
+            vitals = cur.fetchall()
+
+            cur.execute("""
+                SELECT nn.*, n.full_name AS nurse_name FROM NursingNotes nn
+                LEFT JOIN Users n ON nn.nurse_id = n.id
+                WHERE nn.patient_id = %s ORDER BY nn.created_at DESC LIMIT 10
+            """, (patient_id,))
+            nursing_notes = cur.fetchall()
+
     return {
         "profile": {
             "id": str(user["id"]),
@@ -1391,7 +1429,14 @@ def get_doctor_patient_detail(patient_id: str, session: dict = Depends(require_r
                 frequency=r["frequency"], duration=r["duration"], instructions=r["instructions"],
                 prescribed_date=r["prescribed_date"]
             ) for r in prescriptions
-        ]
+        ],
+        "vitals": [_vitals_record(v) for v in vitals],
+        "nursing_notes": [
+            NursingNoteRecord(
+                id=str(n["id"]), note_type=n["note_type"], content=n["content"],
+                created_at=n["created_at"], nurse_name=n["nurse_name"],
+            ) for n in nursing_notes
+        ],
     }
 
 @app.post("/api/doctor/patients/{patient_id}/diagnosis")
@@ -2807,6 +2852,28 @@ def clear_lab_tech_notifications(session: dict = Depends(require_role("Lab Techn
 # list is simply "who I've recorded something for", mirroring how the Lab
 # Technician's queue is scoped to their own work rather than a formal roster.
 
+def _vitals_record(row: dict) -> PatientVitalsRecord:
+    """Shape one PatientVitals row for the API.
+
+    Shared by the nurse, doctor and patient views so a reading cannot appear
+    differently depending on who is looking at it.
+    """
+    return PatientVitalsRecord(
+        id=str(row["id"]),
+        temperature_celsius=row["temperature_celsius"],
+        blood_pressure_systolic=row["blood_pressure_systolic"],
+        blood_pressure_diastolic=row["blood_pressure_diastolic"],
+        heart_rate=row["heart_rate"],
+        spo2=row["spo2"],
+        respiratory_rate=row["respiratory_rate"],
+        weight_kg=row["weight_kg"],
+        height_cm=row["height_cm"],
+        notes=row["notes"],
+        recorded_at=row["recorded_at"],
+        nurse_name=row.get("nurse_name"),
+    )
+
+
 def _vitals_out_of_range(req: CreateVitalsRequest) -> list[str]:
     """Plain-language flags for readings outside a normal adult range.
 
@@ -2970,15 +3037,7 @@ def get_nurse_patient_detail(patient_id: str, session: dict = Depends(require_ro
             blood_group=decrypt_data(user["blood_group_encrypted"]) if user.get("blood_group_encrypted") else None,
             last_recorded_at=None, status=user["status"],
         ),
-        vitals_history=[
-            PatientVitalsRecord(
-                id=str(v["id"]), temperature_celsius=v["temperature_celsius"],
-                blood_pressure_systolic=v["blood_pressure_systolic"], blood_pressure_diastolic=v["blood_pressure_diastolic"],
-                heart_rate=v["heart_rate"], spo2=v["spo2"], respiratory_rate=v["respiratory_rate"],
-                weight_kg=v["weight_kg"], height_cm=v["height_cm"], notes=v["notes"],
-                recorded_at=v["recorded_at"], nurse_name=v["nurse_name"],
-            ) for v in vitals
-        ],
+        vitals_history=[_vitals_record(v) for v in vitals],
         nursing_notes=[
             NursingNoteRecord(id=str(n["id"]), note_type=n["note_type"], content=n["content"], created_at=n["created_at"], nurse_name=n["nurse_name"])
             for n in notes
