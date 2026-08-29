@@ -135,11 +135,6 @@ export async function logout() {
   }
 }
 
-export async function getProfile() {
-  const response = await fetchWithAuth(`${backendBaseUrl}/api/auth/me`);
-  if (!response.ok) throw new Error("Failed to fetch profile");
-  return response.json();
-}
 
 export async function getAdminPending() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/registrations/pending`);
@@ -195,11 +190,6 @@ export async function getAllUsers(params: { role?: string; status?: string; sear
   return response.json();
 }
 
-export async function getUserDetail(id: string) {
-  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/users/${id}`);
-  if (!response.ok) throw new Error("Failed to fetch user detail");
-  return response.json();
-}
 
 export async function disableUser(id: string) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/users/${id}/disable`, { method: "POST" });
@@ -278,11 +268,6 @@ export async function getPatientMedicalRecords() {
   return response.json();
 }
 
-export async function getPatientMedicalRecordDetail(id: string) {
-  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/medical-records/${id}`);
-  if (!response.ok) throw new Error("Failed to fetch medical record detail");
-  return response.json();
-}
 
 export async function getPatientLabReports() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/lab-reports`);
@@ -290,11 +275,6 @@ export async function getPatientLabReports() {
   return response.json();
 }
 
-export async function getPatientLabReportDetail(id: string) {
-  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/lab-reports/${id}`);
-  if (!response.ok) throw new Error("Failed to fetch lab report detail");
-  return response.json();
-}
 
 export async function downloadPatientLabReport(id: string) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/lab-reports/${id}/download`);
@@ -673,11 +653,6 @@ export async function getLabTestRequestDetail(id: string) {
   return response.json();
 }
 
-export async function getLabReportTemplates() {
-  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/report-templates`);
-  if (!response.ok) throw new Error("Failed to fetch report templates");
-  return response.json();
-}
 
 export async function getLabReportTemplate(panelCode: string) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/report-templates/${panelCode}`);
@@ -716,11 +691,6 @@ export async function getLabTechReports() {
   return response.json();
 }
 
-export async function getLabTechReportDetail(id: string) {
-  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/reports/${id}`);
-  if (!response.ok) throw new Error("Failed to fetch lab report details");
-  return response.json();
-}
 
 export async function uploadImagingReport(data: Record<string, unknown>) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/imaging/upload`, {
