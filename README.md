@@ -22,6 +22,7 @@ The design rule throughout: *the system never claims a protection it did not act
 - **User Management & Role Access Control**: Active user toggles, status management, and permissions.
 - **Cryptographic Key Center**: Live counts of issued ML-KEM / ML-DSA keypairs and active cryptographic identities.
 - **Infrastructure Health**: Live blockchain and cloud-storage status — chain connectivity and block height, the **on-chain vs locally-simulated** anchor split, and how many reports actually have a cloud copy. Built to surface problems rather than imply everything is fine.
+- **Emergency Access Review**: Every break-glass declaration with its verbatim clinical reason, both parties, expiry and on-chain transaction hash. Active declarations are surfaced first.
 - **Audit Log**: Every administrative action, report access and download, with search and pagination.
 - **Email Notifications**: Live SMTP dispatch for registration approvals and rejections, with delivery status tracked per message.
 
@@ -33,6 +34,7 @@ The design rule throughout: *the system never claims a protection it did not act
 - **Lab Requests**: Order an investigation from the patient's chart, then track every request through Pending → Accepted → In Progress → Completed, opening the signed report the moment it is filed.
 - **Report Review & Verification**: Decrypt finalised reports, and re-check each one's signature and on-chain digest.
 - **Appointment Manager**: Confirm, complete or cancel patient appointments.
+- **Emergency Access**: Break-glass override when a patient has withdrawn consent. Requires a substantive clinical reason, is time-boxed, and states its consequences before the form — the patient is notified at once and the declaration is anchored on-chain.
 
 ### 3. 🧪 Laboratory Technician Dashboard (LIMS) (`/dashboard/lab-technician`)
 - **Laboratory Information Management System (LIMS)**: Complete portal for receiving test requests, searching patient directories, and uploading medical documents.
@@ -46,6 +48,7 @@ The design rule throughout: *the system never claims a protection it did not act
 - **Personal Health Record (PHR)**: Medical records, diagnosis timeline, active prescriptions, and lab report history.
 - **My Vitals**: Nurse-recorded observations, with out-of-range readings flagged using the same thresholds clinical staff see.
 - **Appointment Booking**: Request an appointment with any approved doctor; the doctor is notified and confirms or declines.
+- **Record Access**: Every clinician who can read the record and how that relationship arose, with one-click withdrawal. Revoking genuinely blocks reads rather than merely noting a preference; an active emergency override is shown plainly.
 - **Security & Privacy Center**: PQC protection status, active session logs, and login IP tracking.
 - **Notification Feed**: Report readiness, appointment updates, and vitals alerts.
 
@@ -77,17 +80,16 @@ listed as not built.
 | Blockchain anchoring | ✅ | Real on-chain writes via `PHR.sol`; falls back to a clearly-labelled local anchor |
 | Session handling | ✅ | 30-minute tokens; expiry redirects to login and returns you to where you were |
 | RBAC across 5 roles | ✅ | Enforced server-side; backend/frontend permission parity is test-enforced |
-| Automated tests | ✅ | 75 tests, mutation-checked |
+| Consent management | ✅ | Revoking a doctor genuinely blocks reads — the same report returns 200 before and 404 after |
+| Emergency break-glass access | ✅ | Time-boxed override, patient notified immediately, anchored on-chain, reviewable by an admin |
+| Automated tests | ✅ | 84 tests, mutation-checked |
 
 ### Not implemented
 
 | Area | Status |
 |---|---|
-| **Consent management** | `Consent` table exists in the schema; **no endpoints or UI**. Patients cannot currently grant or revoke access. |
-| **Emergency "break-glass" access** | `EmergencyAccess` table and `PHR.sol`'s `emergencyAccess()` both exist; **no endpoints or UI**. |
 | **IPFS publishing** | A CIDv0 is computed locally, but nothing is pinned to the IPFS network — see the Content Addressing row below. |
-| **Detail views** | Some list pages have no per-record detail screen (patient medical record, patient lab report, lab technician report). |
-| `MedicalRecords` table | Dead schema — defined in `init.sql`, referenced nowhere. Superseded by `LabReports` / `MedicalDocuments`. |
+| `MedicalRecords` table | Dead schema — 0 references, 0 rows. Marked deprecated in `init.sql` and left in place rather than dropped unilaterally; safe to remove once the team agrees. |
 
 ### Known data caveats
 - Two lab reports predate the encryption pipeline and hold no ciphertext, so they cannot be given a cloud copy or be decrypted. They are counted honestly in `/api/admin/storage/status`.
@@ -107,6 +109,7 @@ listed as not built.
 | **Content Addressing** | **CIDv0 (IPFS multihash format)** | Deterministic fingerprint of the encrypted document. Computed locally — **not** published to the IPFS network |
 | **Integrity Anchoring** | **Ethereum (`PHR.sol`)** | Document digests committed on-chain via `DocumentAnchors`; falls back to a labelled local anchor when no chain is reachable |
 | **Access Auditing** | **PostgreSQL** | Every read, download and admin action recorded in `AdminAuditLogs` / `AuthLogs` |
+| **Consent Enforcement** | **PostgreSQL + RBAC** | A patient's revocation is checked on every doctor-facing read, so withdrawal actually blocks rather than merely records |
 
 ---
 
@@ -174,7 +177,7 @@ cd backend
 python3 -m pytest
 ```
 
-75 tests, no database or running server required — they exercise pure functions
+84 tests, no database or running server required — they exercise pure functions
 so they fail for exactly one reason.
 
 What they cover, and why these specific assertions: every test asserts a
@@ -186,7 +189,7 @@ codebase previously shipped one.
 |---|---|
 | `test_crypto_pipeline.py` | A tampered digest fails verification; a forged signature fails; a mock key never verifies; wrong-key decryption raises; ciphertext does not leak plaintext |
 | `test_storage_and_anchoring.py` | A failed upload records no object key; a failed download raises instead of returning placeholder bytes; placeholder credentials read as *unconfigured*; an unreachable chain yields a clearly-labelled local anchor |
-| `test_clinical_validation.py` | Impossible vitals (SpO₂ 990%) are rejected while abnormal-but-real ones (SpO₂ 88%) are accepted; past appointment dates are refused |
+| `test_clinical_validation.py` | Impossible vitals (SpO₂ 990%) are rejected while abnormal-but-real ones (SpO₂ 88%) are accepted; past appointment dates are refused; break-glass demands a substantive reason and a bounded duration |
 | `test_rbac_parity.py` | The backend permission matrix and the frontend IAM map cannot drift apart |
 
 The suite was checked by mutation: reintroducing three real past bugs — a

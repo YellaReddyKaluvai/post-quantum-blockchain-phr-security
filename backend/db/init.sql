@@ -83,6 +83,19 @@ CREATE TABLE IF NOT EXISTS AuthLogs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- DEPRECATED — MedicalRecords is not used by any code path (0 references in
+-- backend/, 0 rows). It predates the current design and its 'Firestore'
+-- storage default is from an abandoned backend.
+--
+-- Superseded by:
+--   LabReports       — lab results, with the full hybrid-encryption columns
+--   ImagingReports   — imaging studies, same protection
+--   MedicalDocuments — doctor-authored documents
+--
+-- Left in place rather than dropped so an existing deployment is not altered
+-- unilaterally. Safe to remove once the team agrees; nothing reads it.
+-- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS MedicalRecords (
     Medical_Record_ID UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     Patient_ID UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
