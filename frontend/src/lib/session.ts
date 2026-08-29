@@ -497,6 +497,32 @@ export async function createPrescription(patientId: string, data: Record<string,
   return response.json();
 }
 
+export async function createConsultation(patientId: string, data: Record<string, unknown>) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${patientId}/consultation`, {
+    method: "POST", body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to record consultation"));
+  }
+  return response.json();
+}
+
+export async function getPatientDocuments() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/documents`);
+  if (!response.ok) throw new Error("Failed to fetch documents");
+  return response.json();
+}
+
+export async function getPatientDocumentContent(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/documents/${id}/content`);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to open document"));
+  }
+  return response.json();
+}
+
 export async function getDoctorReports() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/reports`);
   if (!response.ok) throw new Error("Failed to fetch reports");

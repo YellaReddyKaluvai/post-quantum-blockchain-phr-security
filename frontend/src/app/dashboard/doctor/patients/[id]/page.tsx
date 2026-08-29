@@ -3,11 +3,11 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { motion } from "framer-motion";
-import { User, Activity, FileText, ChevronLeft, Plus, X, FlaskConical, CheckCircle, HeartPulse, ShieldAlert, Loader2 } from "lucide-react";
+import { User, Activity, FileText, ChevronLeft, Plus, X, FlaskConical, CheckCircle, HeartPulse, ShieldAlert, Loader2, Stethoscope } from "lucide-react";
 import Link from "next/link";
 import {
   getDoctorPatientDetail, createDiagnosis, createPrescription,
-  getDoctorLabPanels, requestLabTest, declareEmergencyAccess,
+  getDoctorLabPanels, requestLabTest, declareEmergencyAccess, createConsultation,
 } from "@/lib/session";
 
 interface LabPanel {
@@ -101,6 +101,13 @@ const emptyDiagnosisForm = {
   visit_date: todayStr(),
 };
 
+const emptyConsultationForm = {
+  consultation_date: todayStr(),
+  symptoms: "",
+  diagnosis_summary: "",
+  doctor_notes: "",
+};
+
 const emptyPrescriptionForm = {
   medicine_name: "",
   dosage: "",
@@ -132,6 +139,11 @@ export default function PatientDetails() {
   const [labSubmitting, setLabSubmitting] = useState(false);
   const [labError, setLabError] = useState("");
   const [labSuccess, setLabSuccess] = useState<{ panel: string; priority: string } | null>(null);
+
+  const [consultationModal, setConsultationModal] = useState(false);
+  const [consultationForm, setConsultationForm] = useState(emptyConsultationForm);
+  const [consultationSubmitting, setConsultationSubmitting] = useState(false);
+  const [consultationError, setConsultationError] = useState("");
 
   const [emergencyModal, setEmergencyModal] = useState(false);
   const [emergencyForm, setEmergencyForm] = useState({ reason: "", duration_hours: 4 });
@@ -208,6 +220,27 @@ export default function PatientDetails() {
       setLabError(error instanceof Error ? error.message : "Failed to request the test");
     } finally {
       setLabSubmitting(false);
+    }
+  };
+
+  const handleConsultation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setConsultationError("");
+    setConsultationSubmitting(true);
+    try {
+      await createConsultation(params.id as string, {
+        consultation_date: consultationForm.consultation_date,
+        symptoms: consultationForm.symptoms || undefined,
+        diagnosis_summary: consultationForm.diagnosis_summary || undefined,
+        doctor_notes: consultationForm.doctor_notes || undefined,
+      });
+      setConsultationModal(false);
+      setConsultationForm(emptyConsultationForm);
+      await fetchDetail();
+    } catch (error) {
+      setConsultationError(error instanceof Error ? error.message : "Failed to record consultation.");
+    } finally {
+      setConsultationSubmitting(false);
     }
   };
 
@@ -305,6 +338,9 @@ export default function PatientDetails() {
           </button>
           <button onClick={() => setPrescriptionModal(true)} className="flex items-center justify-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold transition-colors">
             <Plus className="w-4 h-4" /> New Prescription
+          </button>
+          <button onClick={() => { setConsultationError(""); setConsultationModal(true); }} className="flex items-center justify-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-sm font-bold transition-colors">
+            <Stethoscope className="w-4 h-4" /> Record Consultation
           </button>
           <button onClick={openLabModal} className="flex items-center justify-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-bold transition-colors">
             <FlaskConical className="w-4 h-4" /> Request Lab Test
@@ -648,6 +684,73 @@ export default function PatientDetails() {
         </div>
       )}
 
+
+
+      {consultationModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-1">
+              <h3 className="text-lg font-bold">Record Consultation</h3>
+              <button onClick={() => setConsultationModal(false)}><X className="w-5 h-5 text-slate-500" /></button>
+            </div>
+            <p className="text-xs text-slate-500 mb-4">
+              A record of the visit itself. The patient can read this in their portal.
+            </p>
+            {consultationError && (
+              <div className="p-3 mb-4 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-semibold">
+                {consultationError}
+              </div>
+            )}
+            <form onSubmit={handleConsultation} className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Consultation Date *</label>
+                <input
+                  required type="date"
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-violet-500 outline-none"
+                  value={consultationForm.consultation_date}
+                  onChange={(e) => setConsultationForm({ ...consultationForm, consultation_date: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Presenting Symptoms</label>
+                <textarea
+                  rows={2}
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-violet-500 outline-none"
+                  placeholder="What the patient reported"
+                  value={consultationForm.symptoms}
+                  onChange={(e) => setConsultationForm({ ...consultationForm, symptoms: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Assessment</label>
+                <textarea
+                  rows={2}
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-violet-500 outline-none"
+                  placeholder="Your clinical assessment of the visit"
+                  value={consultationForm.diagnosis_summary}
+                  onChange={(e) => setConsultationForm({ ...consultationForm, diagnosis_summary: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Notes &amp; Advice</label>
+                <textarea
+                  rows={3}
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-violet-500 outline-none"
+                  placeholder="Advice given, follow-up plan — the patient will read this"
+                  value={consultationForm.doctor_notes}
+                  onChange={(e) => setConsultationForm({ ...consultationForm, doctor_notes: e.target.value })}
+                />
+              </div>
+              <button
+                type="submit" disabled={consultationSubmitting}
+                className="w-full bg-violet-600 text-white rounded-xl py-2.5 font-bold hover:bg-violet-700 disabled:opacity-60 flex items-center justify-center gap-2"
+              >
+                {consultationSubmitting ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving…</> : "Save Consultation"}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
 
       {emergencyModal && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">

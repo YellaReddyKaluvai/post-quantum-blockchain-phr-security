@@ -713,3 +713,21 @@ class EmergencyAccessRecord(BaseModel):
     created_at: Optional[datetime] = None
     expires_at: Optional[datetime] = None
     is_active: bool = False
+
+
+class PatientDocumentItem(BaseModel):
+    """A doctor-authored document, as the patient it concerns sees it."""
+    id: str
+    document_name: str
+    document_type: str
+    doctor_name: Optional[str] = None
+    doctor_specialization: Optional[str] = None
+    status: str
+    created_at: Optional[datetime] = None
+    # The body is never in the list response; it is encrypted at rest and
+    # decrypted only when the patient opens that specific document.
+    has_content: bool = False
+    document_hash: Optional[str] = None
+    kem_algorithm: Optional[str] = None
+    signature_algorithm: Optional[str] = None
+    blockchain_tx_hash: Optional[str] = None

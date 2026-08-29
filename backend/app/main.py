@@ -29,6 +29,7 @@ from app.schemas import (
     CreateImagingReportRequest, ImagingReportItem,
     LabPanelSummary, FinalizedReportResponse, ReportVerification,
     ConsentEntry, RevokeConsentRequest, EmergencyAccessRequest, EmergencyAccessRecord,
+    PatientDocumentItem,
     NurseProfile, NurseDashboardSummary, NursePatientListItem,
     PatientVitalsRecord, CreateVitalsRequest, NursingNoteRecord, CreateNursingNoteRequest,
     ActivePrescriptionForNurse, MedicationAdministrationRecord, CreateMedicationAdministrationRequest,
@@ -1128,6 +1129,81 @@ def get_patient_appointments(session: dict = Depends(require_role("Patient"))):
     ) for r in rows]
 
 
+@app.get("/api/patient/documents")
+def get_patient_documents(session: dict = Depends(require_role("Patient"))):
+    """Documents written about this patient by their clinicians.
+
+    Discharge summaries, referral letters and medical certificates are written
+    *about* the patient, so the patient can read them. This completes the
+    workflow the doctor side already implements: authored, secured, and then
+    actually reachable by the person it concerns.
+    """
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT m.*, d.full_name AS doctor_name, d.specialization
+                FROM MedicalDocuments m
+                LEFT JOIN Users d ON m.doctor_id = d.id
+                WHERE m.patient_id = %s
+                ORDER BY m.created_at DESC
+            """, (user_uuid,))
+            rows = cur.fetchall()
+
+    return [PatientDocumentItem(
+        id=str(r["id"]),
+        document_name=r["document_name"],
+        document_type=r["document_type"],
+        doctor_name=r["doctor_name"],
+        doctor_specialization=r["specialization"],
+        status=r["status"],
+        created_at=r["created_at"],
+        has_content=bool(r.get("encrypted_content") or r.get("content")),
+        document_hash=r.get("document_hash"),
+        kem_algorithm=r.get("kem_algorithm"),
+        signature_algorithm=r.get("signature_algorithm"),
+        blockchain_tx_hash=r.get("blockchain_tx_hash"),
+    ) for r in rows]
+
+
+@app.get("/api/patient/documents/{document_id}/content")
+def get_patient_document_content(
+    document_id: str,
+    request: Request,
+    session: dict = Depends(require_role("Patient")),
+):
+    """Decrypt one document written about this patient.
+
+    Scoped to their own records by patient_id, so a document id alone is not
+    enough to read someone else's. Access is logged like every other release
+    of a medical document.
+    """
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT m.*, u.mlkem_private_key_encrypted
+                FROM MedicalDocuments m
+                JOIN Users u ON m.patient_id = u.id
+                WHERE m.id = %s AND m.patient_id = %s
+            """, (document_id, user_uuid))
+            r = cur.fetchone()
+
+        if not r:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        released = _decrypt_medical_document(r)
+
+        log_admin_action(
+            conn, user_uuid, session.get("public_user_id"),
+            "PATIENT_READ_DOCUMENT", user_uuid, session.get("public_user_id"),
+            request.client.host if request and request.client else None,
+            {"document_id": str(document_id), "document_name": r["document_name"]},
+        )
+
+    return released
+
+
 @app.get("/api/patient/consent")
 def get_patient_consent(session: dict = Depends(require_role("Patient"))):
     """Every clinician with a relationship to this patient, and their access status.
@@ -1793,6 +1869,45 @@ def create_medical_document(
     }
 
 
+
+def _decrypt_medical_document(row: dict) -> dict:
+    """Release one medical document's body, decrypted and integrity-checked.
+
+    Shared by the doctor who authored it and the patient it is about, so the
+    same document can never decrypt differently depending on who asks. The
+    digest is re-checked against the value recorded at signing before anything
+    is returned.
+    """
+    # Rows predating encryption kept their plaintext body in `content`.
+    if not row.get("encrypted_content"):
+        if row.get("content"):
+            return {"content": row["content"], "encrypted": False}
+        raise HTTPException(status_code=404, detail="No content stored for this document.")
+
+    ciphertext = row["encrypted_content"]
+    if not ciphertext and row.get("s3_key"):
+        try:
+            ciphertext = download_file_from_s3(row["s3_key"]).decode("utf-8")
+        except StorageError as exc:
+            logger.error("S3 recovery failed for document %s: %s", row.get("id"), exc)
+
+    try:
+        shared_secret = decapsulate_aes_key(row["encrypted_aes_key"], row["mlkem_private_key_encrypted"])
+        content_bytes = decrypt_document(
+            ciphertext, derive_aes_key(shared_secret),
+            row["encryption_nonce"], row["encryption_tag"],
+        )
+    except PQCUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="Document failed its integrity check.") from exc
+
+    if sha256_hex(content_bytes) != row.get("document_hash"):
+        raise HTTPException(status_code=409, detail="Document digest does not match the recorded hash.")
+
+    return {"content": content_bytes.decode("utf-8"), "encrypted": True}
+
+
 @app.get("/api/doctor/documents/{document_id}/content")
 def get_medical_document_content(document_id: str, session: dict = Depends(require_role("Doctor"))):
     """Decrypt one document the requesting doctor authored.
@@ -1813,35 +1928,7 @@ def get_medical_document_content(document_id: str, session: dict = Depends(requi
 
     if not r:
         raise HTTPException(status_code=404, detail="Document not found")
-
-    # Rows predating encryption kept their plaintext body in `content`.
-    if not r.get("encrypted_content"):
-        if r.get("content"):
-            return {"content": r["content"], "encrypted": False}
-        raise HTTPException(status_code=404, detail="No content stored for this document.")
-
-    ciphertext = r["encrypted_content"]
-    if not ciphertext and r.get("s3_key"):
-        try:
-            ciphertext = download_file_from_s3(r["s3_key"]).decode("utf-8")
-        except StorageError as exc:
-            logger.error("S3 recovery failed for document %s: %s", document_id, exc)
-
-    try:
-        shared_secret = decapsulate_aes_key(r["encrypted_aes_key"], r["mlkem_private_key_encrypted"])
-        content_bytes = decrypt_document(
-            ciphertext, derive_aes_key(shared_secret),
-            r["encryption_nonce"], r["encryption_tag"],
-        )
-    except PQCUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail="Document failed its integrity check.") from exc
-
-    if sha256_hex(content_bytes) != r.get("document_hash"):
-        raise HTTPException(status_code=409, detail="Document digest does not match the recorded hash.")
-
-    return {"content": content_bytes.decode("utf-8"), "encrypted": True}
+    return _decrypt_medical_document(r)
 
 @app.get("/api/doctor/appointments")
 def get_doctor_appointments(session: dict = Depends(require_role("Doctor"))):

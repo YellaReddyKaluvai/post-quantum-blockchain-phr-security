@@ -34,6 +34,7 @@ The design rule throughout: *the system never claims a protection it did not act
 - **Lab Requests**: Order an investigation from the patient's chart, then track every request through Pending → Accepted → In Progress → Completed, opening the signed report the moment it is filed.
 - **Report Review & Verification**: Decrypt finalised reports, and re-check each one's signature and on-chain digest.
 - **Appointment Manager**: Confirm, complete or cancel patient appointments.
+- **Record Consultation**: Capture the visit itself — symptoms, assessment and advice — which the patient then reads in their portal.
 - **Emergency Access**: Break-glass override when a patient has withdrawn consent. Requires a substantive clinical reason, is time-boxed, and states its consequences before the form — the patient is notified at once and the declaration is anchored on-chain.
 
 ### 3. 🧪 Laboratory Technician Dashboard (LIMS) (`/dashboard/lab-technician`)
@@ -46,6 +47,7 @@ The design rule throughout: *the system never claims a protection it did not act
 
 ### 4. 👤 Patient Dashboard (`/dashboard/patient`)
 - **Personal Health Record (PHR)**: Medical records, diagnosis timeline, active prescriptions, and lab report history.
+- **My Documents**: Discharge summaries, referral letters and certificates written by your doctors — decrypted on demand, with the signing algorithm, digest and on-chain anchor shown so authenticity is checkable rather than asserted.
 - **My Vitals**: Nurse-recorded observations, with out-of-range readings flagged using the same thresholds clinical staff see.
 - **Appointment Booking**: Request an appointment with any approved doctor; the doctor is notified and confirms or declines.
 - **Record Access**: Every clinician who can read the record and how that relationship arose, with one-click withdrawal. Revoking genuinely blocks reads rather than merely noting a preference; an active emergency override is shown plainly.
@@ -80,6 +82,7 @@ listed as not built.
 | Blockchain anchoring | ✅ | Real on-chain writes via `PHR.sol`; falls back to a clearly-labelled local anchor |
 | Session handling | ✅ | 30-minute tokens; expiry redirects to login and returns you to where you were |
 | RBAC across 5 roles | ✅ | Enforced server-side; backend/frontend permission parity is test-enforced |
+| Doctor-authored documents | ✅ | Encrypted, signed and anchored — and readable by the patient they concern, completing the spec's "patient receives authorized access" |
 | Consent management | ✅ | Revoking a doctor genuinely blocks reads — the same report returns 200 before and 404 after |
 | Emergency break-glass access | ✅ | Time-boxed override, patient notified immediately, anchored on-chain, reviewable by an admin |
 | Automated tests | ✅ | 84 tests, mutation-checked |
