@@ -83,9 +83,10 @@ listed as not built.
 | Session handling | ✅ | 30-minute tokens; expiry redirects to login and returns you to where you were |
 | RBAC across 5 roles | ✅ | Enforced server-side; backend/frontend permission parity is test-enforced |
 | Doctor-authored documents | ✅ | Encrypted, signed and anchored — and readable by the patient they concern, completing the spec's "patient receives authorized access" |
+| Clinical record encryption | ✅ | Diagnoses and prescriptions encrypted at column level; grepping the database for a diagnosis returns nothing |
 | Consent management | ✅ | Revoking a doctor genuinely blocks reads — the same report returns 200 before and 404 after |
 | Emergency break-glass access | ✅ | Time-boxed override, patient notified immediately, anchored on-chain, reviewable by an admin |
-| Automated tests | ✅ | 84 tests, mutation-checked |
+| Automated tests | ✅ | 106 tests, mutation-checked |
 
 ### Not implemented
 
@@ -105,7 +106,7 @@ listed as not built.
 | Layer | Protocol / Algorithm | Purpose |
 | --- | --- | --- |
 | **Password Hashing** | **Argon2id** | Memory-hard, GPU-resistant credential protection |
-| **PII Encryption** | **AES-256-CBC** | Encrypts sensitive demographics (DOB, Blood Group) |
+| **PII Encryption** | **AES-256-CBC** | Encrypts sensitive demographics (DOB, blood group) and the clinical text of diagnoses and prescriptions. Defends the database at rest, not a compromised application server — the app holds the key |
 | **Key Encapsulation** | **ML-KEM (Kyber-768)** | Post-Quantum Key Encapsulation (FIPS 203) for payload AES keys |
 | **Digital Signatures** | **ML-DSA (Dilithium-3)** | Post-Quantum Digital Signature (FIPS 204) for document authenticity |
 | **Cloud Storage** | **AWS S3** | Resilient cloud storage bucket (`postquantumcryptography`) |
@@ -180,7 +181,7 @@ cd backend
 python3 -m pytest
 ```
 
-84 tests, no database or running server required — they exercise pure functions
+106 tests, no database or running server required — they exercise pure functions
 so they fail for exactly one reason.
 
 What they cover, and why these specific assertions: every test asserts a

@@ -924,9 +924,9 @@ def get_patient_dashboard_summary(session: dict = Depends(require_role("Patient"
             assigned_doctor=assigned_doc["full_name"] if assigned_doc else None,
         ),
         medical_summary=MedicalSummarySection(
-            latest_diagnosis=latest_diag["title"] if latest_diag else None,
-            current_treatment=f"{latest_rx['medicine_name']} ({latest_rx['dosage']})" if latest_rx else None,
-            latest_prescription=latest_rx["medicine_name"] if latest_rx else None,
+            latest_diagnosis=_dec(latest_diag["title"]) if latest_diag else None,
+            current_treatment=f"{_dec(latest_rx['medicine_name'])} ({_dec(latest_rx['dosage'])})" if latest_rx else None,
+            latest_prescription=_dec(latest_rx["medicine_name"]) if latest_rx else None,
         ),
         reports_summary=ReportsSummarySection(
             total=report_stats["total"],
@@ -966,13 +966,7 @@ def get_patient_medical_records(session: dict = Depends(require_role("Patient"))
                 ORDER BY d.visit_date DESC
             """, (user_uuid,))
             rows = cur.fetchall()
-    return [DiagnosisRecord(
-        id=str(r["id"]), title=r["title"], description=r["description"],
-        symptoms=r["symptoms"], doctor_notes=r["doctor_notes"],
-        recommended_tests=r["recommended_tests"],
-        visit_date=r["visit_date"], doctor_name=r["doctor_name"],
-        created_at=r["created_at"]
-    ) for r in rows]
+    return [_diagnosis_record(r) for r in rows]
 
 
 @app.get("/api/patient/medical-records/{record_id}")
@@ -988,13 +982,7 @@ def get_patient_medical_record_detail(record_id: str, session: dict = Depends(re
             r = cur.fetchone()
     if not r:
         raise HTTPException(status_code=404, detail="Record not found")
-    return DiagnosisRecord(
-        id=str(r["id"]), title=r["title"], description=r["description"],
-        symptoms=r["symptoms"], doctor_notes=r["doctor_notes"],
-        recommended_tests=r["recommended_tests"],
-        visit_date=r["visit_date"], doctor_name=r["doctor_name"],
-        created_at=r["created_at"]
-    )
+    return _diagnosis_record(r)
 
 
 @app.get("/api/patient/lab-reports")
@@ -1107,11 +1095,7 @@ def get_patient_prescriptions(session: dict = Depends(require_role("Patient"))):
                 WHERE p.patient_id = %s ORDER BY p.prescribed_date DESC
             """, (user_uuid,))
             rows = cur.fetchall()
-    return [PrescriptionRecord(
-        id=str(r["id"]), medicine_name=r["medicine_name"], dosage=r["dosage"],
-        frequency=r["frequency"], duration=r["duration"], instructions=r["instructions"],
-        prescribed_date=r["prescribed_date"], doctor_name=r["doctor_name"]
-    ) for r in rows]
+    return [_prescription_record(r) for r in rows]
 
 
 @app.get("/api/patient/consultations")
@@ -1675,21 +1659,8 @@ def get_doctor_patient_detail(patient_id: str, session: dict = Depends(require_r
             "date_of_birth": decrypt_data(user["date_of_birth_encrypted"]) if user.get("date_of_birth_encrypted") else None,
             "blood_group": decrypt_data(user["blood_group_encrypted"]) if user.get("blood_group_encrypted") else None,
         },
-        "diagnoses": [
-            DiagnosisRecord(
-                id=str(r["id"]), title=r["title"], description=r["description"],
-                symptoms=r["symptoms"], doctor_notes=r["doctor_notes"],
-                recommended_tests=r["recommended_tests"], visit_date=r["visit_date"],
-                created_at=r["created_at"]
-            ) for r in diagnoses
-        ],
-        "prescriptions": [
-            PrescriptionRecord(
-                id=str(r["id"]), medicine_name=r["medicine_name"], dosage=r["dosage"],
-                frequency=r["frequency"], duration=r["duration"], instructions=r["instructions"],
-                prescribed_date=r["prescribed_date"]
-            ) for r in prescriptions
-        ],
+        "diagnoses": [_diagnosis_record(r) for r in diagnoses],
+        "prescriptions": [_prescription_record(r) for r in prescriptions],
         "vitals": [_vitals_record(v) for v in vitals],
         "nursing_notes": [
             NursingNoteRecord(
@@ -1707,7 +1678,8 @@ def create_diagnosis(patient_id: str, req: CreateDiagnosisRequest, session: dict
             cur.execute("""
                 INSERT INTO Diagnoses (patient_id, doctor_id, title, description, symptoms, doctor_notes, recommended_tests, visit_date)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
-            """, (patient_id, user_uuid, req.title, req.description, req.symptoms, req.doctor_notes, req.recommended_tests, req.visit_date))
+            """, (patient_id, user_uuid, _enc(req.title), _enc(req.description), _enc(req.symptoms),
+                  _enc(req.doctor_notes), _enc(req.recommended_tests), req.visit_date))
             conn.commit()
     return {"status": "success"}
 
@@ -1719,7 +1691,8 @@ def create_prescription(patient_id: str, req: CreatePrescriptionRequest, session
             cur.execute("""
                 INSERT INTO Prescriptions (patient_id, doctor_id, medicine_name, dosage, frequency, duration, instructions, prescribed_date)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
-            """, (patient_id, user_uuid, req.medicine_name, req.dosage, req.frequency, req.duration, req.instructions, req.prescribed_date))
+            """, (patient_id, user_uuid, _enc(req.medicine_name), _enc(req.dosage), _enc(req.frequency),
+                  _enc(req.duration), _enc(req.instructions), req.prescribed_date))
             conn.commit()
     return {"status": "success"}
 
@@ -3325,6 +3298,74 @@ def clear_lab_tech_notifications(session: dict = Depends(require_role("Lab Techn
 # list is simply "who I've recorded something for", mirroring how the Lab
 # Technician's queue is scoped to their own work rather than a formal roster.
 
+# ─── Clinical record encryption ──────────────────────────────────────────────
+#
+# Diagnoses and prescriptions are the last record types stored as plaintext
+# columns. They are relational rows read by several roles at once — a patient,
+# their doctor and a nurse on a medication round — rather than documents
+# released to one recipient, so the per-patient ML-KEM wrapping used for
+# reports would make them unreadable to the very staff who need them.
+#
+# They therefore use the same AES-256-CBC column encryption that already
+# protects date of birth and blood group. The honest limit of that: it defends
+# the database at rest, not a compromised application server, because the app
+# holds the key. That is the same property the existing PII columns have.
+#
+# Only content is encrypted. Dates and foreign keys stay in the clear because
+# every ORDER BY and JOIN depends on them — and nothing anywhere sorts,
+# filters or searches on the clinical text itself.
+
+DIAGNOSIS_ENCRYPTED_FIELDS = ("title", "description", "symptoms", "doctor_notes", "recommended_tests")
+PRESCRIPTION_ENCRYPTED_FIELDS = ("medicine_name", "dosage", "frequency", "duration", "instructions")
+
+
+def _enc(value: Optional[str]) -> Optional[str]:
+    """Encrypt one clinical field, leaving empty values alone."""
+    return encrypt_data(value) if value else value
+
+
+def _dec(value: Optional[str]) -> Optional[str]:
+    """Decrypt one clinical field.
+
+    ``decrypt_data`` returns its input unchanged when it is not decryptable,
+    so rows written before this change continue to read correctly.
+    """
+    return decrypt_data(value) if value else value
+
+
+def _diagnosis_record(row: dict) -> DiagnosisRecord:
+    """Shape one Diagnoses row, decrypting its clinical text.
+
+    Shared by every read path so a diagnosis cannot be returned encrypted
+    from one endpoint and plain from another.
+    """
+    return DiagnosisRecord(
+        id=str(row["id"]),
+        title=_dec(row["title"]) or "",
+        description=_dec(row.get("description")),
+        symptoms=_dec(row.get("symptoms")),
+        doctor_notes=_dec(row.get("doctor_notes")),
+        recommended_tests=_dec(row.get("recommended_tests")),
+        visit_date=row.get("visit_date"),
+        doctor_name=row.get("doctor_name"),
+        created_at=row.get("created_at"),
+    )
+
+
+def _prescription_record(row: dict) -> PrescriptionRecord:
+    """Shape one Prescriptions row, decrypting its clinical text."""
+    return PrescriptionRecord(
+        id=str(row["id"]),
+        medicine_name=_dec(row["medicine_name"]) or "",
+        dosage=_dec(row["dosage"]) or "",
+        frequency=_dec(row["frequency"]) or "",
+        duration=_dec(row["duration"]) or "",
+        instructions=_dec(row.get("instructions")),
+        prescribed_date=row.get("prescribed_date"),
+        doctor_name=row.get("doctor_name"),
+    )
+
+
 def _vitals_record(row: dict) -> PatientVitalsRecord:
     """Shape one PatientVitals row for the API.
 
@@ -3517,8 +3558,9 @@ def get_nurse_patient_detail(patient_id: str, session: dict = Depends(require_ro
         ],
         active_prescriptions=[
             ActivePrescriptionForNurse(
-                id=str(p["id"]), medicine_name=p["medicine_name"], dosage=p["dosage"], frequency=p["frequency"],
-                duration=p["duration"], instructions=p["instructions"], prescribed_date=p["prescribed_date"],
+                id=str(p["id"]), medicine_name=_dec(p["medicine_name"]) or "", dosage=_dec(p["dosage"]) or "",
+                frequency=_dec(p["frequency"]) or "", duration=_dec(p["duration"]) or "",
+                instructions=_dec(p["instructions"]), prescribed_date=p["prescribed_date"],
                 last_administered_at=p["last_administered_at"], last_administered_status=p["last_administered_status"],
             ) for p in prescriptions
         ],
