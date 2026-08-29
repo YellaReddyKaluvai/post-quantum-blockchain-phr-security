@@ -229,6 +229,32 @@ export default function ImagingReportsPage() {
     }
   };
 
+
+  // Reuses whatever was already decrypted for viewing, so opening then saving
+  // a scan does not decrypt it twice.
+  const handleDownloadImage = async (report: ImagingReportItem) => {
+    setDecryptError(null);
+    let data = decrypted[report.id];
+    if (!data) {
+      setDecrypting(report.id);
+      try {
+        data = (await getImagingImage(report.id)).image_data;
+        setDecrypted((prev) => ({ ...prev, [report.id]: data as string }));
+      } catch (err) {
+        setDecryptError(err instanceof Error ? err.message : "Failed to decrypt image");
+        return;
+      } finally {
+        setDecrypting(null);
+      }
+    }
+    const a = document.createElement("a");
+    a.href = data;
+    a.download = `${report.exam_type || "scan"}_${report.scan_region || report.id}`.replace(/\s+/g, "_");
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
   useEffect(() => {
     const fetchReports = async () => {
       try {
@@ -385,9 +411,18 @@ export default function ImagingReportsPage() {
                 )}
                 
                 <div className="flex gap-2">
-                  <button className="p-2 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 text-slate-600 transition-colors tooltip" title="Download Image">
-                    <Download className="w-4 h-4" />
-                  </button>
+                  {report.has_image && (
+                    <button
+                      onClick={() => handleDownloadImage(report)}
+                      disabled={decrypting === report.id}
+                      className="p-2 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 text-slate-600 transition-colors disabled:opacity-50"
+                      title="Decrypt and download the scan"
+                    >
+                      {decrypting === report.id
+                        ? <Loader2 className="w-4 h-4 animate-spin" />
+                        : <Download className="w-4 h-4" />}
+                    </button>
+                  )}
                 </div>
               </div>
             </motion.div>

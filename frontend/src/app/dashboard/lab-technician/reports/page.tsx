@@ -40,6 +40,7 @@ export default function LabReportsPage() {
   const [selectedAudit, setSelectedAudit] = useState<LabReportItem | null>(null);
   const [loadError, setLoadError] = useState("");
   const [busyReport, setBusyReport] = useState<string | null>(null);
+  const [period, setPeriod] = useState("All Time");
 
   // The PDF only exists decrypted in memory: it is fetched, shown or saved,
   // then the object URL is released so it does not linger.
@@ -89,13 +90,42 @@ export default function LabReportsPage() {
     fetchReports();
   }, []);
 
+  // Oldest timestamp a report may carry to satisfy the selected window.
+  const periodCutoff = (): number | null => {
+    const now = new Date();
+    switch (period) {
+      case "Today": {
+        const start = new Date(now);
+        start.setHours(0, 0, 0, 0);
+        return start.getTime();
+      }
+      case "This Week": return now.getTime() - 7 * 24 * 60 * 60 * 1000;
+      case "This Month": return now.getTime() - 30 * 24 * 60 * 60 * 1000;
+      default: return null;
+    }
+  };
+
   const filteredReports = reports.filter((report: LabReportItem) => {
     const pName = (report.patient_name || report.patientName || String(report.patient_id || "")) as string;
     const rId = (report.id || report.report_id_public || "") as string;
     const rType = (report.report_type || report.type || report.report_name || "") as string;
-    return pName.toLowerCase().includes(searchTerm.toLowerCase()) || 
-           rId.toLowerCase().includes(searchTerm.toLowerCase()) ||
-           rType.toLowerCase().includes(searchTerm.toLowerCase());
+    const term = searchTerm.toLowerCase();
+    const matchesTerm =
+      pName.toLowerCase().includes(term) ||
+      rId.toLowerCase().includes(term) ||
+      rType.toLowerCase().includes(term);
+
+    const cutoff = periodCutoff();
+    if (cutoff === null) return matchesTerm;
+
+    // A report with no usable date is kept rather than silently dropped —
+    // hiding a record because its timestamp is missing would misrepresent
+    // the laboratory's output.
+    const raw = (report.upload_date || report.date) as string | undefined;
+    const stamp = raw ? new Date(raw).getTime() : NaN;
+    if (Number.isNaN(stamp)) return matchesTerm;
+
+    return matchesTerm && stamp >= cutoff;
   });
 
 
@@ -127,16 +157,22 @@ export default function LabReportsPage() {
             />
           </div>
           <div className="flex gap-2">
-            <select className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium text-slate-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/20">
-              <option>All Time</option>
-              <option>Today</option>
-              <option>This Week</option>
-              <option>This Month</option>
-            </select>
-            <button className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-50 transition-colors">
-              <Filter className="w-4 h-4" />
-              Filter
-            </button>
+            {/* Filtering applies as soon as the period changes, so the
+                separate "Filter" button that used to sit here did nothing and
+                has been removed rather than left as a decoy. */}
+            <div className="relative">
+              <Filter className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+              <select
+                value={period}
+                onChange={(e) => setPeriod(e.target.value)}
+                className="pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium text-slate-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/20"
+              >
+                <option value="All Time">All Time</option>
+                <option value="Today">Today</option>
+                <option value="This Week">This Week</option>
+                <option value="This Month">This Month</option>
+              </select>
+            </div>
           </div>
         </div>
 
