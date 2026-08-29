@@ -1,6 +1,6 @@
 # 🔐 QuantumCare — Post-Quantum Cryptography & Blockchain Secure Hospital Management System (PHR)
 
-> **Enterprise-Grade Post-Quantum Health Record Management Platform** powered by **ML-KEM (Kyber-768)**, **ML-DSA (Dilithium-3)**, **AWS S3 Cloud Storage**, **IPFS Multihash CIDs**, and **PostgreSQL**.
+> Post-quantum Personal Health Record platform built on **ML-KEM-768** (FIPS 203), **ML-DSA-65** (FIPS 204), **AES-256-GCM**, encrypted **AWS S3** storage, on-chain integrity anchoring and **PostgreSQL**.
 
 ---
 
@@ -8,7 +8,9 @@
 
 **QuantumCare** is an advanced, commercial-grade healthcare and Personal Health Record (PHR) platform built to defend electronic health records against classical and quantum computing security threats.
 
-The architecture combines **Post-Quantum Key Encapsulation (ML-KEM)**, **Quantum Digital Signatures (ML-DSA)**, **AES-256-GCM Symmetric Encryption**, **AWS S3 Cloud Storage**, and **IPFS Content Addressing** to guarantee zero-knowledge privacy, verifiable integrity, and post-quantum security.
+The architecture combines **ML-KEM-768** key encapsulation, **ML-DSA-65** digital signatures, **AES-256-GCM** document encryption, encrypted **AWS S3** storage and **on-chain integrity anchoring**.
+
+The design rule throughout: *the system never claims a protection it did not actually apply.* A failed upload records no object key, an unreachable chain produces a visibly-simulated anchor, and a missing post-quantum library raises rather than substituting placeholder keys.
 
 ---
 
@@ -18,15 +20,19 @@ The architecture combines **Post-Quantum Key Encapsulation (ML-KEM)**, **Quantum
 - **User Registration Verification & Approval**: Workflow for reviewing and approving newly registered Doctors, Patients, Lab Technicians, and Nurses.
 - **Automated Public ID Generation**: Issues sequential identifiers (`PAT-2026-000001`, `DOC-2026-000001`, `LAB-2026-000001`, `NUR-2026-000001`).
 - **User Management & Role Access Control**: Active user toggles, status management, and permissions.
-- **Cryptographic Key Center**: Real-time stats on ML-KEM public keys, ML-DSA signatures, and Argon2id hash parameters.
-- **Email Notifications**: Live SMTP Gmail dispatch for registration approvals and rejection notices.
+- **Cryptographic Key Center**: Live counts of issued ML-KEM / ML-DSA keypairs and active cryptographic identities.
+- **Infrastructure Health**: Live blockchain and cloud-storage status — chain connectivity and block height, the **on-chain vs locally-simulated** anchor split, and how many reports actually have a cloud copy. Built to surface problems rather than imply everything is fine.
+- **Audit Log**: Every administrative action, report access and download, with search and pagination.
+- **Email Notifications**: Live SMTP dispatch for registration approvals and rejections, with delivery status tracked per message.
 
 ### 2. 🏥 Doctor Dashboard (`/dashboard/doctor`)
 - **Patient Workspace**: Patient roster search, chart view, and medical history.
-- **Diagnosis Builder**: Interactive modal for recording diagnoses, symptoms, doctor notes, and recommended tests.
-- **Prescription System**: Form for issuing electronic prescriptions with medicine name, dosage, frequency, and duration.
-- **Lab Report & Document Review**: Direct access to finalized laboratory test results and imaging scans.
-- **Appointment Manager**: Manage scheduled, completed, and cancelled patient consultations.
+- **Nursing Observations**: The vitals and notes recorded by nursing staff, with out-of-range readings highlighted — the reading behind each abnormal-vitals alert.
+- **Diagnosis Builder**: Structured entry for title, visit date, symptoms, clinical notes and recommended tests.
+- **Prescription System**: Electronic prescriptions with medicine, dosage, frequency, duration and instructions.
+- **Lab Requests**: Order an investigation from the patient's chart, then track every request through Pending → Accepted → In Progress → Completed, opening the signed report the moment it is filed.
+- **Report Review & Verification**: Decrypt finalised reports, and re-check each one's signature and on-chain digest.
+- **Appointment Manager**: Confirm, complete or cancel patient appointments.
 
 ### 3. 🧪 Laboratory Technician Dashboard (LIMS) (`/dashboard/lab-technician`)
 - **Laboratory Information Management System (LIMS)**: Complete portal for receiving test requests, searching patient directories, and uploading medical documents.
@@ -38,9 +44,54 @@ The architecture combines **Post-Quantum Key Encapsulation (ML-KEM)**, **Quantum
 
 ### 4. 👤 Patient Dashboard (`/dashboard/patient`)
 - **Personal Health Record (PHR)**: Medical records, diagnosis timeline, active prescriptions, and lab report history.
-- **Appointments & Consultations**: Upcoming appointment schedule and consultation notes.
-- **Security & Privacy Center**: Real-time PQC protection status, active session logs, and login IP address tracker.
-- **Real-Time Notification Feed**: System notifications for report readiness and appointment updates.
+- **My Vitals**: Nurse-recorded observations, with out-of-range readings flagged using the same thresholds clinical staff see.
+- **Appointment Booking**: Request an appointment with any approved doctor; the doctor is notified and confirms or declines.
+- **Security & Privacy Center**: PQC protection status, active session logs, and login IP tracking.
+- **Notification Feed**: Report readiness, appointment updates, and vitals alerts.
+
+### 5. 🩺 Nurse Dashboard (`/dashboard/nurse`)
+- **Patient Chart**: Vitals entry, nursing notes, and medication rounds in one view.
+- **Vitals Recording**: Temperature, blood pressure, heart rate, SpO₂, respiratory rate, weight and height. Out-of-range readings are flagged at the point of entry and the attending doctor is alerted automatically.
+- **Nursing Notes**: Observation, Care and Incident entries, visible to the treating doctor.
+- **Medication Administration**: Records each round against the prescription as Administered, Refused, Held or Missed, with the last outcome shown per medicine.
+
+> Vitals recorded here are readable by the treating **doctor** and by the **patient**. Nursing notes go to the doctor only — they are clinical handover between staff.
+
+---
+
+## 📊 Implementation Status
+
+Verified against the running system, not aspirational. Anything not built is
+listed as not built.
+
+### Working end-to-end
+
+| Area | State | Notes |
+|---|---|---|
+| Registration → admin approval → login | ✅ | Permanent role-scoped User IDs; real SMTP approval/rejection email |
+| Post-quantum key issuance | ✅ | Real ML-KEM-768 + ML-DSA-65 via liboqs, generated on approval |
+| Doctor → Lab → Patient report pipeline | ✅ | 9 structured panels → hospital PDF → AES-256-GCM → ML-KEM → ML-DSA → chain anchor |
+| Imaging studies | ✅ | Same hybrid protection as lab reports; encrypted before storage, decrypted only on request |
+| Nurse module | ✅ | Vitals, notes, medication rounds; shared with doctor and patient |
+| Cloud storage (AWS S3) | ✅ | Ciphertext only, verified; doubles as a recovery path if the database copy is lost |
+| Blockchain anchoring | ✅ | Real on-chain writes via `PHR.sol`; falls back to a clearly-labelled local anchor |
+| Session handling | ✅ | 30-minute tokens; expiry redirects to login and returns you to where you were |
+| RBAC across 5 roles | ✅ | Enforced server-side; backend/frontend permission parity is test-enforced |
+| Automated tests | ✅ | 75 tests, mutation-checked |
+
+### Not implemented
+
+| Area | Status |
+|---|---|
+| **Consent management** | `Consent` table exists in the schema; **no endpoints or UI**. Patients cannot currently grant or revoke access. |
+| **Emergency "break-glass" access** | `EmergencyAccess` table and `PHR.sol`'s `emergencyAccess()` both exist; **no endpoints or UI**. |
+| **IPFS publishing** | A CIDv0 is computed locally, but nothing is pinned to the IPFS network — see the Content Addressing row below. |
+| **Detail views** | Some list pages have no per-record detail screen (patient medical record, patient lab report, lab technician report). |
+| `MedicalRecords` table | Dead schema — defined in `init.sql`, referenced nowhere. Superseded by `LabReports` / `MedicalDocuments`. |
+
+### Known data caveats
+- Two lab reports predate the encryption pipeline and hold no ciphertext, so they cannot be given a cloud copy or be decrypted. They are counted honestly in `/api/admin/storage/status`.
+- Anchors written before the chain integration are marked `local-simulated` and carry no on-chain proof. The admin Security page reports the on-chain vs simulated split rather than hiding it.
 
 ---
 
@@ -54,13 +105,14 @@ The architecture combines **Post-Quantum Key Encapsulation (ML-KEM)**, **Quantum
 | **Digital Signatures** | **ML-DSA (Dilithium-3)** | Post-Quantum Digital Signature (FIPS 204) for document authenticity |
 | **Cloud Storage** | **AWS S3** | Resilient cloud storage bucket (`postquantumcryptography`) |
 | **Content Addressing** | **CIDv0 (IPFS multihash format)** | Deterministic fingerprint of the encrypted document. Computed locally — **not** published to the IPFS network |
-| **Audit Logging** | **Blockchain Metadata** | Immutable audit logging in `AdminAuditLogs` |
+| **Integrity Anchoring** | **Ethereum (`PHR.sol`)** | Document digests committed on-chain via `DocumentAnchors`; falls back to a labelled local anchor when no chain is reachable |
+| **Access Auditing** | **PostgreSQL** | Every read, download and admin action recorded in `AdminAuditLogs` / `AuthLogs` |
 
 ---
 
 ## 🛠️ Technology Stack
 
-- **Backend**: FastAPI (Python 3.11/3.13), Uvicorn, PostgreSQL, `psycopg3`, `boto3`, `liboqs-python`
+- **Backend**: FastAPI on **Python 3.12+** (3.10 minimum — the codebase uses `X | None` syntax), Uvicorn, PostgreSQL, `psycopg3`, `boto3`, `liboqs-python`, `reportlab`
 - **Frontend**: Next.js 16 (App Router), TailwindCSS v4, Framer Motion 12, Lucide React
 - **Database**: PostgreSQL 15+ (`pqc_hospital`)
 - **Cloud & Storage**: AWS S3 (encrypted objects only)
@@ -195,9 +247,15 @@ Visit **http://localhost:3000** to log in to the platform!
 
 ## 🔑 Demo Login Credentials
 
-| Role | Public User ID | Email / Password |
-| --- | --- | --- |
-| **Administrator** | `ADM-2026-000001` | `admin@hospital.com` / `Admin@1234` |
-| **Doctor** | `DOC-2026-000001` | `doctor@pqc.com` / `Password123!` |
-| **Patient** | `PAT-2026-000001` | `patient@pqc.com` / `Password123!` |
-| **Lab Technician** | `LAB-2026-000001` | `lab@pqc.com` / `Password123!` |
+Sign in with the **User ID**, not the email address.
+
+| Role | User ID | Password | Seeded as |
+| --- | --- | --- | --- |
+| **Administrator** | `ADM-2026-000001` | `Admin@1234` | System Administrator |
+| **Doctor** | `DOC-2026-000001` | `Password@123` | Dr Carol |
+| **Patient** | `PAT-2026-000001` | `Password@123` | Bob Patient |
+| **Lab Technician** | `LAB-2026-000001` | `Password@123` | Leo LabTech |
+| **Nurse** | `NUR-2026-000001` | `Password@123` | Nina Nurse |
+
+Create these with the seed scripts in `backend/` (`seed_admin.py`, then the
+role seeders). The admin password comes from `ADMIN_PASSWORD` in `.env`.
