@@ -329,6 +329,57 @@ export async function getPatientAppointments() {
   return response.json();
 }
 
+export async function getPatientConsent() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/consent`);
+  if (!response.ok) throw new Error("Failed to fetch consent list");
+  return response.json();
+}
+
+export async function revokePatientConsent(doctorId: string, reason?: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/consent/${doctorId}/revoke`, {
+    method: "POST",
+    body: JSON.stringify({ reason: reason || null }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to withdraw access"));
+  }
+  return response.json();
+}
+
+export async function grantPatientConsent(doctorId: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/consent/${doctorId}/grant`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to restore access"));
+  }
+  return response.json();
+}
+
+export async function declareEmergencyAccess(data: {
+  patient_id: string;
+  reason: string;
+  duration_hours?: number;
+}) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/emergency-access`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to declare emergency access"));
+  }
+  return response.json();
+}
+
+export async function getAdminEmergencyAccess() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/emergency-access`);
+  if (!response.ok) throw new Error("Failed to fetch emergency access log");
+  return response.json();
+}
+
 export async function getPatientVitals() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/vitals`);
   if (!response.ok) throw new Error("Failed to fetch vitals");

@@ -3,11 +3,11 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { motion } from "framer-motion";
-import { User, Activity, FileText, ChevronLeft, Plus, X, FlaskConical, CheckCircle, HeartPulse } from "lucide-react";
+import { User, Activity, FileText, ChevronLeft, Plus, X, FlaskConical, CheckCircle, HeartPulse, ShieldAlert, Loader2 } from "lucide-react";
 import Link from "next/link";
 import {
   getDoctorPatientDetail, createDiagnosis, createPrescription,
-  getDoctorLabPanels, requestLabTest,
+  getDoctorLabPanels, requestLabTest, declareEmergencyAccess,
 } from "@/lib/session";
 
 interface LabPanel {
@@ -132,6 +132,33 @@ export default function PatientDetails() {
   const [labSubmitting, setLabSubmitting] = useState(false);
   const [labError, setLabError] = useState("");
   const [labSuccess, setLabSuccess] = useState<{ panel: string; priority: string } | null>(null);
+
+  const [emergencyModal, setEmergencyModal] = useState(false);
+  const [emergencyForm, setEmergencyForm] = useState({ reason: "", duration_hours: 4 });
+  const [emergencySubmitting, setEmergencySubmitting] = useState(false);
+  const [emergencyError, setEmergencyError] = useState("");
+  const [emergencyGranted, setEmergencyGranted] = useState<string | null>(null);
+
+  const handleEmergencyAccess = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setEmergencyError("");
+    setEmergencySubmitting(true);
+    try {
+      const res = await declareEmergencyAccess({
+        patient_id: params.id as string,
+        reason: emergencyForm.reason,
+        duration_hours: emergencyForm.duration_hours,
+      });
+      setEmergencyGranted(res.message);
+      setEmergencyModal(false);
+      setEmergencyForm({ reason: "", duration_hours: 4 });
+      await fetchDetail();
+    } catch (error) {
+      setEmergencyError(error instanceof Error ? error.message : "Failed to declare emergency access.");
+    } finally {
+      setEmergencySubmitting(false);
+    }
+  };
 
   const fetchDetail = useCallback(async () => {
     try {
@@ -282,8 +309,26 @@ export default function PatientDetails() {
           <button onClick={openLabModal} className="flex items-center justify-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-bold transition-colors">
             <FlaskConical className="w-4 h-4" /> Request Lab Test
           </button>
+          {/* Deliberately understated and last: break-glass should be reachable
+              in an emergency but never look like a routine action. */}
+          <button
+            onClick={() => { setEmergencyError(""); setEmergencyModal(true); }}
+            className="flex items-center justify-center gap-2 px-4 py-2 bg-white border border-rose-200 text-rose-600 hover:bg-rose-50 rounded-xl text-xs font-bold transition-colors"
+          >
+            <ShieldAlert className="w-4 h-4" /> Emergency Access
+          </button>
         </div>
       </motion.div>
+
+      {emergencyGranted && (
+        <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-sm font-semibold flex items-start gap-3">
+          <ShieldAlert className="w-5 h-5 flex-shrink-0 mt-0.5" />
+          <span>{emergencyGranted}</span>
+          <button onClick={() => setEmergencyGranted(null)} className="ml-auto opacity-60 hover:opacity-100">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Nursing observations — recorded by nurses, read here by the treating doctor */}
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.05 }}
@@ -597,6 +642,78 @@ export default function PatientDetails() {
               </div>
               <button type="submit" disabled={prescriptionSubmitting} className="w-full bg-emerald-600 text-white rounded-xl py-2.5 font-bold hover:bg-emerald-700 disabled:opacity-60">
                 {prescriptionSubmitting ? "Saving..." : "Submit"}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+
+      {emergencyModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+            <div className="flex justify-between items-center mb-1">
+              <h3 className="text-lg font-bold flex items-center gap-2">
+                <ShieldAlert className="w-5 h-5 text-rose-500" /> Emergency Access
+              </h3>
+              <button onClick={() => setEmergencyModal(false)}><X className="w-5 h-5 text-slate-500" /></button>
+            </div>
+
+            {/* State the consequences before the form, not after. */}
+            <div className="p-3 my-4 rounded-xl bg-rose-50 border border-rose-100 text-rose-800 text-xs font-semibold">
+              This overrides the patient&apos;s consent settings. The patient is notified
+              immediately, an administrator can review it, and the declaration is anchored
+              on-chain permanently. Use it only when clinical need is genuine and urgent.
+            </div>
+
+            {emergencyError && (
+              <div className="p-3 mb-4 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-semibold">
+                {emergencyError}
+              </div>
+            )}
+
+            <form onSubmit={handleEmergencyAccess} className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">
+                  Clinical reason *
+                </label>
+                <textarea
+                  required
+                  rows={3}
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-rose-500 outline-none"
+                  placeholder="Why is immediate access necessary? This is recorded verbatim."
+                  value={emergencyForm.reason}
+                  onChange={(e) => setEmergencyForm({ ...emergencyForm, reason: e.target.value })}
+                />
+                <p className="text-[11px] text-slate-400 mt-1">
+                  At least 10 characters. {emergencyForm.reason.trim().length}/10
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">
+                  Access expires after
+                </label>
+                <select
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-rose-500 outline-none"
+                  value={emergencyForm.duration_hours}
+                  onChange={(e) => setEmergencyForm({ ...emergencyForm, duration_hours: Number(e.target.value) })}
+                >
+                  <option value={1}>1 hour</option>
+                  <option value={4}>4 hours</option>
+                  <option value={8}>8 hours</option>
+                  <option value={24}>24 hours</option>
+                </select>
+              </div>
+
+              <button
+                type="submit"
+                disabled={emergencySubmitting || emergencyForm.reason.trim().length < 10}
+                className="w-full bg-rose-600 text-white rounded-xl py-2.5 font-bold hover:bg-rose-700 disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {emergencySubmitting
+                  ? <><Loader2 className="w-4 h-4 animate-spin" /> Declaring…</>
+                  : "Declare Emergency Access"}
               </button>
             </form>
           </div>

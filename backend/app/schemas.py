@@ -662,3 +662,54 @@ class NursePatientDetail(BaseModel):
     vitals_history: list[PatientVitalsRecord] = []
     nursing_notes: list[NursingNoteRecord] = []
     active_prescriptions: list[ActivePrescriptionForNurse] = []
+
+
+# ─── Consent & emergency access ──────────────────────────────────────────────
+
+class ConsentEntry(BaseModel):
+    """One clinician's standing access to a patient's records."""
+    doctor_id: str
+    doctor_user_id: Optional[str] = None
+    doctor_name: str
+    specialization: Optional[str] = None
+    # How the relationship arose, so a patient can see why this clinician
+    # appears at all rather than being asked to trust a bare list.
+    relationship: str
+    status: str                      # Authorized | Revoked
+    revoked_at: Optional[datetime] = None
+    emergency_override_until: Optional[datetime] = None
+
+
+class RevokeConsentRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+class EmergencyAccessRequest(BaseModel):
+    patient_id: str
+    reason: str = Field(min_length=10)
+    duration_hours: int = Field(default=4, ge=1, le=24)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_must_be_substantive(cls, v: str) -> str:
+        # Break-glass access is permanently recorded and reviewed. A blank or
+        # throwaway justification defeats the point of recording it.
+        if len(v.strip()) < 10:
+            raise ValueError("Give a clinical reason of at least 10 characters.")
+        return v.strip()
+
+
+class EmergencyAccessRecord(BaseModel):
+    id: str
+    patient_id: str
+    patient_name: Optional[str] = None
+    patient_user_id: Optional[str] = None
+    requester_id: str
+    requester_name: Optional[str] = None
+    requester_user_id: Optional[str] = None
+    reason: str
+    status: str
+    blockchain_tx_hash: Optional[str] = None
+    created_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    is_active: bool = False

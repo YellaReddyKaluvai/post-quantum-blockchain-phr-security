@@ -124,3 +124,48 @@ def test_appointment_today_is_allowed():
         appointment_time="10:00",
     )
     assert booking.appointment_date == date.today()
+
+
+# ─── Emergency access ────────────────────────────────────────────────────────
+
+def test_emergency_access_requires_a_substantive_reason():
+    """Break-glass is permanently recorded and reviewed. A throwaway
+    justification defeats the point of recording it at all."""
+    from app.schemas import EmergencyAccessRequest
+    for weak in ["", "   ", "urgent", "need it"]:
+        with pytest.raises(ValidationError):
+            EmergencyAccessRequest(
+                patient_id="00000000-0000-0000-0000-000000000000", reason=weak
+            )
+
+
+def test_emergency_access_accepts_a_clinical_reason():
+    from app.schemas import EmergencyAccessRequest
+    req = EmergencyAccessRequest(
+        patient_id="00000000-0000-0000-0000-000000000000",
+        reason="Patient unresponsive in A&E; prior cardiac history needed now.",
+    )
+    assert req.duration_hours == 4  # time-boxed by default
+
+
+@pytest.mark.parametrize("hours", [0, -1, 25, 100])
+def test_emergency_access_duration_is_bounded(hours):
+    """An override that never expires is not an override, it is a bypass."""
+    from app.schemas import EmergencyAccessRequest
+    with pytest.raises(ValidationError):
+        EmergencyAccessRequest(
+            patient_id="00000000-0000-0000-0000-000000000000",
+            reason="Patient unresponsive in A&E; prior history needed now.",
+            duration_hours=hours,
+        )
+
+
+@pytest.mark.parametrize("hours", [1, 4, 24])
+def test_emergency_access_allows_sensible_durations(hours):
+    from app.schemas import EmergencyAccessRequest
+    req = EmergencyAccessRequest(
+        patient_id="00000000-0000-0000-0000-000000000000",
+        reason="Patient unresponsive in A&E; prior history needed now.",
+        duration_hours=hours,
+    )
+    assert req.duration_hours == hours

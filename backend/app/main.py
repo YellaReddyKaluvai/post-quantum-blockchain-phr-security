@@ -5,7 +5,7 @@ import math
 import os
 from fastapi import FastAPI, Depends, HTTPException, Request, Response, status, Body
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timedelta, timezone
 from typing import Optional
 import psycopg
 from psycopg.rows import dict_row
@@ -28,6 +28,7 @@ from app.schemas import (
     CreateLabTestRequest, CreateStructuredLabReportRequest,
     CreateImagingReportRequest, ImagingReportItem,
     LabPanelSummary, FinalizedReportResponse, ReportVerification,
+    ConsentEntry, RevokeConsentRequest, EmergencyAccessRequest, EmergencyAccessRecord,
     NurseProfile, NurseDashboardSummary, NursePatientListItem,
     PatientVitalsRecord, CreateVitalsRequest, NursingNoteRecord, CreateNursingNoteRequest,
     ActivePrescriptionForNurse, MedicationAdministrationRecord, CreateMedicationAdministrationRequest,
@@ -707,6 +708,29 @@ def resend_failed_email_endpoint(notification_id: str, session: dict = Depends(r
     return {"message": "Email resent successfully", "status": res["sent_status"]}
 
 
+@app.get("/api/admin/emergency-access")
+def list_all_emergency_access(session: dict = Depends(require_role("Administrator"))):
+    """Every break-glass declaration, for review.
+
+    Emergency access is not prevented at the point of use, so this listing is
+    the control that makes it accountable. Active declarations are surfaced
+    first because those are the ones still exposing a record right now.
+    """
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT e.*,
+                       p.full_name AS patient_name, p.user_id AS patient_user_id,
+                       d.full_name AS requester_name, d.user_id AS requester_user_id
+                FROM EmergencyAccess e
+                JOIN Users p ON p.id = e.patient_id
+                JOIN Users d ON d.id = e.requester_id
+                ORDER BY (e.expires_at > NOW()) DESC, e.created_at DESC
+            """)
+            rows = cur.fetchall()
+    return [_emergency_record(r) for r in rows]
+
+
 @app.get("/api/admin/storage/status")
 def get_storage_status(session: dict = Depends(require_role("Administrator"))):
     """Live cloud-storage health, plus how many reports actually have a cloud copy.
@@ -1102,6 +1126,143 @@ def get_patient_appointments(session: dict = Depends(require_role("Patient"))):
         appointment_time=str(r["appointment_time"]) if r["appointment_time"] else None,
         status=r["status"], notes=r["notes"]
     ) for r in rows]
+
+
+@app.get("/api/patient/consent")
+def get_patient_consent(session: dict = Depends(require_role("Patient"))):
+    """Every clinician with a relationship to this patient, and their access status.
+
+    The list is derived from real clinical contact rather than a separate
+    grant list, so a patient sees exactly who can reach their records and why.
+    """
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT u.id, u.user_id, u.full_name, u.specialization,
+                       rel.relationship,
+                       c.status AS consent_status, c.revoked_at,
+                       (SELECT MAX(e.expires_at) FROM EmergencyAccess e
+                         WHERE e.patient_id = %s AND e.requester_id = u.id
+                           AND e.expires_at > NOW()) AS emergency_until
+                FROM (
+                    SELECT doctor_id, 'Recorded a diagnosis' AS relationship FROM Diagnoses WHERE patient_id = %s
+                    UNION
+                    SELECT doctor_id, 'Held a consultation' FROM DoctorConsultations WHERE patient_id = %s
+                    UNION
+                    SELECT doctor_id, 'Appointment booked' FROM Appointments WHERE patient_id = %s
+                    UNION
+                    SELECT doctor_id, 'Ordered a laboratory test' FROM LabTestRequests WHERE patient_id = %s
+                ) rel
+                JOIN Users u ON u.id = rel.doctor_id AND u.role = 'Doctor'
+                LEFT JOIN Consent c
+                       ON c.patient_id = %s AND c.subject_user_id = u.id
+                WHERE rel.doctor_id IS NOT NULL
+                ORDER BY u.full_name
+            """, (user_uuid, user_uuid, user_uuid, user_uuid, user_uuid, user_uuid))
+            rows = cur.fetchall()
+
+    # One doctor can match several relationships; keep the first and note it.
+    seen: dict[str, ConsentEntry] = {}
+    for r in rows:
+        key = str(r["id"])
+        if key in seen:
+            continue
+        seen[key] = ConsentEntry(
+            doctor_id=key,
+            doctor_user_id=r["user_id"],
+            doctor_name=r["full_name"],
+            specialization=r["specialization"],
+            relationship=r["relationship"],
+            status="Revoked" if r["consent_status"] == "Revoked" else "Authorized",
+            revoked_at=r["revoked_at"],
+            emergency_override_until=r["emergency_until"],
+        )
+    return list(seen.values())
+
+
+@app.post("/api/patient/consent/{doctor_id}/revoke")
+def revoke_patient_consent(
+    doctor_id: str,
+    request: Request,
+    body: RevokeConsentRequest = Body(default=RevokeConsentRequest()),
+    session: dict = Depends(require_role("Patient")),
+):
+    """Withdraw a doctor's access to this patient's records.
+
+    This genuinely blocks reads — see ``_doctor_access_blocked``. It does not
+    erase history: the doctor's past diagnoses and notes remain part of the
+    medical record, because a record of care given cannot be unwritten.
+    """
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT id, full_name FROM Users WHERE id = %s AND role = 'Doctor'", (doctor_id,))
+            doctor = cur.fetchone()
+            if not doctor:
+                raise HTTPException(status_code=404, detail="Doctor not found")
+
+            cur.execute("""
+                INSERT INTO Consent (patient_id, subject_user_id, subject_role, status, scope, revoked_at)
+                VALUES (%s, %s, 'Doctor', 'Revoked', %s, NOW())
+                ON CONFLICT (patient_id, subject_user_id, subject_role)
+                DO UPDATE SET status = 'Revoked', revoked_at = NOW(), scope = EXCLUDED.scope
+            """, (user_uuid, doctor_id, json.dumps({"reason": body.reason} if body.reason else {})))
+
+            cur.execute("""
+                INSERT INTO Notifications (user_id, notification_type, title, body)
+                VALUES (%s, 'CONSENT_REVOKED', 'Record access withdrawn',
+                        'A patient has withdrawn your access to their records. Emergency access remains available and is audited.')
+            """, (doctor_id,))
+            conn.commit()
+
+        log_admin_action(
+            conn, user_uuid, session.get("public_user_id"),
+            "CONSENT_REVOKED", doctor_id, None,
+            request.client.host if request and request.client else None,
+            {"doctor": doctor["full_name"], "reason": body.reason},
+        )
+
+    return {"status": "success", "message": f"Dr. {doctor['full_name']} can no longer access your records."}
+
+
+@app.post("/api/patient/consent/{doctor_id}/grant")
+def grant_patient_consent(
+    doctor_id: str,
+    request: Request,
+    session: dict = Depends(require_role("Patient")),
+):
+    """Restore a previously revoked doctor's access."""
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT id, full_name FROM Users WHERE id = %s AND role = 'Doctor'", (doctor_id,))
+            doctor = cur.fetchone()
+            if not doctor:
+                raise HTTPException(status_code=404, detail="Doctor not found")
+
+            cur.execute("""
+                INSERT INTO Consent (patient_id, subject_user_id, subject_role, status, granted_at, revoked_at)
+                VALUES (%s, %s, 'Doctor', 'Authorized', NOW(), NULL)
+                ON CONFLICT (patient_id, subject_user_id, subject_role)
+                DO UPDATE SET status = 'Authorized', granted_at = NOW(), revoked_at = NULL
+            """, (user_uuid, doctor_id))
+
+            cur.execute("""
+                INSERT INTO Notifications (user_id, notification_type, title, body)
+                VALUES (%s, 'CONSENT_GRANTED', 'Record access restored',
+                        'A patient has restored your access to their records.')
+            """, (doctor_id,))
+            conn.commit()
+
+        log_admin_action(
+            conn, user_uuid, session.get("public_user_id"),
+            "CONSENT_GRANTED", doctor_id, None,
+            request.client.host if request and request.client else None,
+            {"doctor": doctor["full_name"]},
+        )
+
+    return {"status": "success", "message": f"Dr. {doctor['full_name']}'s access has been restored."}
 
 
 @app.get("/api/patient/vitals")
@@ -1847,6 +2008,59 @@ def get_doctor_lab_requests(
     ) for r in rows]
 
 
+# Consent revocation must actually block access, otherwise the control is
+# decorative. These two fragments are shared by every doctor-facing read so a
+# revocation cannot be honoured in one place and ignored in another.
+_CONSENT_REVOKED = """
+    EXISTS (SELECT 1 FROM Consent c
+             WHERE c.patient_id = %s AND c.subject_user_id = %s
+               AND c.status = 'Revoked')
+"""
+
+_EMERGENCY_ACTIVE = """
+    EXISTS (SELECT 1 FROM EmergencyAccess e
+             WHERE e.patient_id = %s AND e.requester_id = %s
+               AND e.expires_at > NOW())
+"""
+
+
+def _emergency_record(row: dict) -> EmergencyAccessRecord:
+    """Shape one EmergencyAccess row. Shared by the doctor and admin views so a
+    declaration reads identically to the person who made it and the person
+    reviewing it."""
+    expires = row.get("expires_at")
+    return EmergencyAccessRecord(
+        id=str(row["emergency_access_id"]),
+        patient_id=str(row["patient_id"]),
+        patient_name=row.get("patient_name"),
+        patient_user_id=row.get("patient_user_id"),
+        requester_id=str(row["requester_id"]),
+        requester_name=row.get("requester_name"),
+        requester_user_id=row.get("requester_user_id"),
+        reason=row["reason"],
+        status=row["status"],
+        blockchain_tx_hash=row.get("blockchain_tx_hash"),
+        created_at=row.get("created_at"),
+        expires_at=expires,
+        is_active=bool(expires and expires > datetime.now(timezone.utc)),
+    )
+
+
+def _doctor_access_blocked(cur, doctor_uuid: str, patient_uuid: str) -> bool:
+    """True when the patient has revoked this doctor and no break-glass is live.
+
+    An active emergency declaration overrides a revocation deliberately: in a
+    genuine emergency the record must be reachable. The override is time-boxed
+    and permanently recorded, so the cost of using it is that it is seen.
+    """
+    cur.execute(
+        f"SELECT {_CONSENT_REVOKED} AS revoked, {_EMERGENCY_ACTIVE} AS emergency",
+        (patient_uuid, doctor_uuid, patient_uuid, doctor_uuid),
+    )
+    row = cur.fetchone()
+    return bool(row["revoked"]) and not bool(row["emergency"])
+
+
 def _doctor_may_read_report(cur, doctor_uuid: str, report_id: str) -> Optional[dict]:
     """
     Fetch a report only if this doctor is entitled to it.
@@ -1855,6 +2069,10 @@ def _doctor_may_read_report(cur, doctor_uuid: str, report_id: str) -> Optional[d
     existing clinical relationship with the patient (diagnosis, consultation or
     appointment). Anything else returns nothing, so an unrelated doctor cannot
     read a report by id.
+
+    A clinical relationship is necessary but not sufficient: if the patient has
+    revoked consent for this doctor, the report is withheld unless a live
+    emergency declaration is in force.
     """
     cur.execute(_REPORT_SELECT + """
         WHERE lr.id = %s
@@ -1868,7 +2086,115 @@ def _doctor_may_read_report(cur, doctor_uuid: str, report_id: str) -> Optional[d
                         WHERE a.patient_id = lr.patient_id AND a.doctor_id = %s)
           )
     """, (report_id, doctor_uuid, doctor_uuid, doctor_uuid, doctor_uuid))
-    return cur.fetchone()
+    report = cur.fetchone()
+    if not report:
+        return None
+    if _doctor_access_blocked(cur, doctor_uuid, str(report["patient_id"])):
+        return None
+    return report
+
+
+@app.post("/api/doctor/emergency-access")
+def declare_emergency_access(
+    req: EmergencyAccessRequest,
+    request: Request,
+    session: dict = Depends(require_role("Doctor")),
+):
+    """Break-glass override of a patient's consent revocation.
+
+    Deliberately not gated on approval: in an emergency, waiting for a second
+    party defeats the purpose. The control is accountability rather than
+    prevention — the declaration is time-boxed, notified to the patient
+    immediately, written to the admin audit log, and anchored on-chain so it
+    cannot later be quietly removed.
+    """
+    user_uuid = session["user_id"]
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=req.duration_hours)
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT id, user_id, full_name FROM Users WHERE id = %s AND role = 'Patient'",
+                (req.patient_id,),
+            )
+            patient = cur.fetchone()
+            if not patient:
+                raise HTTPException(status_code=404, detail="Patient not found")
+
+            cur.execute("""
+                INSERT INTO EmergencyAccess (requester_id, patient_id, reason, status, expires_at)
+                VALUES (%s, %s, %s, 'Emergency', %s)
+                RETURNING emergency_access_id
+            """, (user_uuid, req.patient_id, req.reason, expires_at))
+            access_id = cur.fetchone()["emergency_access_id"]
+
+            # The patient is told at once. Break-glass that the patient only
+            # discovers later is surveillance, not emergency care.
+            cur.execute("""
+                INSERT INTO Notifications (user_id, notification_type, title, body)
+                VALUES (%s, 'EMERGENCY_ACCESS', 'Emergency access to your records',
+                        'Dr. ' || %s || ' declared emergency access to your records until ' || %s ||
+                        '. Stated reason: ' || %s)
+            """, (
+                req.patient_id, session.get("full_name", "A clinician"),
+                expires_at.strftime("%d %b %Y %H:%M UTC"), req.reason,
+            ))
+            conn.commit()
+
+        anchor = anchor_document(
+            conn,
+            document_type="EmergencyAccess", document_id=str(access_id),
+            document_hash=sha256_hex(
+                f"{access_id}|{user_uuid}|{req.patient_id}|{req.reason}".encode("utf-8")
+            ),
+            action="EMERGENCY_ACCESS_DECLARED",
+            patient_id=str(req.patient_id), actor_id=user_uuid,
+            actor_public_id=session.get("public_user_id"),
+        )
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE EmergencyAccess SET blockchain_tx_hash = %s WHERE emergency_access_id = %s",
+                (anchor["tx_hash"], access_id),
+            )
+            conn.commit()
+
+        log_admin_action(
+            conn, user_uuid, session.get("public_user_id"),
+            "EMERGENCY_ACCESS_DECLARED", str(req.patient_id), patient["user_id"],
+            request.client.host if request and request.client else None,
+            {"reason": req.reason, "expires_at": expires_at.isoformat(), "tx_hash": anchor["tx_hash"]},
+        )
+
+    return {
+        "status": "success",
+        "emergency_access_id": str(access_id),
+        "patient_user_id": patient["user_id"],
+        "expires_at": expires_at.isoformat(),
+        "blockchain_tx_hash": anchor["tx_hash"],
+        "anchored_on": anchor["anchored_on"],
+        "message": (
+            f"Emergency access granted until {expires_at.strftime('%H:%M UTC')}. "
+            "The patient has been notified and this is permanently recorded."
+        ),
+    }
+
+
+@app.get("/api/doctor/emergency-access")
+def list_own_emergency_access(session: dict = Depends(require_role("Doctor"))):
+    """Break-glass declarations this doctor has made."""
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT e.*, p.full_name AS patient_name, p.user_id AS patient_user_id
+                FROM EmergencyAccess e
+                JOIN Users p ON p.id = e.patient_id
+                WHERE e.requester_id = %s
+                ORDER BY e.created_at DESC
+            """, (user_uuid,))
+            rows = cur.fetchall()
+    return [_emergency_record(r) for r in rows]
 
 
 @app.get("/api/doctor/reports/{report_id}/download")

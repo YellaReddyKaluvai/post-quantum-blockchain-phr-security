@@ -19,7 +19,8 @@ import {
   X,
   ChevronLeft,
   Heart,
-  Activity
+  Activity,
+  ShieldOff
 } from "lucide-react";
 import { logout } from "@/lib/session";
 import { useAuth } from "@/context/AuthContext";
@@ -34,6 +35,7 @@ const navItems = [
   { label: "Consultations", icon: Stethoscope, href: "/dashboard/patient/consultations" },
   { label: "Appointments", icon: Calendar, href: "/dashboard/patient/appointments" },
   { label: "Notifications", icon: Bell, href: "/dashboard/patient/notifications" },
+  { label: "Record Access", icon: ShieldOff, href: "/dashboard/patient/consent" },
   { label: "Security Center", icon: ShieldCheck, href: "/dashboard/patient/security" },
 ];
 
