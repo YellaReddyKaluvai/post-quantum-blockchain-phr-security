@@ -3,8 +3,9 @@ import json
 import logging
 import math
 import os
-from fastapi import FastAPI, Depends, HTTPException, Request, Response, status, Body
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response, status, Body
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from datetime import datetime, date, timedelta, timezone
 from typing import Optional
 import psycopg
@@ -71,6 +72,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(psycopg.errors.InvalidTextRepresentation)
+def handle_malformed_identifier(request: Request, exc: psycopg.errors.InvalidTextRepresentation):
+    """Turn a malformed identifier into a clear 400 rather than a 500.
+
+    A non-UUID path parameter or an unknown enum value reaches Postgres and
+    raises "invalid input syntax". Surfacing that as a 500 is wrong twice
+    over: it claims the server failed when in fact the request was malformed,
+    and it makes genuine server faults harder to spot in the logs.
+
+    The database's own message is deliberately not echoed back — it names
+    internal types and columns.
+    """
+    logger.warning("Malformed identifier or value in %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=400,
+        content={"detail": "Malformed identifier or filter value in the request."},
+    )
+
 
 @app.on_event("startup")
 def on_startup():
@@ -436,8 +456,11 @@ def list_users(
     role: Optional[str] = None,
     status: Optional[str] = None,
     search: Optional[str] = None,
-    page: int = 1,
-    per_page: int = 10,
+    # Bounded at the edge: a negative page produced a negative SQL OFFSET and
+    # surfaced as a 500, and an unbounded per_page let one request ask for the
+    # entire table.
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=10, ge=1, le=100),
     session: dict = Depends(require_role("Administrator"))
 ):
     conditions = []
@@ -580,8 +603,8 @@ def enable_user(user_uuid: str, request: Request, session: dict = Depends(requir
 @app.get("/api/admin/audit-logs")
 def get_audit_logs(
     action: Optional[str] = None,
-    page: int = 1,
-    per_page: int = 20,
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=20, ge=1, le=100),
     session: dict = Depends(require_role("Administrator"))
 ):
     conditions = []
