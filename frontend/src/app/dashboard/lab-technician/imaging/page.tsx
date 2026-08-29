@@ -39,7 +39,6 @@ interface ImagingReportItem {
   impression?: string;
   linkedReport?: string | null;
 
-  [key: string]: unknown;
 }
 
 

@@ -15,7 +15,6 @@ interface DoctorNotif {
   body?: string;
   read_at?: string | null;
   created_at?: string;
-  [key: string]: unknown;
 }
 
 export default function DoctorNotifications() {

@@ -5,16 +5,15 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Calendar, Clock, User, CalendarCheck, CalendarX2, Plus, X, Loader2 } from "lucide-react";
 import { getPatientAppointments, getAvailableDoctors, createPatientAppointment } from "@/lib/session";
 
+// Mirrors the backend AppointmentRecord exactly.
 interface AppointmentItem {
   id: string;
-  doctor_name?: string;
-  department?: string;
-  appointment_date?: string;
-  appointment_time?: string;
-  time?: string;
+  doctor_name?: string | null;
+  department?: string | null;
+  appointment_date?: string | null;
+  appointment_time?: string | null;
   status?: string;
-  notes?: string;
-  [key: string]: unknown;
+  notes?: string | null;
 }
 
 interface DoctorOption {
@@ -191,16 +190,16 @@ export default function AppointmentsPage() {
   const activeStatuses = new Set(["scheduled", "confirmed", "pending"]);
 
   const upcoming = appointments.filter((app: AppointmentItem) => {
-    const dateStr = (app.appointment_date || app.date || "") as string | number | Date;
+    const dateStr = (app.appointment_date || "") as string | number | Date;
     const appDate = new Date(dateStr);
     return activeStatuses.has((app.status || "").toLowerCase()) && appDate >= today;
-  }).sort((a: AppointmentItem, b: AppointmentItem) => new Date((a.appointment_date || a.date || "") as string | number | Date).getTime() - new Date((b.appointment_date || b.date || "") as string | number | Date).getTime());
+  }).sort((a: AppointmentItem, b: AppointmentItem) => new Date((a.appointment_date || "") as string | number | Date).getTime() - new Date((b.appointment_date || "") as string | number | Date).getTime());
 
   const previous = appointments.filter((app: AppointmentItem) => {
-    const dateStr = (app.appointment_date || app.date || "") as string | number | Date;
+    const dateStr = (app.appointment_date || "") as string | number | Date;
     const appDate = new Date(dateStr);
     return !activeStatuses.has((app.status || "").toLowerCase()) || appDate < today;
-  }).sort((a: AppointmentItem, b: AppointmentItem) => new Date((b.appointment_date || b.date || "") as string | number | Date).getTime() - new Date((a.appointment_date || a.date || "") as string | number | Date).getTime());
+  }).sort((a: AppointmentItem, b: AppointmentItem) => new Date((b.appointment_date || "") as string | number | Date).getTime() - new Date((a.appointment_date || "") as string | number | Date).getTime());
 
   const getStatusColor = (status: string) => {
     switch (status.toLowerCase()) {
@@ -239,12 +238,12 @@ export default function AppointmentsPage() {
         <div className="grid grid-cols-2 gap-3 bg-slate-50 p-3 rounded-xl border border-slate-100">
           <div className="flex flex-col">
             <span className="text-[10px] uppercase font-bold text-slate-400 mb-1 flex items-center gap-1"><Calendar className="w-3 h-3" /> Date</span>
-            <span className="text-sm font-semibold text-slate-700">{new Date((appointment.appointment_date || appointment.date || "") as string | number | Date).toLocaleDateString()}</span>
+            <span className="text-sm font-semibold text-slate-700">{new Date((appointment.appointment_date || "") as string | number | Date).toLocaleDateString()}</span>
 
           </div>
           <div className="flex flex-col">
             <span className="text-[10px] uppercase font-bold text-slate-400 mb-1 flex items-center gap-1"><Clock className="w-3 h-3" /> Time</span>
-            <span className="text-sm font-semibold text-slate-700">{appointment.appointment_time || appointment.time}</span>
+            <span className="text-sm font-semibold text-slate-700">{appointment.appointment_time || "—"}</span>
 
           </div>
         </div>

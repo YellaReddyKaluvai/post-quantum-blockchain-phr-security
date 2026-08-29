@@ -5,27 +5,23 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Search, Filter, FileText, Download, Shield, Eye, X, Activity, Hash, Lock, CheckCircle, Clock, Loader2 } from "lucide-react";
 import { getLabTechReports, downloadLabTechReport } from "@/lib/session";
 
+// Mirrors the backend LabReportItem exactly.
 interface LabReportItem {
   id: string;
   report_name?: string;
   report_type?: string;
-  type?: string;
   report_id_public?: string;
   patient_name?: string;
-  patientName?: string;
   uploaded_by_name?: string;
   status?: string;
   upload_date?: string;
-  date?: string;
   findings?: string;
   normal_range?: string;
-  file_data?: string;
+  document_hash?: string;
   blockchain_tx_hash?: string;
   anchored_on?: string;
   ipfs_cid?: string;
-  docHash?: string;
   s3_key?: string;
-  [key: string]: unknown;
 }
 
 
@@ -106,9 +102,9 @@ export default function LabReportsPage() {
   };
 
   const filteredReports = reports.filter((report: LabReportItem) => {
-    const pName = (report.patient_name || report.patientName || String(report.patient_id || "")) as string;
-    const rId = (report.id || report.report_id_public || "") as string;
-    const rType = (report.report_type || report.type || report.report_name || "") as string;
+    const pName = report.patient_name || "";
+    const rId = report.report_id_public || report.id || "";
+    const rType = report.report_type || report.report_name || "";
     const term = searchTerm.toLowerCase();
     const matchesTerm =
       pName.toLowerCase().includes(term) ||
@@ -121,7 +117,7 @@ export default function LabReportsPage() {
     // A report with no usable date is kept rather than silently dropped —
     // hiding a record because its timestamp is missing would misrepresent
     // the laboratory's output.
-    const raw = (report.upload_date || report.date) as string | undefined;
+    const raw = report.upload_date;
     const stamp = raw ? new Date(raw).getTime() : NaN;
     if (Number.isNaN(stamp)) return matchesTerm;
 
@@ -199,9 +195,9 @@ export default function LabReportsPage() {
                       {report.report_id_public || report.id}
                     </span>
                     <h3 className="text-base font-bold text-slate-800">
-                      {report.uploaded_by_name || report.patient_name || report.patientName || "Patient"}
+                      {report.patient_name || report.uploaded_by_name || "Patient"}
                     </h3>
-                    <p className="text-sm font-medium text-cyan-600">{report.report_type || report.type}</p>
+                    <p className="text-sm font-medium text-cyan-600">{report.report_type || "—"}</p>
                   </div>
                   <div className={`p-2 rounded-xl ${report.status === 'Completed' || report.status === 'Verified' ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>
                     {report.status === 'Completed' || report.status === 'Verified' ? <CheckCircle className="w-5 h-5" /> : <Clock className="w-5 h-5" />}
@@ -209,7 +205,7 @@ export default function LabReportsPage() {
                 </div>
 
                 <div className="text-xs text-slate-500 mb-4 flex-1">
-                  <p>Uploaded: {report.upload_date ? new Date(report.upload_date).toLocaleString() : report.date}</p>
+                  <p>Uploaded: {report.upload_date ? new Date(report.upload_date).toLocaleString() : "—"}</p>
                   <p className="mt-1">Status: <span className="font-semibold text-slate-700">{report.status}</span></p>
                 </div>
 

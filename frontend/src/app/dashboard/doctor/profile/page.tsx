@@ -19,7 +19,6 @@ interface DoctorProfileInfo {
   contact_number?: string;
   user_id?: string;
   status?: string;
-  [key: string]: unknown;
 }
 
 

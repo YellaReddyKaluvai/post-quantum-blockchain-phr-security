@@ -11,7 +11,6 @@ interface PatientProfilePersonalInfo {
   gender?: string;
   dob?: string;
   blood_group?: string;
-  [key: string]: unknown;
 }
 
 interface PatientProfileAccountInfo {
@@ -19,13 +18,11 @@ interface PatientProfileAccountInfo {
   registration_date?: string;
   role?: string;
   status?: string;
-  [key: string]: unknown;
 }
 
 interface PatientProfileData {
   personal_info?: PatientProfilePersonalInfo;
   account_info?: PatientProfileAccountInfo;
-  [key: string]: unknown;
 }
 
 export default function PatientProfilePage() {

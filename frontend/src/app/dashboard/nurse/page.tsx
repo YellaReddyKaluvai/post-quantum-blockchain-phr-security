@@ -9,7 +9,6 @@ interface NurseActivityItem {
   title?: string;
   description?: string;
   created_at?: string;
-  [key: string]: unknown;
 }
 
 interface NurseSummary {
@@ -18,7 +17,6 @@ interface NurseSummary {
   notes_added_today?: number;
   medications_administered_today?: number;
   recent_activities?: NurseActivityItem[];
-  [key: string]: unknown;
 }
 
 export default function NurseDashboardHome() {

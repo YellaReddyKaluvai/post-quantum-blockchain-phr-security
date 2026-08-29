@@ -18,7 +18,6 @@ interface LabTechProfileInfo {
   status?: string;
   reports_generated?: number;
   created_at?: string;
-  [key: string]: unknown;
 }
 
 

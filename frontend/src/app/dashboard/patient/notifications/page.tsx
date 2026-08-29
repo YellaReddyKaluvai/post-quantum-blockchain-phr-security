@@ -13,7 +13,6 @@ interface PatientNotifItem {
   body?: string;
   read_at?: string;
   created_at?: string;
-  [key: string]: unknown;
 }
 
 export default function NotificationsPage() {
@@ -130,7 +129,7 @@ export default function NotificationsPage() {
                         {notification.title}
                       </h3>
                       <span className="text-xs font-medium text-slate-400 whitespace-nowrap">
-                        {new Date((notification.created_at || notification.timestamp || Date.now()) as string | number | Date).toLocaleDateString()}
+                        {notification.created_at ? new Date(notification.created_at).toLocaleDateString() : ""}
 
                       </span>
                     </div>

@@ -12,7 +12,6 @@ interface LabActivityItem {
   time?: string;
   created_at?: string;
   type?: string;
-  [key: string]: unknown;
 }
 
 interface LabTechSummary {
@@ -28,7 +27,6 @@ interface LabTechSummary {
   awaitingReview?: number;
   recent_activities?: LabActivityItem[];
   recentActivity?: LabActivityItem[];
-  [key: string]: unknown;
 }
 
 
