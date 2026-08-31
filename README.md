@@ -64,6 +64,136 @@ The design rule throughout: *the system never claims a protection it did not act
 
 ---
 
+## 🔄 End-to-End Data Flow
+
+How data actually moves between the five roles. Each arrow below exists in
+code; where a flow stops short, it is marked and listed again under
+[Incomplete workflows](#-incomplete-workflows).
+
+### The security pipeline every document passes through
+
+```
+Structured form  →  Hospital PDF  →  SHA-256 digest
+                                          │
+                    ┌─────────────────────┼─────────────────────┐
+                    ▼                     ▼                     ▼
+              AES-256-GCM           ML-KEM-768             ML-DSA-65
+           encrypts the file    protects the AES key    signs the digest
+                    │                     │                     │
+                    └─────────────────────┼─────────────────────┘
+                                          ▼
+                        Database (authoritative) + AWS S3 (redundant)
+                                          │
+                                          ▼
+                              Digest anchored on-chain
+```
+
+AES handles the bulk data; ML-KEM protects only the 32-byte key; ML-DSA proves
+who issued it. **Only the digest reaches the blockchain — never the document,
+never key material.** On read, the digest is re-checked before release, so a
+tampered record is refused rather than returned.
+
+### 1. Registration → active account
+
+```
+Patient/Doctor/Nurse/Lab signs up
+      → status Pending, DOB + blood group encrypted immediately
+      → Administrator reviews
+            ├─ Reject → reason recorded → rejection email
+            └─ Approve → permanent User ID issued (PAT-2026-000001)
+                       → ML-KEM-768 + ML-DSA-65 keypairs generated
+                       → approval email → account usable
+```
+
+Keys are issued **only on approval**, so a pending or rejected account never
+holds usable key material.
+
+### 2. Doctor → Laboratory → Patient  *(the main clinical workflow)*
+
+```
+Doctor opens patient chart → requests an investigation (panel + priority)
+      → LabTestRequests row (Pending)
+      → Technician's queue, ordered by urgency
+      → Technician opens the matching structured form (1 of 9 panels)
+      → Finalise → hospital PDF → security pipeline above
+      → Notifications: REPORT_READY to BOTH patient and referring doctor
+            ├─ Doctor  → decrypts PDF, verifies signature + on-chain digest
+            └─ Patient → decrypts and downloads their own copy
+```
+
+The report is permanently bound to its originating request, patient, doctor and
+technician. One finalised report per request, enforced by a unique index.
+
+### 3. Doctor → clinical record → Patient
+
+```
+Doctor records diagnosis / prescription / consultation
+      → clinical text encrypted at column level (AES-256-CBC)
+      → Patient sees it in Medical Records / Prescriptions / Consultations
+
+Doctor authors a document (discharge summary, referral, certificate)
+      → full security pipeline → DOCUMENT_READY notification
+      → Patient opens it decrypted, with signature + anchor shown
+```
+
+### 4. Nurse → observations → Doctor and Patient
+
+```
+Nurse records vitals (range-validated at entry)
+      → PatientVitals row
+      → out of range?  ── yes ──→ ABNORMAL_VITALS alert naming the readings
+      │                              → Doctor sees the reading itself on the chart
+      └─ no ──→ VITALS_RECORDED
+      → Patient sees their own vitals in My Vitals
+
+Nurse writes a nursing note → visible to the treating doctor only
+Nurse records a medication round → ✗ no one can read the history (see below)
+```
+
+Vitals are shaped by one shared function for all three views, so a reading
+cannot appear differently depending on who is looking.
+
+### 5. Patient → appointment → Doctor
+
+```
+Patient books (past dates and unknown doctors refused at the schema)
+      → status Pending → APPOINTMENT_REQUEST notification to doctor
+      → Doctor accepts / completes / cancels
+      → ✗ patient is not notified of the outcome (see below)
+```
+
+### 6. Consent and break-glass
+
+```
+Patient revokes a doctor's access
+      → Consent row → every doctor-facing read now returns 404
+      → CONSENT_REVOKED notification to the doctor
+
+Doctor declares emergency access (substantive reason required, ≤24h)
+      → overrides the revocation
+      → EMERGENCY_ACCESS notification to the patient immediately
+      → written to the admin audit log
+      → anchored on-chain so it cannot be quietly removed
+      → Administrator reviews it in Emergency Access
+```
+
+Break-glass is deliberately **not** gated on approval — waiting for a second
+party in an emergency defeats the purpose. The control is accountability, not
+prevention.
+
+### 7. Everything is audited
+
+```
+Every admin action, record access and download
+      → AdminAuditLogs (55+ entries across 10 action types)
+Every login attempt
+      → AuthLogs
+Every finalised document and break-glass declaration
+      → DocumentAnchors + on-chain transaction
+```
+
+---
+
 ## 📊 Implementation Status
 
 Verified against the running system, not aspirational. Anything not built is
@@ -76,8 +206,8 @@ listed as not built.
 | Registration → admin approval → login | ✅ | Permanent role-scoped User IDs; real SMTP approval/rejection email |
 | Post-quantum key issuance | ✅ | Real ML-KEM-768 + ML-DSA-65 via liboqs, generated on approval |
 | Doctor → Lab → Patient report pipeline | ✅ | 9 structured panels → hospital PDF → AES-256-GCM → ML-KEM → ML-DSA → chain anchor |
-| Imaging studies | ✅ | Same hybrid protection as lab reports; encrypted before storage, decrypted only on request |
-| Nurse module | ✅ | Vitals, notes, medication rounds; shared with doctor and patient |
+| Imaging studies | ⚠️ | Encrypted, signed and anchored correctly — but only the uploading technician can open one. See Incomplete workflows. |
+| Nurse module | ✅ | Vitals and notes reach the doctor and patient. Medication rounds are recorded but not yet readable — see Incomplete workflows. |
 | Cloud storage (AWS S3) | ✅ | Ciphertext only, verified; doubles as a recovery path if the database copy is lost |
 | Blockchain anchoring | ✅ | Real on-chain writes via `PHR.sol`; falls back to a clearly-labelled local anchor |
 | Session handling | ✅ | 30-minute tokens; expiry redirects to login and returns you to where you were |
@@ -88,12 +218,45 @@ listed as not built.
 | Emergency break-glass access | ✅ | Time-boxed override, patient notified immediately, anchored on-chain, reviewable by an admin |
 | Automated tests | ✅ | 106 tests, mutation-checked |
 
+### Imaging: encrypted but unreachable
+
+Imaging studies receive the full hybrid pipeline and the patient is notified
+that a study is ready — but **no patient or doctor endpoint exists to open one**.
+Only the uploading technician can view it. The protection is real; the delivery
+is missing. Listed below rather than counted as complete.
+
+---
+
+## ⚠️ Incomplete Workflows
+
+Flows that start but do not finish. These are gaps in delivery, not in
+security — every record below is correctly encrypted, signed and anchored.
+
+| # | Workflow | Where it stops | Impact |
+|---|---|---|---|
+| 1 | **Imaging → clinician / patient** | Technician uploads and the patient is notified, but there is no endpoint or page for either the **patient** or the **doctor** to open the study | A patient is told to view something they cannot open; the doctor who needs to read the scan has no access at all |
+| 2 | **Medication adherence → doctor** | The nurse records every round (Administered / Refused / Held / Missed) but `MedicationAdministrationRecord` is never returned by any endpoint | A prescriber cannot see whether their prescription is being taken; a **refusal is recorded and never surfaces** |
+| 3 | **Appointment outcome → patient** | Accept, complete and cancel update the row with no notification | A patient whose appointment is **cancelled is never told** |
+| 4 | **Lab request → technician** | No notification is raised when a doctor orders a test | An Emergency-priority request is seen only if the technician refreshes the queue |
+| 5 | **Report reviewed → patient** | The doctor's "mark reviewed" works but notifies nobody | The patient is not told a clinician has actually read their result |
+
+The pattern: eight notification events exist, and the gaps cluster around
+*state changes made by one role that another role is waiting on*. Items 1 and 2
+are missing functionality; 3–5 are missing messages.
+
 ### Not implemented
 
 | Area | Status |
 |---|---|
+| **Explainable AI (XAI)** | **Not present.** No model, no inference, no SHAP/LIME, no ML dependencies. Never part of this build or its specification. |
+| **Federated Learning** | **Not present.** No training, no aggregation, no Flower/PySyft. Never part of this build or its specification. |
 | **IPFS publishing** | A CIDv0 is computed locally, but nothing is pinned to the IPFS network — see the Content Addressing row below. |
 | `MedicalRecords` table | Dead schema — 0 references, 0 rows. Marked deprecated in `init.sql` and left in place rather than dropped unilaterally; safe to remove once the team agrees. |
+
+> On AI/ML: the two items above are named explicitly because their absence is
+> easy to assume away. This system performs **cryptography and access control**,
+> not prediction. Adding either would mean new dependencies, a training corpus,
+> and a decision about what clinical question a model should answer.
 
 ### Known data caveats
 - Two lab reports predate the encryption pipeline and hold no ciphertext, so they cannot be given a cloud copy or be decrypted. They are counted honestly in `/api/admin/storage/status`.
