@@ -5,15 +5,17 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Stethoscope, Calendar, ChevronDown, ChevronUp, User, Activity, FileText } from "lucide-react";
 import { getPatientConsultations } from "@/lib/session";
 
+// Mirrors the backend ConsultationRecord exactly. No index signature: the
+// previous one let `date` and `specialization` — fields the API never
+// returns — typecheck, so both rendered blank.
 interface ConsultationItem {
   id: string;
-  doctor_name?: string;
-  specialization?: string;
-  date?: string;
+  consultation_date?: string;
   symptoms?: string;
   diagnosis_summary?: string;
   doctor_notes?: string;
-  [key: string]: unknown;
+  doctor_name?: string;
+  doctor_specialization?: string;
 }
 
 export default function ConsultationsPage() {
@@ -90,8 +92,8 @@ export default function ConsultationsPage() {
                         Dr. {consultation.doctor_name}
                       </h3>
                       <div className="flex flex-wrap items-center gap-3 mt-1 text-sm font-medium text-slate-500">
-                        <span className="px-2 py-0.5 bg-slate-100 rounded-md text-slate-600">{consultation.specialization}</span>
-                        <span className="flex items-center gap-1.5"><Calendar className="w-4 h-4" /> {new Date(consultation.date || Date.now()).toLocaleDateString()}</span>
+                        <span className="px-2 py-0.5 bg-slate-100 rounded-md text-slate-600">{consultation.doctor_specialization || "General"}</span>
+                        <span className="flex items-center gap-1.5"><Calendar className="w-4 h-4" /> {consultation.consultation_date ? new Date(consultation.consultation_date).toLocaleDateString() : "—"}</span>
                       </div>
                     </div>
                   </div>

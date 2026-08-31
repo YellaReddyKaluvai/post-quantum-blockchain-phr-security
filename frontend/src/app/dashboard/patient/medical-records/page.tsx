@@ -14,7 +14,6 @@ interface MedicalRecordItem {
   symptoms?: string;
   doctor_notes?: string;
   recommended_tests?: string[];
-  [key: string]: unknown;
 }
 
 export default function MedicalRecordsPage() {

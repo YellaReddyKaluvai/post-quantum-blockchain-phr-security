@@ -19,7 +19,6 @@ interface DoctorReportItem {
   patient_name?: string;
   patient_user_id?: string;
   file_url?: string;
-  [key: string]: unknown;
 }
 
 interface DoctorDocumentItem {
@@ -28,7 +27,6 @@ interface DoctorDocumentItem {
   document_type?: string;
   upload_date?: string;
   file_url?: string;
-  [key: string]: unknown;
 }
 
 export default function ReportsAndDocuments() {

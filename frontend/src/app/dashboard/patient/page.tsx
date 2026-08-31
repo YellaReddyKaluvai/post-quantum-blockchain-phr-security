@@ -7,21 +7,39 @@ import { getPatientDashboardSummary } from "@/lib/session";
 
 interface PatientActivityItem {
   title?: string;
-  body?: string;
   description?: string;
-  date?: string;
   created_at?: string;
-  [key: string]: unknown;
 }
 
+// Mirrors the backend PatientDashboardSummary exactly, section by section.
 interface PatientSummaryData {
   full_name?: string;
-  patient_info?: { name?: string; user_id?: string; blood_group?: string; assigned_doctor?: string; [key: string]: unknown };
-  medical_summary?: { latest_diagnosis?: string; current_treatment?: string; latest_prescription?: string; [key: string]: unknown };
-  reports_summary?: { total_reports?: number; total?: number; latest_report?: string; pending_reports?: number; pending?: number; latest_report_date?: string; [key: string]: unknown };
-  appointments_summary?: { upcoming_appointment?: { date?: string; doctor?: string }; upcoming_date?: string; previous_visit?: { date?: string; doctor?: string }; previous_visit_date?: string; [key: string]: unknown };
+  patient_info?: {
+    name?: string;
+    user_id?: string | null;
+    blood_group?: string | null;
+    assigned_doctor?: string | null;
+  };
+  medical_summary?: {
+    latest_diagnosis?: string | null;
+    current_treatment?: string | null;
+    latest_prescription?: string | null;
+  };
+  reports_summary?: {
+    total?: number;
+    pending?: number;
+    latest_report?: string | null;
+    latest_report_date?: string | null;
+  };
+  appointments_summary?: {
+    upcoming_date?: string | null;
+    upcoming_time?: string | null;
+    upcoming_doctor?: string | null;
+    upcoming_department?: string | null;
+    previous_visit_date?: string | null;
+    previous_doctor?: string | null;
+  };
   recent_activities?: PatientActivityItem[];
-  [key: string]: unknown;
 }
 
 
@@ -177,7 +195,7 @@ export default function PatientDashboardHome() {
                 </div>
                 <div>
                   <p className="text-sm font-medium text-slate-800">{activity.description}</p>
-                  <p className="text-xs text-slate-500 mt-1">{new Date((activity.created_at || activity.date || Date.now()) as string | number | Date).toLocaleString()}</p>
+                  <p className="text-xs text-slate-500 mt-1">{activity.created_at ? new Date(activity.created_at).toLocaleString() : ""}</p>
 
                 </div>
               </div>

@@ -8,6 +8,7 @@ import {
   LayoutDashboard,
   User,
   FileHeart,
+  FileText,
   TestTubes,
   Pill,
   Stethoscope,
@@ -18,7 +19,9 @@ import {
   Menu,
   X,
   ChevronLeft,
-  Heart
+  Heart,
+  Activity,
+  ShieldOff
 } from "lucide-react";
 import { logout } from "@/lib/session";
 import { useAuth } from "@/context/AuthContext";
@@ -28,10 +31,13 @@ const navItems = [
   { label: "My Profile", icon: User, href: "/dashboard/patient/profile" },
   { label: "Medical Records", icon: FileHeart, href: "/dashboard/patient/medical-records" },
   { label: "Lab Reports", icon: TestTubes, href: "/dashboard/patient/lab-reports" },
+  { label: "My Documents", icon: FileText, href: "/dashboard/patient/documents" },
+  { label: "My Vitals", icon: Activity, href: "/dashboard/patient/vitals" },
   { label: "Prescriptions", icon: Pill, href: "/dashboard/patient/prescriptions" },
   { label: "Consultations", icon: Stethoscope, href: "/dashboard/patient/consultations" },
   { label: "Appointments", icon: Calendar, href: "/dashboard/patient/appointments" },
   { label: "Notifications", icon: Bell, href: "/dashboard/patient/notifications" },
+  { label: "Record Access", icon: ShieldOff, href: "/dashboard/patient/consent" },
   { label: "Security Center", icon: ShieldCheck, href: "/dashboard/patient/security" },
 ];
 

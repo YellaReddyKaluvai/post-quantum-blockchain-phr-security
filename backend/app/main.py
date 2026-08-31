@@ -3,9 +3,10 @@ import json
 import logging
 import math
 import os
-from fastapi import FastAPI, Depends, HTTPException, Request, Response, status, Body
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response, status, Body
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime, date, timezone
+from fastapi.responses import JSONResponse
+from datetime import datetime, date, timedelta, timezone
 from typing import Optional
 import psycopg
 from psycopg.rows import dict_row
@@ -27,8 +28,15 @@ from app.schemas import (
     LabTechProfile, LabTechDashboardSummary, LabTestRequestItem,
     CreateLabTestRequest, CreateStructuredLabReportRequest,
     CreateImagingReportRequest, ImagingReportItem,
-    LabPanelSummary, FinalizedReportResponse, ReportVerification
+    LabPanelSummary, FinalizedReportResponse, ReportVerification,
+    ConsentEntry, RevokeConsentRequest, EmergencyAccessRequest, EmergencyAccessRecord,
+    PatientDocumentItem,
+    NurseProfile, NurseDashboardSummary, NursePatientListItem,
+    PatientVitalsRecord, CreateVitalsRequest, NursingNoteRecord, CreateNursingNoteRequest,
+    ActivePrescriptionForNurse, MedicationAdministrationRecord, CreateMedicationAdministrationRequest,
+    NursePatientDetail,
 )
+from app.config import get_settings
 from app.database import get_db, init_db
 from app.security import (
     hash_password, verify_password, encrypt_data, decrypt_data,
@@ -44,7 +52,9 @@ from app.crypto_service import (
 from app.email_service import send_and_log_email, retry_failed_email, send_admin_notification
 from app.user_id_service import generate_user_id, generate_report_number
 from app.rbac import get_permissions_for_role, normalize_role
-from app.storage_service import process_and_pin_ipfs, download_file_from_s3
+from app.storage_service import (
+    store_encrypted_document, download_file_from_s3, storage_status, StorageError,
+)
 
 from app.audit_service import log_admin_action
 from app.anchor_service import anchor_document
@@ -62,6 +72,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(psycopg.errors.InvalidTextRepresentation)
+def handle_malformed_identifier(request: Request, exc: psycopg.errors.InvalidTextRepresentation):
+    """Turn a malformed identifier into a clear 400 rather than a 500.
+
+    A non-UUID path parameter or an unknown enum value reaches Postgres and
+    raises "invalid input syntax". Surfacing that as a 500 is wrong twice
+    over: it claims the server failed when in fact the request was malformed,
+    and it makes genuine server faults harder to spot in the logs.
+
+    The database's own message is deliberately not echoed back — it names
+    internal types and columns.
+    """
+    logger.warning("Malformed identifier or value in %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=400,
+        content={"detail": "Malformed identifier or filter value in the request."},
+    )
+
 
 @app.on_event("startup")
 def on_startup():
@@ -427,8 +456,11 @@ def list_users(
     role: Optional[str] = None,
     status: Optional[str] = None,
     search: Optional[str] = None,
-    page: int = 1,
-    per_page: int = 10,
+    # Bounded at the edge: a negative page produced a negative SQL OFFSET and
+    # surfaced as a 500, and an unbounded per_page let one request ask for the
+    # entire table.
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=10, ge=1, le=100),
     session: dict = Depends(require_role("Administrator"))
 ):
     conditions = []
@@ -571,8 +603,8 @@ def enable_user(user_uuid: str, request: Request, session: dict = Depends(requir
 @app.get("/api/admin/audit-logs")
 def get_audit_logs(
     action: Optional[str] = None,
-    page: int = 1,
-    per_page: int = 20,
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=20, ge=1, le=100),
     session: dict = Depends(require_role("Administrator"))
 ):
     conditions = []
@@ -696,8 +728,125 @@ def resend_failed_email_endpoint(notification_id: str, session: dict = Depends(r
         
     if res["sent_status"] == "FAILED":
         raise HTTPException(status_code=400, detail=f"Failed to resend email: {res['error_message']}")
-        
+
     return {"message": "Email resent successfully", "status": res["sent_status"]}
+
+
+@app.get("/api/admin/emergency-access")
+def list_all_emergency_access(session: dict = Depends(require_role("Administrator"))):
+    """Every break-glass declaration, for review.
+
+    Emergency access is not prevented at the point of use, so this listing is
+    the control that makes it accountable. Active declarations are surfaced
+    first because those are the ones still exposing a record right now.
+    """
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT e.*,
+                       p.full_name AS patient_name, p.user_id AS patient_user_id,
+                       d.full_name AS requester_name, d.user_id AS requester_user_id
+                FROM EmergencyAccess e
+                JOIN Users p ON p.id = e.patient_id
+                JOIN Users d ON d.id = e.requester_id
+                ORDER BY (e.expires_at > NOW()) DESC, e.created_at DESC
+            """)
+            rows = cur.fetchall()
+    return [_emergency_record(r) for r in rows]
+
+
+@app.get("/api/admin/storage/status")
+def get_storage_status(session: dict = Depends(require_role("Administrator"))):
+    """Live cloud-storage health, plus how many reports actually have a cloud copy.
+
+    ``reports_without_cloud_copy`` counts reports whose S3 upload did not
+    happen. Those are still readable (the database copy is authoritative) but
+    have no off-database redundancy, so the number should be visible rather
+    than assumed to be zero.
+    """
+    status = storage_status()
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE s3_key IS NOT NULL) AS with_cloud_copy,
+                       COUNT(*) FILTER (WHERE s3_key IS NULL) AS without_cloud_copy
+                FROM LabReports
+            """)
+            counts = cur.fetchone()
+
+    status["reports_total"] = counts["total"]
+    status["reports_with_cloud_copy"] = counts["with_cloud_copy"]
+    status["reports_without_cloud_copy"] = counts["without_cloud_copy"]
+    return status
+
+
+@app.get("/api/admin/blockchain/status")
+def get_blockchain_status(session: dict = Depends(require_role("Administrator"))):
+    """Live state of the audit-anchor chain, plus a real-vs-simulated breakdown.
+
+    Surfaces honestly whether anchors are actually reaching a chain: if the node
+    is unreachable the system keeps working, but anchors are only locally
+    simulated and that must be visible rather than silently assumed.
+    """
+    from app.chain_client import get_chain_client
+
+    settings = get_settings()
+    client = get_chain_client()
+
+    connected = client is not None
+    chain_info: dict = {
+        "enabled": settings.BLOCKCHAIN_ENABLED,
+        "connected": connected,
+        "network": settings.BLOCKCHAIN_NETWORK_NAME,
+        "rpc_url": settings.BLOCKCHAIN_RPC_URL,
+        "chain_id": settings.BLOCKCHAIN_CHAIN_ID,
+        "contract_address": settings.BLOCKCHAIN_CONTRACT_ADDRESS or None,
+        "explorer_url": settings.BLOCKCHAIN_EXPLORER_URL or None,
+    }
+
+    if connected:
+        try:
+            chain_info["latest_block"] = client.web3.eth.block_number
+            chain_info["onchain_audit_entries"] = client.audit_trail_count()
+        except Exception as exc:
+            logger.error("Failed reading chain state: %s", exc)
+            chain_info["connected"] = False
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE anchored_on <> 'local-simulated') AS on_chain,
+                       COUNT(*) FILTER (WHERE anchored_on = 'local-simulated') AS simulated
+                FROM DocumentAnchors
+            """)
+            counts = cur.fetchone()
+
+            cur.execute("""
+                SELECT document_type, action, tx_hash, anchored_on, block_number,
+                       report_id_public, created_at
+                FROM DocumentAnchors ORDER BY created_at DESC LIMIT 10
+            """)
+            recent = cur.fetchall()
+
+    chain_info["anchors"] = {
+        "total": counts["total"],
+        "on_chain": counts["on_chain"],
+        "simulated": counts["simulated"],
+    }
+    chain_info["recent_anchors"] = [{
+        "document_type": r["document_type"],
+        "action": r["action"],
+        "tx_hash": r["tx_hash"],
+        "anchored_on": r["anchored_on"],
+        "block_number": r["block_number"],
+        "report_id_public": r["report_id_public"],
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+    } for r in recent]
+
+    return chain_info
 
 
 # ─── Patient Dashboard Endpoints ─────────────────────────────────────────────
@@ -775,9 +924,9 @@ def get_patient_dashboard_summary(session: dict = Depends(require_role("Patient"
             assigned_doctor=assigned_doc["full_name"] if assigned_doc else None,
         ),
         medical_summary=MedicalSummarySection(
-            latest_diagnosis=latest_diag["title"] if latest_diag else None,
-            current_treatment=f"{latest_rx['medicine_name']} ({latest_rx['dosage']})" if latest_rx else None,
-            latest_prescription=latest_rx["medicine_name"] if latest_rx else None,
+            latest_diagnosis=_dec(latest_diag["title"]) if latest_diag else None,
+            current_treatment=f"{_dec(latest_rx['medicine_name'])} ({_dec(latest_rx['dosage'])})" if latest_rx else None,
+            latest_prescription=_dec(latest_rx["medicine_name"]) if latest_rx else None,
         ),
         reports_summary=ReportsSummarySection(
             total=report_stats["total"],
@@ -817,13 +966,7 @@ def get_patient_medical_records(session: dict = Depends(require_role("Patient"))
                 ORDER BY d.visit_date DESC
             """, (user_uuid,))
             rows = cur.fetchall()
-    return [DiagnosisRecord(
-        id=str(r["id"]), title=r["title"], description=r["description"],
-        symptoms=r["symptoms"], doctor_notes=r["doctor_notes"],
-        recommended_tests=r["recommended_tests"],
-        visit_date=r["visit_date"], doctor_name=r["doctor_name"],
-        created_at=r["created_at"]
-    ) for r in rows]
+    return [_diagnosis_record(r) for r in rows]
 
 
 @app.get("/api/patient/medical-records/{record_id}")
@@ -839,13 +982,7 @@ def get_patient_medical_record_detail(record_id: str, session: dict = Depends(re
             r = cur.fetchone()
     if not r:
         raise HTTPException(status_code=404, detail="Record not found")
-    return DiagnosisRecord(
-        id=str(r["id"]), title=r["title"], description=r["description"],
-        symptoms=r["symptoms"], doctor_notes=r["doctor_notes"],
-        recommended_tests=r["recommended_tests"],
-        visit_date=r["visit_date"], doctor_name=r["doctor_name"],
-        created_at=r["created_at"]
-    )
+    return _diagnosis_record(r)
 
 
 @app.get("/api/patient/lab-reports")
@@ -958,11 +1095,7 @@ def get_patient_prescriptions(session: dict = Depends(require_role("Patient"))):
                 WHERE p.patient_id = %s ORDER BY p.prescribed_date DESC
             """, (user_uuid,))
             rows = cur.fetchall()
-    return [PrescriptionRecord(
-        id=str(r["id"]), medicine_name=r["medicine_name"], dosage=r["dosage"],
-        frequency=r["frequency"], duration=r["duration"], instructions=r["instructions"],
-        prescribed_date=r["prescribed_date"], doctor_name=r["doctor_name"]
-    ) for r in rows]
+    return [_prescription_record(r) for r in rows]
 
 
 @app.get("/api/patient/consultations")
@@ -1001,6 +1134,238 @@ def get_patient_appointments(session: dict = Depends(require_role("Patient"))):
         appointment_time=str(r["appointment_time"]) if r["appointment_time"] else None,
         status=r["status"], notes=r["notes"]
     ) for r in rows]
+
+
+@app.get("/api/patient/documents")
+def get_patient_documents(session: dict = Depends(require_role("Patient"))):
+    """Documents written about this patient by their clinicians.
+
+    Discharge summaries, referral letters and medical certificates are written
+    *about* the patient, so the patient can read them. This completes the
+    workflow the doctor side already implements: authored, secured, and then
+    actually reachable by the person it concerns.
+    """
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT m.*, d.full_name AS doctor_name, d.specialization
+                FROM MedicalDocuments m
+                LEFT JOIN Users d ON m.doctor_id = d.id
+                WHERE m.patient_id = %s
+                ORDER BY m.created_at DESC
+            """, (user_uuid,))
+            rows = cur.fetchall()
+
+    return [PatientDocumentItem(
+        id=str(r["id"]),
+        document_name=r["document_name"],
+        document_type=r["document_type"],
+        doctor_name=r["doctor_name"],
+        doctor_specialization=r["specialization"],
+        status=r["status"],
+        created_at=r["created_at"],
+        has_content=bool(r.get("encrypted_content") or r.get("content")),
+        document_hash=r.get("document_hash"),
+        kem_algorithm=r.get("kem_algorithm"),
+        signature_algorithm=r.get("signature_algorithm"),
+        blockchain_tx_hash=r.get("blockchain_tx_hash"),
+    ) for r in rows]
+
+
+@app.get("/api/patient/documents/{document_id}/content")
+def get_patient_document_content(
+    document_id: str,
+    request: Request,
+    session: dict = Depends(require_role("Patient")),
+):
+    """Decrypt one document written about this patient.
+
+    Scoped to their own records by patient_id, so a document id alone is not
+    enough to read someone else's. Access is logged like every other release
+    of a medical document.
+    """
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT m.*, u.mlkem_private_key_encrypted
+                FROM MedicalDocuments m
+                JOIN Users u ON m.patient_id = u.id
+                WHERE m.id = %s AND m.patient_id = %s
+            """, (document_id, user_uuid))
+            r = cur.fetchone()
+
+        if not r:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        released = _decrypt_medical_document(r)
+
+        log_admin_action(
+            conn, user_uuid, session.get("public_user_id"),
+            "PATIENT_READ_DOCUMENT", user_uuid, session.get("public_user_id"),
+            request.client.host if request and request.client else None,
+            {"document_id": str(document_id), "document_name": r["document_name"]},
+        )
+
+    return released
+
+
+@app.get("/api/patient/consent")
+def get_patient_consent(session: dict = Depends(require_role("Patient"))):
+    """Every clinician with a relationship to this patient, and their access status.
+
+    The list is derived from real clinical contact rather than a separate
+    grant list, so a patient sees exactly who can reach their records and why.
+    """
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT u.id, u.user_id, u.full_name, u.specialization,
+                       rel.relationship,
+                       c.status AS consent_status, c.revoked_at,
+                       (SELECT MAX(e.expires_at) FROM EmergencyAccess e
+                         WHERE e.patient_id = %s AND e.requester_id = u.id
+                           AND e.expires_at > NOW()) AS emergency_until
+                FROM (
+                    SELECT doctor_id, 'Recorded a diagnosis' AS relationship FROM Diagnoses WHERE patient_id = %s
+                    UNION
+                    SELECT doctor_id, 'Held a consultation' FROM DoctorConsultations WHERE patient_id = %s
+                    UNION
+                    SELECT doctor_id, 'Appointment booked' FROM Appointments WHERE patient_id = %s
+                    UNION
+                    SELECT doctor_id, 'Ordered a laboratory test' FROM LabTestRequests WHERE patient_id = %s
+                ) rel
+                JOIN Users u ON u.id = rel.doctor_id AND u.role = 'Doctor'
+                LEFT JOIN Consent c
+                       ON c.patient_id = %s AND c.subject_user_id = u.id
+                WHERE rel.doctor_id IS NOT NULL
+                ORDER BY u.full_name
+            """, (user_uuid, user_uuid, user_uuid, user_uuid, user_uuid, user_uuid))
+            rows = cur.fetchall()
+
+    # One doctor can match several relationships; keep the first and note it.
+    seen: dict[str, ConsentEntry] = {}
+    for r in rows:
+        key = str(r["id"])
+        if key in seen:
+            continue
+        seen[key] = ConsentEntry(
+            doctor_id=key,
+            doctor_user_id=r["user_id"],
+            doctor_name=r["full_name"],
+            specialization=r["specialization"],
+            relationship=r["relationship"],
+            status="Revoked" if r["consent_status"] == "Revoked" else "Authorized",
+            revoked_at=r["revoked_at"],
+            emergency_override_until=r["emergency_until"],
+        )
+    return list(seen.values())
+
+
+@app.post("/api/patient/consent/{doctor_id}/revoke")
+def revoke_patient_consent(
+    doctor_id: str,
+    request: Request,
+    body: RevokeConsentRequest = Body(default=RevokeConsentRequest()),
+    session: dict = Depends(require_role("Patient")),
+):
+    """Withdraw a doctor's access to this patient's records.
+
+    This genuinely blocks reads — see ``_doctor_access_blocked``. It does not
+    erase history: the doctor's past diagnoses and notes remain part of the
+    medical record, because a record of care given cannot be unwritten.
+    """
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT id, full_name FROM Users WHERE id = %s AND role = 'Doctor'", (doctor_id,))
+            doctor = cur.fetchone()
+            if not doctor:
+                raise HTTPException(status_code=404, detail="Doctor not found")
+
+            cur.execute("""
+                INSERT INTO Consent (patient_id, subject_user_id, subject_role, status, scope, revoked_at)
+                VALUES (%s, %s, 'Doctor', 'Revoked', %s, NOW())
+                ON CONFLICT (patient_id, subject_user_id, subject_role)
+                DO UPDATE SET status = 'Revoked', revoked_at = NOW(), scope = EXCLUDED.scope
+            """, (user_uuid, doctor_id, json.dumps({"reason": body.reason} if body.reason else {})))
+
+            cur.execute("""
+                INSERT INTO Notifications (user_id, notification_type, title, body)
+                VALUES (%s, 'CONSENT_REVOKED', 'Record access withdrawn',
+                        'A patient has withdrawn your access to their records. Emergency access remains available and is audited.')
+            """, (doctor_id,))
+            conn.commit()
+
+        log_admin_action(
+            conn, user_uuid, session.get("public_user_id"),
+            "CONSENT_REVOKED", doctor_id, None,
+            request.client.host if request and request.client else None,
+            {"doctor": doctor["full_name"], "reason": body.reason},
+        )
+
+    return {"status": "success", "message": f"Dr. {doctor['full_name']} can no longer access your records."}
+
+
+@app.post("/api/patient/consent/{doctor_id}/grant")
+def grant_patient_consent(
+    doctor_id: str,
+    request: Request,
+    session: dict = Depends(require_role("Patient")),
+):
+    """Restore a previously revoked doctor's access."""
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT id, full_name FROM Users WHERE id = %s AND role = 'Doctor'", (doctor_id,))
+            doctor = cur.fetchone()
+            if not doctor:
+                raise HTTPException(status_code=404, detail="Doctor not found")
+
+            cur.execute("""
+                INSERT INTO Consent (patient_id, subject_user_id, subject_role, status, granted_at, revoked_at)
+                VALUES (%s, %s, 'Doctor', 'Authorized', NOW(), NULL)
+                ON CONFLICT (patient_id, subject_user_id, subject_role)
+                DO UPDATE SET status = 'Authorized', granted_at = NOW(), revoked_at = NULL
+            """, (user_uuid, doctor_id))
+
+            cur.execute("""
+                INSERT INTO Notifications (user_id, notification_type, title, body)
+                VALUES (%s, 'CONSENT_GRANTED', 'Record access restored',
+                        'A patient has restored your access to their records.')
+            """, (doctor_id,))
+            conn.commit()
+
+        log_admin_action(
+            conn, user_uuid, session.get("public_user_id"),
+            "CONSENT_GRANTED", doctor_id, None,
+            request.client.host if request and request.client else None,
+            {"doctor": doctor["full_name"]},
+        )
+
+    return {"status": "success", "message": f"Dr. {doctor['full_name']}'s access has been restored."}
+
+
+@app.get("/api/patient/vitals")
+def get_patient_vitals(session: dict = Depends(require_role("Patient"))):
+    """A patient's own nurse-recorded vitals.
+
+    These are observations about the patient, so the patient can read them.
+    Nursing notes are deliberately not exposed here: they are clinical
+    handover between staff and are surfaced to the treating doctor instead.
+    """
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT v.*, n.full_name AS nurse_name FROM PatientVitals v
+                LEFT JOIN Users n ON v.nurse_id = n.id
+                WHERE v.patient_id = %s ORDER BY v.recorded_at DESC LIMIT 50
+            """, (user_uuid,))
+            rows = cur.fetchall()
+    return [_vitals_record(r) for r in rows]
 
 
 @app.get("/api/patient/doctors")
@@ -1265,7 +1630,25 @@ def get_doctor_patient_detail(patient_id: str, session: dict = Depends(require_r
 
             cur.execute("SELECT * FROM Prescriptions WHERE patient_id = %s ORDER BY prescribed_date DESC LIMIT 5", (patient_id,))
             prescriptions = cur.fetchall()
-            
+
+            # Nursing observations. Recording vitals is only useful if the
+            # treating clinician can read them — previously these were visible
+            # solely to the nurse who entered them, so the doctor received the
+            # abnormal-vitals alert but could not open the reading behind it.
+            cur.execute("""
+                SELECT v.*, n.full_name AS nurse_name FROM PatientVitals v
+                LEFT JOIN Users n ON v.nurse_id = n.id
+                WHERE v.patient_id = %s ORDER BY v.recorded_at DESC LIMIT 10
+            """, (patient_id,))
+            vitals = cur.fetchall()
+
+            cur.execute("""
+                SELECT nn.*, n.full_name AS nurse_name FROM NursingNotes nn
+                LEFT JOIN Users n ON nn.nurse_id = n.id
+                WHERE nn.patient_id = %s ORDER BY nn.created_at DESC LIMIT 10
+            """, (patient_id,))
+            nursing_notes = cur.fetchall()
+
     return {
         "profile": {
             "id": str(user["id"]),
@@ -1276,21 +1659,15 @@ def get_doctor_patient_detail(patient_id: str, session: dict = Depends(require_r
             "date_of_birth": decrypt_data(user["date_of_birth_encrypted"]) if user.get("date_of_birth_encrypted") else None,
             "blood_group": decrypt_data(user["blood_group_encrypted"]) if user.get("blood_group_encrypted") else None,
         },
-        "diagnoses": [
-            DiagnosisRecord(
-                id=str(r["id"]), title=r["title"], description=r["description"],
-                symptoms=r["symptoms"], doctor_notes=r["doctor_notes"],
-                recommended_tests=r["recommended_tests"], visit_date=r["visit_date"],
-                created_at=r["created_at"]
-            ) for r in diagnoses
+        "diagnoses": [_diagnosis_record(r) for r in diagnoses],
+        "prescriptions": [_prescription_record(r) for r in prescriptions],
+        "vitals": [_vitals_record(v) for v in vitals],
+        "nursing_notes": [
+            NursingNoteRecord(
+                id=str(n["id"]), note_type=n["note_type"], content=n["content"],
+                created_at=n["created_at"], nurse_name=n["nurse_name"],
+            ) for n in nursing_notes
         ],
-        "prescriptions": [
-            PrescriptionRecord(
-                id=str(r["id"]), medicine_name=r["medicine_name"], dosage=r["dosage"],
-                frequency=r["frequency"], duration=r["duration"], instructions=r["instructions"],
-                prescribed_date=r["prescribed_date"]
-            ) for r in prescriptions
-        ]
     }
 
 @app.post("/api/doctor/patients/{patient_id}/diagnosis")
@@ -1301,7 +1678,8 @@ def create_diagnosis(patient_id: str, req: CreateDiagnosisRequest, session: dict
             cur.execute("""
                 INSERT INTO Diagnoses (patient_id, doctor_id, title, description, symptoms, doctor_notes, recommended_tests, visit_date)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
-            """, (patient_id, user_uuid, req.title, req.description, req.symptoms, req.doctor_notes, req.recommended_tests, req.visit_date))
+            """, (patient_id, user_uuid, _enc(req.title), _enc(req.description), _enc(req.symptoms),
+                  _enc(req.doctor_notes), _enc(req.recommended_tests), req.visit_date))
             conn.commit()
     return {"status": "success"}
 
@@ -1313,7 +1691,8 @@ def create_prescription(patient_id: str, req: CreatePrescriptionRequest, session
             cur.execute("""
                 INSERT INTO Prescriptions (patient_id, doctor_id, medicine_name, dosage, frequency, duration, instructions, prescribed_date)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
-            """, (patient_id, user_uuid, req.medicine_name, req.dosage, req.frequency, req.duration, req.instructions, req.prescribed_date))
+            """, (patient_id, user_uuid, _enc(req.medicine_name), _enc(req.dosage), _enc(req.frequency),
+                  _enc(req.duration), _enc(req.instructions), req.prescribed_date))
             conn.commit()
     return {"status": "success"}
 
@@ -1384,16 +1763,168 @@ def get_doctor_documents(session: dict = Depends(require_role("Doctor"))):
     ) for r in rows]
 
 @app.post("/api/doctor/documents")
-def create_medical_document(req: CreateDocumentRequest, session: dict = Depends(require_role("Doctor"))):
+def create_medical_document(
+    req: CreateDocumentRequest,
+    request: Request,
+    session: dict = Depends(require_role("Doctor")),
+):
+    """Author a medical document under the same protection as every other record.
+
+    Discharge summaries, referral letters and medical certificates previously
+    stored their body as plaintext and never reached cloud storage, bypassing
+    the pipeline entirely. They now follow it: AES-256-GCM encrypts the body,
+    ML-KEM-768 protects the key against the patient's public key, ML-DSA-65
+    signs the digest, and only ciphertext is written to cloud storage.
+    """
+    user_uuid = session["user_id"]
+
+    if not req.content:
+        raise HTTPException(status_code=400, detail="Document content is required.")
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT id, user_id, mlkem_public_key FROM Users WHERE id = %s AND role = 'Patient'",
+                (req.patient_id,),
+            )
+            patient = cur.fetchone()
+            if not patient:
+                raise HTTPException(status_code=404, detail="Patient not found")
+            if not patient["mlkem_public_key"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Patient has no ML-KEM public key; the document cannot be protected.",
+                )
+
+            cur.execute("SELECT mldsa_private_key_encrypted FROM Users WHERE id = %s", (user_uuid,))
+            doctor = cur.fetchone()
+
+            content_bytes = req.content.encode("utf-8")
+            document_hash = sha256_hex(content_bytes)
+
+            try:
+                kem_ciphertext, shared_secret = encapsulate_aes_key(patient["mlkem_public_key"])
+                aes_key = derive_aes_key(shared_secret)
+                encrypted = encrypt_document(content_bytes, aes_key)
+                signature = sign_document_hash(document_hash, doctor["mldsa_private_key_encrypted"])
+            except PQCUnavailableError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+            # Only ciphertext leaves the process.
+            content_cid, s3_key = store_encrypted_document(
+                encrypted["ciphertext"].encode("utf-8"), f"{req.document_name}_{req.document_type}"
+            )
+
+            cur.execute("""
+                INSERT INTO MedicalDocuments (
+                    patient_id, doctor_id, document_name, document_type, status,
+                    encrypted_content, encrypted_aes_key, encryption_nonce, encryption_tag,
+                    document_hash, digital_signature, kem_algorithm, signature_algorithm,
+                    ipfs_cid, s3_key
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                req.patient_id, user_uuid, req.document_name, req.document_type, req.status,
+                encrypted["ciphertext"], kem_ciphertext, encrypted["nonce"], encrypted["tag"],
+                document_hash, signature, ML_KEM_ALG, ML_DSA_ALG,
+                content_cid, s3_key,
+            ))
+            document_id = cur.fetchone()["id"]
+
+            cur.execute("""
+                INSERT INTO Notifications (user_id, notification_type, title, body)
+                VALUES (%s, 'DOCUMENT_READY', 'New Medical Document Available',
+                        'Your doctor has issued a ' || %s || '.')
+            """, (req.patient_id, req.document_type))
+            conn.commit()
+
+        anchor = anchor_document(
+            conn,
+            document_type="MedicalDocument", document_id=str(document_id),
+            document_hash=document_hash, action="DOCUMENT_ISSUED",
+            patient_id=str(req.patient_id), actor_id=user_uuid,
+            actor_public_id=session.get("public_user_id"),
+        )
+
+        with conn.cursor() as cur:
+            cur.execute("UPDATE MedicalDocuments SET blockchain_tx_hash = %s WHERE id = %s",
+                        (anchor["tx_hash"], document_id))
+            conn.commit()
+
+    return {
+        "status": "success",
+        "document_id": str(document_id),
+        "patient_user_id": patient["user_id"],
+        "document_hash": document_hash,
+        "kem_algorithm": ML_KEM_ALG,
+        "signature_algorithm": ML_DSA_ALG,
+        "blockchain_tx_hash": anchor["tx_hash"],
+        "anchored_on": anchor["anchored_on"],
+        "s3_key": s3_key,
+    }
+
+
+
+def _decrypt_medical_document(row: dict) -> dict:
+    """Release one medical document's body, decrypted and integrity-checked.
+
+    Shared by the doctor who authored it and the patient it is about, so the
+    same document can never decrypt differently depending on who asks. The
+    digest is re-checked against the value recorded at signing before anything
+    is returned.
+    """
+    # Rows predating encryption kept their plaintext body in `content`.
+    if not row.get("encrypted_content"):
+        if row.get("content"):
+            return {"content": row["content"], "encrypted": False}
+        raise HTTPException(status_code=404, detail="No content stored for this document.")
+
+    ciphertext = row["encrypted_content"]
+    if not ciphertext and row.get("s3_key"):
+        try:
+            ciphertext = download_file_from_s3(row["s3_key"]).decode("utf-8")
+        except StorageError as exc:
+            logger.error("S3 recovery failed for document %s: %s", row.get("id"), exc)
+
+    try:
+        shared_secret = decapsulate_aes_key(row["encrypted_aes_key"], row["mlkem_private_key_encrypted"])
+        content_bytes = decrypt_document(
+            ciphertext, derive_aes_key(shared_secret),
+            row["encryption_nonce"], row["encryption_tag"],
+        )
+    except PQCUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="Document failed its integrity check.") from exc
+
+    if sha256_hex(content_bytes) != row.get("document_hash"):
+        raise HTTPException(status_code=409, detail="Document digest does not match the recorded hash.")
+
+    return {"content": content_bytes.decode("utf-8"), "encrypted": True}
+
+
+@app.get("/api/doctor/documents/{document_id}/content")
+def get_medical_document_content(document_id: str, session: dict = Depends(require_role("Doctor"))):
+    """Decrypt one document the requesting doctor authored.
+
+    Falls back to the S3 copy if the database ciphertext is missing, and
+    re-checks the digest against the value recorded at signing before release.
+    """
     user_uuid = session["user_id"]
     with get_db() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
-                INSERT INTO MedicalDocuments (patient_id, doctor_id, document_name, document_type, content, status)
-                VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
-            """, (req.patient_id, user_uuid, req.document_name, req.document_type, req.content, req.status))
-            conn.commit()
-    return {"status": "success"}
+                SELECT m.*, u.mlkem_private_key_encrypted
+                FROM MedicalDocuments m
+                JOIN Users u ON m.patient_id = u.id
+                WHERE m.id = %s AND m.doctor_id = %s
+            """, (document_id, user_uuid))
+            r = cur.fetchone()
+
+    if not r:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return _decrypt_medical_document(r)
 
 @app.get("/api/doctor/appointments")
 def get_doctor_appointments(session: dict = Depends(require_role("Doctor"))):
@@ -1560,6 +2091,59 @@ def get_doctor_lab_requests(
     ) for r in rows]
 
 
+# Consent revocation must actually block access, otherwise the control is
+# decorative. These two fragments are shared by every doctor-facing read so a
+# revocation cannot be honoured in one place and ignored in another.
+_CONSENT_REVOKED = """
+    EXISTS (SELECT 1 FROM Consent c
+             WHERE c.patient_id = %s AND c.subject_user_id = %s
+               AND c.status = 'Revoked')
+"""
+
+_EMERGENCY_ACTIVE = """
+    EXISTS (SELECT 1 FROM EmergencyAccess e
+             WHERE e.patient_id = %s AND e.requester_id = %s
+               AND e.expires_at > NOW())
+"""
+
+
+def _emergency_record(row: dict) -> EmergencyAccessRecord:
+    """Shape one EmergencyAccess row. Shared by the doctor and admin views so a
+    declaration reads identically to the person who made it and the person
+    reviewing it."""
+    expires = row.get("expires_at")
+    return EmergencyAccessRecord(
+        id=str(row["emergency_access_id"]),
+        patient_id=str(row["patient_id"]),
+        patient_name=row.get("patient_name"),
+        patient_user_id=row.get("patient_user_id"),
+        requester_id=str(row["requester_id"]),
+        requester_name=row.get("requester_name"),
+        requester_user_id=row.get("requester_user_id"),
+        reason=row["reason"],
+        status=row["status"],
+        blockchain_tx_hash=row.get("blockchain_tx_hash"),
+        created_at=row.get("created_at"),
+        expires_at=expires,
+        is_active=bool(expires and expires > datetime.now(timezone.utc)),
+    )
+
+
+def _doctor_access_blocked(cur, doctor_uuid: str, patient_uuid: str) -> bool:
+    """True when the patient has revoked this doctor and no break-glass is live.
+
+    An active emergency declaration overrides a revocation deliberately: in a
+    genuine emergency the record must be reachable. The override is time-boxed
+    and permanently recorded, so the cost of using it is that it is seen.
+    """
+    cur.execute(
+        f"SELECT {_CONSENT_REVOKED} AS revoked, {_EMERGENCY_ACTIVE} AS emergency",
+        (patient_uuid, doctor_uuid, patient_uuid, doctor_uuid),
+    )
+    row = cur.fetchone()
+    return bool(row["revoked"]) and not bool(row["emergency"])
+
+
 def _doctor_may_read_report(cur, doctor_uuid: str, report_id: str) -> Optional[dict]:
     """
     Fetch a report only if this doctor is entitled to it.
@@ -1568,6 +2152,10 @@ def _doctor_may_read_report(cur, doctor_uuid: str, report_id: str) -> Optional[d
     existing clinical relationship with the patient (diagnosis, consultation or
     appointment). Anything else returns nothing, so an unrelated doctor cannot
     read a report by id.
+
+    A clinical relationship is necessary but not sufficient: if the patient has
+    revoked consent for this doctor, the report is withheld unless a live
+    emergency declaration is in force.
     """
     cur.execute(_REPORT_SELECT + """
         WHERE lr.id = %s
@@ -1581,7 +2169,115 @@ def _doctor_may_read_report(cur, doctor_uuid: str, report_id: str) -> Optional[d
                         WHERE a.patient_id = lr.patient_id AND a.doctor_id = %s)
           )
     """, (report_id, doctor_uuid, doctor_uuid, doctor_uuid, doctor_uuid))
-    return cur.fetchone()
+    report = cur.fetchone()
+    if not report:
+        return None
+    if _doctor_access_blocked(cur, doctor_uuid, str(report["patient_id"])):
+        return None
+    return report
+
+
+@app.post("/api/doctor/emergency-access")
+def declare_emergency_access(
+    req: EmergencyAccessRequest,
+    request: Request,
+    session: dict = Depends(require_role("Doctor")),
+):
+    """Break-glass override of a patient's consent revocation.
+
+    Deliberately not gated on approval: in an emergency, waiting for a second
+    party defeats the purpose. The control is accountability rather than
+    prevention — the declaration is time-boxed, notified to the patient
+    immediately, written to the admin audit log, and anchored on-chain so it
+    cannot later be quietly removed.
+    """
+    user_uuid = session["user_id"]
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=req.duration_hours)
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT id, user_id, full_name FROM Users WHERE id = %s AND role = 'Patient'",
+                (req.patient_id,),
+            )
+            patient = cur.fetchone()
+            if not patient:
+                raise HTTPException(status_code=404, detail="Patient not found")
+
+            cur.execute("""
+                INSERT INTO EmergencyAccess (requester_id, patient_id, reason, status, expires_at)
+                VALUES (%s, %s, %s, 'Emergency', %s)
+                RETURNING emergency_access_id
+            """, (user_uuid, req.patient_id, req.reason, expires_at))
+            access_id = cur.fetchone()["emergency_access_id"]
+
+            # The patient is told at once. Break-glass that the patient only
+            # discovers later is surveillance, not emergency care.
+            cur.execute("""
+                INSERT INTO Notifications (user_id, notification_type, title, body)
+                VALUES (%s, 'EMERGENCY_ACCESS', 'Emergency access to your records',
+                        'Dr. ' || %s || ' declared emergency access to your records until ' || %s ||
+                        '. Stated reason: ' || %s)
+            """, (
+                req.patient_id, session.get("full_name", "A clinician"),
+                expires_at.strftime("%d %b %Y %H:%M UTC"), req.reason,
+            ))
+            conn.commit()
+
+        anchor = anchor_document(
+            conn,
+            document_type="EmergencyAccess", document_id=str(access_id),
+            document_hash=sha256_hex(
+                f"{access_id}|{user_uuid}|{req.patient_id}|{req.reason}".encode("utf-8")
+            ),
+            action="EMERGENCY_ACCESS_DECLARED",
+            patient_id=str(req.patient_id), actor_id=user_uuid,
+            actor_public_id=session.get("public_user_id"),
+        )
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE EmergencyAccess SET blockchain_tx_hash = %s WHERE emergency_access_id = %s",
+                (anchor["tx_hash"], access_id),
+            )
+            conn.commit()
+
+        log_admin_action(
+            conn, user_uuid, session.get("public_user_id"),
+            "EMERGENCY_ACCESS_DECLARED", str(req.patient_id), patient["user_id"],
+            request.client.host if request and request.client else None,
+            {"reason": req.reason, "expires_at": expires_at.isoformat(), "tx_hash": anchor["tx_hash"]},
+        )
+
+    return {
+        "status": "success",
+        "emergency_access_id": str(access_id),
+        "patient_user_id": patient["user_id"],
+        "expires_at": expires_at.isoformat(),
+        "blockchain_tx_hash": anchor["tx_hash"],
+        "anchored_on": anchor["anchored_on"],
+        "message": (
+            f"Emergency access granted until {expires_at.strftime('%H:%M UTC')}. "
+            "The patient has been notified and this is permanently recorded."
+        ),
+    }
+
+
+@app.get("/api/doctor/emergency-access")
+def list_own_emergency_access(session: dict = Depends(require_role("Doctor"))):
+    """Break-glass declarations this doctor has made."""
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT e.*, p.full_name AS patient_name, p.user_id AS patient_user_id
+                FROM EmergencyAccess e
+                JOIN Users p ON p.id = e.patient_id
+                WHERE e.requester_id = %s
+                ORDER BY e.created_at DESC
+            """, (user_uuid,))
+            rows = cur.fetchall()
+    return [_emergency_record(r) for r in rows]
 
 
 @app.get("/api/doctor/reports/{report_id}/download")
@@ -1817,14 +2513,27 @@ def search_patients(q: str, session: dict = Depends(require_role("Lab Technician
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
-                SELECT id, user_id, full_name, email, gender 
-                FROM Users 
-                WHERE role = 'Patient' AND (full_name ILIKE %s OR user_id ILIKE %s)
-                LIMIT 10
+                SELECT id, user_id, full_name, email, gender,
+                       blood_group_encrypted, date_of_birth_encrypted
+                FROM Users
+                WHERE role = 'Patient' AND status = 'Approved'
+                  AND (full_name ILIKE %s OR user_id ILIKE %s)
+                ORDER BY full_name ASC
+                LIMIT 20
             """, (f"%{q}%", f"%{q}%"))
             rows = cur.fetchall()
-            
-    return [{"id": str(r["id"]), "user_id": r["user_id"], "full_name": r["full_name"], "email": r["email"], "gender": r["gender"]} for r in rows]
+
+    # Blood group and age are decrypted here because a technician needs both to
+    # interpret results against the correct reference ranges.
+    return [{
+        "id": str(r["id"]),
+        "user_id": r["user_id"],
+        "full_name": r["full_name"],
+        "email": r["email"],
+        "gender": r["gender"],
+        "blood_group": decrypt_data(r["blood_group_encrypted"]) if r.get("blood_group_encrypted") else None,
+        "age": _age_display(decrypt_data(r["date_of_birth_encrypted"]) if r.get("date_of_birth_encrypted") else None) or None,
+    } for r in rows]
 
 @app.get("/api/lab-tech/report-templates")
 def get_report_templates(session: dict = Depends(require_role("Lab Technician"))):
@@ -2020,7 +2729,7 @@ def create_structured_lab_report(
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
 
             # 5. Store only the ciphertext in cloud storage.
-            ipfs_cid, ipfs_gateway_url, s3_key = process_and_pin_ipfs(
+            ipfs_cid, s3_key = store_encrypted_document(
                 encrypted["ciphertext"].encode("utf-8"), f"{report_no}_{panel['code']}"
             )
 
@@ -2126,7 +2835,22 @@ def _decrypt_report_pdf(report: dict) -> bytes:
     with the patient's private key, so possession of the ciphertext alone is
     not enough. GCM's tag check then proves the stored bytes were not altered.
     """
-    if not report.get("encrypted_document"):
+    ciphertext = report.get("encrypted_document")
+
+    # The database holds the authoritative copy. If it is missing, fall back to
+    # the S3 copy of the same ciphertext — that redundancy is the reason the
+    # cloud copy exists. The GCM tag check below still has to pass either way,
+    # so a substituted or corrupted object cannot slip through.
+    if not ciphertext and report.get("s3_key"):
+        try:
+            ciphertext = download_file_from_s3(report["s3_key"]).decode("utf-8")
+            logger.warning(
+                "Report %s recovered from S3; database copy was missing.", report.get("id")
+            )
+        except StorageError as exc:
+            logger.error("S3 recovery failed for report %s: %s", report.get("id"), exc)
+
+    if not ciphertext:
         raise HTTPException(status_code=404, detail="No encrypted document is stored for this report.")
     if not report.get("mlkem_private_key_encrypted"):
         raise HTTPException(status_code=409, detail="Patient decryption key unavailable.")
@@ -2137,7 +2861,7 @@ def _decrypt_report_pdf(report: dict) -> bytes:
         )
         aes_key = derive_aes_key(shared_secret)
         pdf_bytes = decrypt_document(
-            report["encrypted_document"], aes_key,
+            ciphertext, aes_key,
             report["encryption_nonce"], report["encryption_tag"],
         )
     except PQCUnavailableError as exc:
@@ -2161,8 +2885,43 @@ def _decrypt_report_pdf(report: dict) -> bytes:
     return pdf_bytes
 
 
+def _verify_against_chain(report: dict) -> Optional[bool]:
+    """Compare the stored digest against the one anchored on-chain.
+
+    This is the check the database cannot fake: even an attacker who rewrites
+    ``document_hash`` in Postgres cannot alter the digest already committed to
+    the chain, so the two stop agreeing.
+
+    Returns True/False when an on-chain anchor exists and could be read, or
+    None when the report was only locally anchored or the chain is unreachable
+    (unknown, which must not be reported as "verified").
+    """
+    from app.chain_client import get_chain_client
+
+    tx_hash = report.get("blockchain_tx_hash")
+    anchored_on = report.get("anchored_on")
+    if not tx_hash or not anchored_on or anchored_on == "local-simulated":
+        return None
+
+    client = get_chain_client()
+    if client is None:
+        return None
+
+    try:
+        receipt = client.web3.eth.get_transaction_receipt(tx_hash)
+        # The contract emits AuditLogged(userUUID, actionType, resourceHash, ts);
+        # resourceHash is the document digest we anchored.
+        events = client.contract.events.AuditLogged().process_receipt(receipt)
+        if not events:
+            return False
+        return any(e["args"]["resourceHash"] == report.get("document_hash") for e in events)
+    except Exception as exc:
+        logger.error("On-chain verification failed for %s: %s", report.get("id"), exc)
+        return None
+
+
 def _verify_report(report: dict) -> ReportVerification:
-    """Check a stored report's digest and ML-DSA signature."""
+    """Check a stored report's digest, ML-DSA signature, and on-chain anchor."""
     hash_matches = False
     detail = "Signature could not be verified."
 
@@ -2178,9 +2937,16 @@ def _verify_report(report: dict) -> ReportVerification:
         report.get("signer_mldsa_public_key") or "",
     )
 
+    blockchain_verified = _verify_against_chain(report)
+
     if hash_matches and signature_valid:
         detail = ("Document digest matches and the ML-DSA signature is valid. "
                   "The report is authentic and unaltered.")
+        if blockchain_verified is True:
+            detail += " The digest also matches the immutable blockchain anchor."
+        elif blockchain_verified is False:
+            detail = ("INTEGRITY ALERT: the stored digest does not match the digest "
+                      "anchored on the blockchain. This report may have been altered.")
     elif hash_matches and not signature_valid:
         detail = "Document is intact but its signature could not be validated."
 
@@ -2188,6 +2954,7 @@ def _verify_report(report: dict) -> ReportVerification:
         report_id=str(report["id"]), report_no=report.get("report_id_public"),
         document_hash=report.get("document_hash"),
         hash_matches=hash_matches, signature_valid=signature_valid,
+        blockchain_verified=blockchain_verified,
         signature_algorithm=report.get("signature_algorithm"),
         kem_algorithm=report.get("kem_algorithm"),
         signed_by=report.get("signer_name"),
@@ -2215,20 +2982,29 @@ def get_lab_tech_reports(session: dict = Depends(require_role("Lab Technician"))
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
-                SELECT lr.*, u.full_name as uploaded_by_name
+                SELECT lr.*, u.full_name as uploaded_by_name,
+                       (SELECT anchored_on FROM DocumentAnchors
+                         WHERE document_id = lr.id ORDER BY created_at DESC LIMIT 1) AS anchored_on
                 FROM LabReports lr
                 LEFT JOIN Users u ON lr.patient_id = u.id
                 WHERE lr.lab_tech_id = %s OR lr.uploaded_by = %s
                 ORDER BY lr.upload_date DESC
             """, (user_uuid, user_uuid))
             rows = cur.fetchall()
-            
+
     return [LabReportItem(
         id=str(r["id"]), report_name=r["report_name"], report_type=r["report_type"],
         report_id_public=r["report_id_public"], findings=r["findings"],
         normal_range=r["normal_range"], status=r["status"],
         uploaded_by_name=r["uploaded_by_name"],  # Reusing for patient name in tech view
-        upload_date=r["upload_date"]
+        upload_date=r["upload_date"],
+        document_hash=r.get("document_hash"),
+        blockchain_tx_hash=r.get("blockchain_tx_hash"),
+        anchored_on=r.get("anchored_on"),
+        ipfs_cid=r.get("ipfs_cid"),
+        s3_key=r.get("s3_key"),
+        kem_algorithm=r.get("kem_algorithm"),
+        signature_algorithm=r.get("signature_algorithm"),
     ) for r in rows]
 
 @app.get("/api/lab-tech/reports/{report_id}")
@@ -2257,26 +3033,150 @@ def get_lab_tech_report_detail(report_id: str, session: dict = Depends(require_r
         "blockchain_tx_hash": r.get("blockchain_tx_hash"),
         "ipfs_cid": r.get("ipfs_cid"),
         "s3_key": r.get("s3_key"),
-        "ipfs_gateway_url": f"https://gateway.pinata.cloud/ipfs/{r.get('ipfs_cid')}" if r.get("ipfs_cid") else None,
         "status": r["status"], "upload_date": r["upload_date"]
     }
 
-@app.post("/api/lab-tech/imaging/upload")
-def upload_imaging_report(req: CreateImagingReportRequest, session: dict = Depends(require_role("Lab Technician"))):
+
+@app.get("/api/lab-tech/reports/{report_id}/download")
+def download_lab_tech_report(report_id: str, request: Request, session: dict = Depends(require_role("Lab Technician"))):
+    """Release a report as PDF to the technician who produced it.
+
+    Scoped to their own work, exactly like the list view — a technician can
+    re-open what they issued, not the whole laboratory's output.
+    """
     user_uuid = session["user_id"]
-    
-    # Process IPFS CID & S3 key for imaging payload
-    image_bytes = req.image_data.encode('utf-8') if req.image_data else os.urandom(32)
-    ipfs_cid, ipfs_gateway_url, s3_key = process_and_pin_ipfs(image_bytes, f"{req.exam_type}_{req.scan_region}")
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                _REPORT_SELECT + " WHERE lr.id = %s AND (lr.lab_tech_id = %s OR lr.uploaded_by = %s)",
+                (report_id, user_uuid, user_uuid),
+            )
+            report = cur.fetchone()
+
+        if not report:
+            raise HTTPException(status_code=404, detail="Report not found or not authorised")
+
+        pdf_bytes = _decrypt_report_pdf(report)
+
+        anchor_document(
+            conn, document_type="LabReport", document_id=str(report["id"]),
+            document_hash=report.get("document_hash") or "", action="TECHNICIAN_ACCESSED_REPORT",
+            patient_id=str(report["patient_id"]), actor_id=user_uuid,
+            actor_public_id=session.get("public_user_id"),
+            report_id_public=report.get("report_id_public"),
+        )
+
+    filename = f"{report.get('report_id_public') or 'report'}.pdf"
+    return Response(
+        content=pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
+@app.post("/api/lab-tech/imaging/upload")
+def upload_imaging_report(
+    req: CreateImagingReportRequest,
+    request: Request,
+    session: dict = Depends(require_role("Lab Technician")),
+):
+    """Store an imaging study under the same hybrid protection as lab reports.
+
+    The image is AES-256-GCM encrypted, its key is protected with the patient's
+    ML-KEM public key, the digest is signed with the technician's ML-DSA key,
+    and only ciphertext is written to cloud storage. The previous version
+    uploaded the raw image and — when no image was supplied — 32 random bytes
+    standing in for one, which put unencrypted medical content in the bucket.
+    """
+    user_uuid = session["user_id"]
+
+    if not req.image_data:
+        raise HTTPException(status_code=400, detail="image_data is required.")
 
     with get_db() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT id, user_id, full_name, mlkem_public_key FROM Users WHERE id = %s AND role = 'Patient'",
+                (req.patient_id,),
+            )
+            patient = cur.fetchone()
+            if not patient:
+                raise HTTPException(status_code=404, detail="Patient not found")
+            if not patient["mlkem_public_key"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Patient has no ML-KEM public key; the study cannot be protected.",
+                )
+
+            cur.execute("SELECT mldsa_private_key_encrypted FROM Users WHERE id = %s", (user_uuid,))
+            technician = cur.fetchone()
+
+            image_bytes = req.image_data.encode("utf-8")
+            document_hash = sha256_hex(image_bytes)
+
+            try:
+                kem_ciphertext, shared_secret = encapsulate_aes_key(patient["mlkem_public_key"])
+                aes_key = derive_aes_key(shared_secret)
+                encrypted = encrypt_document(image_bytes, aes_key)
+                signature = sign_document_hash(document_hash, technician["mldsa_private_key_encrypted"])
+            except PQCUnavailableError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+            # Only ciphertext leaves the process.
+            ipfs_cid, s3_key = store_encrypted_document(
+                encrypted["ciphertext"].encode("utf-8"), f"{req.exam_type}_{req.scan_region}"
+            )
+
             cur.execute("""
-                INSERT INTO ImagingReports (patient_id, lab_tech_id, scan_region, exam_type, clinical_history, findings, impression, recommendations, image_data, ipfs_cid, s3_key)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
-            """, (req.patient_id, user_uuid, req.scan_region, req.exam_type, req.clinical_history, req.findings, req.impression, req.recommendations, req.image_data, ipfs_cid, s3_key))
+                INSERT INTO ImagingReports (
+                    patient_id, lab_tech_id, scan_region, exam_type, clinical_history,
+                    findings, impression, recommendations,
+                    encrypted_image, encrypted_aes_key, encryption_nonce, encryption_tag,
+                    document_hash, digital_signature, kem_algorithm, signature_algorithm,
+                    ipfs_cid, s3_key
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                req.patient_id, user_uuid, req.scan_region, req.exam_type, req.clinical_history,
+                req.findings, req.impression, req.recommendations,
+                encrypted["ciphertext"], kem_ciphertext, encrypted["nonce"], encrypted["tag"],
+                document_hash, signature, ML_KEM_ALG, ML_DSA_ALG,
+                ipfs_cid, s3_key,
+            ))
+            imaging_id = cur.fetchone()["id"]
+
+            cur.execute("""
+                INSERT INTO Notifications (user_id, notification_type, title, body)
+                VALUES (%s, 'IMAGING_READY', 'New Imaging Report Available',
+                        'Your ' || %s || ' (' || %s || ') study is ready to view.')
+            """, (req.patient_id, req.exam_type, req.scan_region))
             conn.commit()
-    return {"status": "success", "ipfs_cid": ipfs_cid, "s3_key": s3_key}
+
+        anchor = anchor_document(
+            conn,
+            document_type="ImagingReport", document_id=str(imaging_id),
+            document_hash=document_hash, action="IMAGING_FINALIZED",
+            patient_id=str(req.patient_id), actor_id=user_uuid,
+            actor_public_id=session.get("public_user_id"),
+        )
+
+        with conn.cursor() as cur:
+            cur.execute("UPDATE ImagingReports SET blockchain_tx_hash = %s WHERE id = %s",
+                        (anchor["tx_hash"], imaging_id))
+            conn.commit()
+
+    return {
+        "status": "success",
+        "imaging_id": str(imaging_id),
+        "patient_user_id": patient["user_id"],
+        "document_hash": document_hash,
+        "kem_algorithm": ML_KEM_ALG,
+        "signature_algorithm": ML_DSA_ALG,
+        "blockchain_tx_hash": anchor["tx_hash"],
+        "anchored_on": anchor["anchored_on"],
+        "ipfs_cid": ipfs_cid,
+        "s3_key": s3_key,
+    }
 
 
 @app.get("/api/lab-tech/imaging")
@@ -2297,8 +3197,67 @@ def get_imaging_reports(session: dict = Depends(require_role("Lab Technician")))
         id=str(r["id"]), patient_name=r["patient_name"], patient_user_id=r["patient_user_id"],
         scan_region=r["scan_region"], exam_type=r["exam_type"], clinical_history=r["clinical_history"],
         findings=r["findings"], impression=r["impression"], recommendations=r["recommendations"],
-        image_data=r["image_data"], created_at=r["created_at"]
+        has_image=bool(r.get("encrypted_image") or r.get("image_data")),
+        document_hash=r.get("document_hash"),
+        kem_algorithm=r.get("kem_algorithm"),
+        signature_algorithm=r.get("signature_algorithm"),
+        blockchain_tx_hash=r.get("blockchain_tx_hash"),
+        created_at=r["created_at"],
     ) for r in rows]
+
+
+@app.get("/api/lab-tech/imaging/{imaging_id}/image")
+def get_imaging_image(imaging_id: str, session: dict = Depends(require_role("Lab Technician"))):
+    """Decrypt and return one imaging study's payload.
+
+    Mirrors the lab-report release path: the AES key is recovered only by
+    decapsulating the stored ML-KEM ciphertext with the patient's private key,
+    and the GCM tag proves the stored bytes were not altered. The digest is
+    re-checked against the value recorded at signing before anything is
+    released.
+    """
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT ir.*, u.mlkem_private_key_encrypted
+                FROM ImagingReports ir
+                JOIN Users u ON ir.patient_id = u.id
+                WHERE ir.id = %s AND ir.lab_tech_id = %s
+            """, (imaging_id, user_uuid))
+            r = cur.fetchone()
+
+    if not r:
+        raise HTTPException(status_code=404, detail="Imaging report not found")
+
+    # Rows predating encryption kept their plaintext payload in image_data.
+    if not r.get("encrypted_image"):
+        if r.get("image_data"):
+            return {"image_data": r["image_data"], "encrypted": False}
+        raise HTTPException(status_code=404, detail="No image stored for this study.")
+
+    ciphertext = r["encrypted_image"]
+    if not ciphertext and r.get("s3_key"):
+        try:
+            ciphertext = download_file_from_s3(r["s3_key"]).decode("utf-8")
+        except StorageError as exc:
+            logger.error("S3 recovery failed for imaging %s: %s", imaging_id, exc)
+
+    try:
+        shared_secret = decapsulate_aes_key(r["encrypted_aes_key"], r["mlkem_private_key_encrypted"])
+        image_bytes = decrypt_document(
+            ciphertext, derive_aes_key(shared_secret),
+            r["encryption_nonce"], r["encryption_tag"],
+        )
+    except PQCUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="Image failed its integrity check.") from exc
+
+    if sha256_hex(image_bytes) != r.get("document_hash"):
+        raise HTTPException(status_code=409, detail="Image digest does not match the recorded hash.")
+
+    return {"image_data": image_bytes.decode("utf-8"), "encrypted": True}
 
 @app.get("/api/lab-tech/notifications")
 def get_lab_tech_notifications(session: dict = Depends(require_role("Lab Technician"))):
@@ -2329,6 +3288,402 @@ def clear_lab_tech_notifications(session: dict = Depends(require_role("Lab Techn
             cur.execute("DELETE FROM Notifications WHERE user_id = %s AND read_at IS NOT NULL", (user_uuid,))
             conn.commit()
     return {"status": "success"}
+
+
+# ─── Nurse Dashboard Endpoints ───────────────────────────────────────────────
+#
+# Nurses aren't "assigned" to patients the way doctors are (via diagnoses).
+# Any approved nurse can search and open any approved patient's chart to record
+# vitals, notes, or medication administration; the nurse's own "My Patients"
+# list is simply "who I've recorded something for", mirroring how the Lab
+# Technician's queue is scoped to their own work rather than a formal roster.
+
+# ─── Clinical record encryption ──────────────────────────────────────────────
+#
+# Diagnoses and prescriptions are the last record types stored as plaintext
+# columns. They are relational rows read by several roles at once — a patient,
+# their doctor and a nurse on a medication round — rather than documents
+# released to one recipient, so the per-patient ML-KEM wrapping used for
+# reports would make them unreadable to the very staff who need them.
+#
+# They therefore use the same AES-256-CBC column encryption that already
+# protects date of birth and blood group. The honest limit of that: it defends
+# the database at rest, not a compromised application server, because the app
+# holds the key. That is the same property the existing PII columns have.
+#
+# Only content is encrypted. Dates and foreign keys stay in the clear because
+# every ORDER BY and JOIN depends on them — and nothing anywhere sorts,
+# filters or searches on the clinical text itself.
+
+DIAGNOSIS_ENCRYPTED_FIELDS = ("title", "description", "symptoms", "doctor_notes", "recommended_tests")
+PRESCRIPTION_ENCRYPTED_FIELDS = ("medicine_name", "dosage", "frequency", "duration", "instructions")
+
+
+def _enc(value: Optional[str]) -> Optional[str]:
+    """Encrypt one clinical field, leaving empty values alone."""
+    return encrypt_data(value) if value else value
+
+
+def _dec(value: Optional[str]) -> Optional[str]:
+    """Decrypt one clinical field.
+
+    ``decrypt_data`` returns its input unchanged when it is not decryptable,
+    so rows written before this change continue to read correctly.
+    """
+    return decrypt_data(value) if value else value
+
+
+def _diagnosis_record(row: dict) -> DiagnosisRecord:
+    """Shape one Diagnoses row, decrypting its clinical text.
+
+    Shared by every read path so a diagnosis cannot be returned encrypted
+    from one endpoint and plain from another.
+    """
+    return DiagnosisRecord(
+        id=str(row["id"]),
+        title=_dec(row["title"]) or "",
+        description=_dec(row.get("description")),
+        symptoms=_dec(row.get("symptoms")),
+        doctor_notes=_dec(row.get("doctor_notes")),
+        recommended_tests=_dec(row.get("recommended_tests")),
+        visit_date=row.get("visit_date"),
+        doctor_name=row.get("doctor_name"),
+        created_at=row.get("created_at"),
+    )
+
+
+def _prescription_record(row: dict) -> PrescriptionRecord:
+    """Shape one Prescriptions row, decrypting its clinical text."""
+    return PrescriptionRecord(
+        id=str(row["id"]),
+        medicine_name=_dec(row["medicine_name"]) or "",
+        dosage=_dec(row["dosage"]) or "",
+        frequency=_dec(row["frequency"]) or "",
+        duration=_dec(row["duration"]) or "",
+        instructions=_dec(row.get("instructions")),
+        prescribed_date=row.get("prescribed_date"),
+        doctor_name=row.get("doctor_name"),
+    )
+
+
+def _vitals_record(row: dict) -> PatientVitalsRecord:
+    """Shape one PatientVitals row for the API.
+
+    Shared by the nurse, doctor and patient views so a reading cannot appear
+    differently depending on who is looking at it.
+    """
+    return PatientVitalsRecord(
+        id=str(row["id"]),
+        temperature_celsius=row["temperature_celsius"],
+        blood_pressure_systolic=row["blood_pressure_systolic"],
+        blood_pressure_diastolic=row["blood_pressure_diastolic"],
+        heart_rate=row["heart_rate"],
+        spo2=row["spo2"],
+        respiratory_rate=row["respiratory_rate"],
+        weight_kg=row["weight_kg"],
+        height_cm=row["height_cm"],
+        notes=row["notes"],
+        recorded_at=row["recorded_at"],
+        nurse_name=row.get("nurse_name"),
+    )
+
+
+def _vitals_out_of_range(req: CreateVitalsRequest) -> list[str]:
+    """Plain-language flags for readings outside a normal adult range.
+
+    Used only to decide whether the attending doctor gets paged immediately;
+    the recorded values themselves are never altered.
+    """
+    flags = []
+    if req.temperature_celsius is not None and (req.temperature_celsius >= 38.0 or req.temperature_celsius <= 35.0):
+        flags.append(f"temperature {req.temperature_celsius}°C")
+    if req.heart_rate is not None and (req.heart_rate > 100 or req.heart_rate < 50):
+        flags.append(f"heart rate {req.heart_rate} bpm")
+    if req.spo2 is not None and req.spo2 < 92:
+        flags.append(f"SpO2 {req.spo2}%")
+    if req.blood_pressure_systolic is not None and (req.blood_pressure_systolic > 140 or req.blood_pressure_systolic < 90):
+        flags.append(f"systolic BP {req.blood_pressure_systolic} mmHg")
+    if req.blood_pressure_diastolic is not None and (req.blood_pressure_diastolic > 90 or req.blood_pressure_diastolic < 60):
+        flags.append(f"diastolic BP {req.blood_pressure_diastolic} mmHg")
+    if req.respiratory_rate is not None and (req.respiratory_rate > 24 or req.respiratory_rate < 10):
+        flags.append(f"respiratory rate {req.respiratory_rate}/min")
+    return flags
+
+
+@app.get("/api/nurse/profile")
+def get_nurse_profile(session: dict = Depends(require_role("Nurse"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT * FROM Users WHERE id = %s", (user_uuid,))
+            user = cur.fetchone()
+    if not user:
+        raise HTTPException(status_code=404, detail="Nurse not found")
+    return NurseProfile(
+        id=str(user["id"]), user_id=user["user_id"], full_name=user["full_name"],
+        email=user["email"], role=user["role"], gender=user["gender"],
+        status=user["status"], created_at=user["created_at"],
+    )
+
+
+@app.get("/api/nurse/dashboard/summary")
+def get_nurse_dashboard_summary(session: dict = Depends(require_role("Nurse"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT COUNT(DISTINCT patient_id) as cnt FROM (
+                    SELECT patient_id FROM PatientVitals WHERE nurse_id = %s AND recorded_at::date = CURRENT_DATE
+                    UNION SELECT patient_id FROM NursingNotes WHERE nurse_id = %s AND created_at::date = CURRENT_DATE
+                    UNION SELECT patient_id FROM MedicationAdministration WHERE nurse_id = %s AND administered_at::date = CURRENT_DATE
+                ) as attended
+            """, (user_uuid, user_uuid, user_uuid))
+            patients_attended = cur.fetchone()["cnt"]
+
+            cur.execute("SELECT COUNT(*) as cnt FROM PatientVitals WHERE nurse_id = %s AND recorded_at::date = CURRENT_DATE", (user_uuid,))
+            vitals_today = cur.fetchone()["cnt"]
+
+            cur.execute("SELECT COUNT(*) as cnt FROM NursingNotes WHERE nurse_id = %s AND created_at::date = CURRENT_DATE", (user_uuid,))
+            notes_today = cur.fetchone()["cnt"]
+
+            cur.execute("SELECT COUNT(*) as cnt FROM MedicationAdministration WHERE nurse_id = %s AND administered_at::date = CURRENT_DATE", (user_uuid,))
+            meds_today = cur.fetchone()["cnt"]
+
+            cur.execute("SELECT title, body, created_at FROM Notifications WHERE user_id = %s ORDER BY created_at DESC LIMIT 5", (user_uuid,))
+            activities = cur.fetchall()
+
+    return NurseDashboardSummary(
+        patients_attended_today=patients_attended,
+        vitals_recorded_today=vitals_today,
+        notes_added_today=notes_today,
+        medications_administered_today=meds_today,
+        recent_activities=[
+            PatientActivityItem(title=a["title"], description=a["body"], created_at=a["created_at"])
+            for a in activities
+        ],
+    )
+
+
+@app.get("/api/nurse/patients")
+def get_nurse_patients(session: dict = Depends(require_role("Nurse"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT u.*,
+                    GREATEST(
+                        COALESCE((SELECT MAX(recorded_at) FROM PatientVitals WHERE patient_id = u.id AND nurse_id = %s), 'epoch'::timestamptz),
+                        COALESCE((SELECT MAX(created_at) FROM NursingNotes WHERE patient_id = u.id AND nurse_id = %s), 'epoch'::timestamptz),
+                        COALESCE((SELECT MAX(administered_at) FROM MedicationAdministration WHERE patient_id = u.id AND nurse_id = %s), 'epoch'::timestamptz)
+                    ) as last_recorded_at
+                FROM Users u
+                JOIN (
+                    SELECT patient_id FROM PatientVitals WHERE nurse_id = %s
+                    UNION SELECT patient_id FROM NursingNotes WHERE nurse_id = %s
+                    UNION SELECT patient_id FROM MedicationAdministration WHERE nurse_id = %s
+                ) as attended ON u.id = attended.patient_id
+                WHERE u.role = 'Patient'
+                ORDER BY last_recorded_at DESC
+            """, (user_uuid, user_uuid, user_uuid, user_uuid, user_uuid, user_uuid))
+            rows = cur.fetchall()
+
+    return [NursePatientListItem(
+        id=str(r["id"]), user_id=r["user_id"], full_name=r["full_name"], gender=r["gender"],
+        blood_group=decrypt_data(r["blood_group_encrypted"]) if r.get("blood_group_encrypted") else None,
+        last_recorded_at=r["last_recorded_at"], status=r["status"],
+    ) for r in rows]
+
+
+@app.get("/api/nurse/patients/search")
+def search_nurse_patients(q: str, session: dict = Depends(require_role("Nurse"))):
+    if len(q) < 2:
+        return []
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT id, user_id, full_name, email, gender
+                FROM Users
+                WHERE role = 'Patient' AND status = 'Approved'
+                  AND (full_name ILIKE %s OR user_id ILIKE %s OR email ILIKE %s)
+                ORDER BY full_name ASC
+                LIMIT 20
+            """, (f"%{q}%", f"%{q}%", f"%{q}%"))
+            rows = cur.fetchall()
+    return [{"id": str(r["id"]), "user_id": r["user_id"], "full_name": r["full_name"], "email": r["email"], "gender": r["gender"]} for r in rows]
+
+
+@app.get("/api/nurse/patients/{patient_id}", response_model=NursePatientDetail)
+def get_nurse_patient_detail(patient_id: str, session: dict = Depends(require_role("Nurse"))):
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT * FROM Users WHERE id = %s AND role = 'Patient'", (patient_id,))
+            user = cur.fetchone()
+            if not user:
+                raise HTTPException(status_code=404, detail="Patient not found")
+
+            cur.execute("""
+                SELECT v.*, n.full_name as nurse_name FROM PatientVitals v
+                LEFT JOIN Users n ON v.nurse_id = n.id
+                WHERE v.patient_id = %s ORDER BY v.recorded_at DESC LIMIT 10
+            """, (patient_id,))
+            vitals = cur.fetchall()
+
+            cur.execute("""
+                SELECT nn.*, n.full_name as nurse_name FROM NursingNotes nn
+                LEFT JOIN Users n ON nn.nurse_id = n.id
+                WHERE nn.patient_id = %s ORDER BY nn.created_at DESC LIMIT 10
+            """, (patient_id,))
+            notes = cur.fetchall()
+
+            cur.execute("""
+                SELECT p.*,
+                    (SELECT ma.administered_at FROM MedicationAdministration ma WHERE ma.prescription_id = p.id ORDER BY ma.administered_at DESC LIMIT 1) as last_administered_at,
+                    (SELECT ma.status FROM MedicationAdministration ma WHERE ma.prescription_id = p.id ORDER BY ma.administered_at DESC LIMIT 1) as last_administered_status
+                FROM Prescriptions p
+                WHERE p.patient_id = %s
+                ORDER BY p.prescribed_date DESC LIMIT 10
+            """, (patient_id,))
+            prescriptions = cur.fetchall()
+
+    return NursePatientDetail(
+        profile=NursePatientListItem(
+            id=str(user["id"]), user_id=user["user_id"], full_name=user["full_name"], gender=user["gender"],
+            blood_group=decrypt_data(user["blood_group_encrypted"]) if user.get("blood_group_encrypted") else None,
+            last_recorded_at=None, status=user["status"],
+        ),
+        vitals_history=[_vitals_record(v) for v in vitals],
+        nursing_notes=[
+            NursingNoteRecord(id=str(n["id"]), note_type=n["note_type"], content=n["content"], created_at=n["created_at"], nurse_name=n["nurse_name"])
+            for n in notes
+        ],
+        active_prescriptions=[
+            ActivePrescriptionForNurse(
+                id=str(p["id"]), medicine_name=_dec(p["medicine_name"]) or "", dosage=_dec(p["dosage"]) or "",
+                frequency=_dec(p["frequency"]) or "", duration=_dec(p["duration"]) or "",
+                instructions=_dec(p["instructions"]), prescribed_date=p["prescribed_date"],
+                last_administered_at=p["last_administered_at"], last_administered_status=p["last_administered_status"],
+            ) for p in prescriptions
+        ],
+    )
+
+
+@app.post("/api/nurse/patients/{patient_id}/vitals")
+def record_patient_vitals(patient_id: str, req: CreateVitalsRequest, session: dict = Depends(require_role("Nurse"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT id FROM Users WHERE id = %s AND role = 'Patient'", (patient_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Patient not found")
+
+            cur.execute("""
+                INSERT INTO PatientVitals
+                    (patient_id, nurse_id, temperature_celsius, blood_pressure_systolic, blood_pressure_diastolic,
+                     heart_rate, spo2, respiratory_rate, weight_kg, height_cm, notes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                patient_id, user_uuid, req.temperature_celsius, req.blood_pressure_systolic, req.blood_pressure_diastolic,
+                req.heart_rate, req.spo2, req.respiratory_rate, req.weight_kg, req.height_cm, req.notes,
+            ))
+            vitals_id = cur.fetchone()["id"]
+
+            cur.execute("""
+                INSERT INTO Notifications (user_id, notification_type, title, body)
+                VALUES (%s, 'VITALS_RECORDED', 'Vitals Recorded', 'A nurse recorded your vitals.')
+            """, (patient_id,))
+
+            flags = _vitals_out_of_range(req)
+            if flags:
+                cur.execute("""
+                    SELECT doctor_id FROM (
+                        SELECT doctor_id, visit_date as event_date FROM Diagnoses WHERE patient_id = %s AND doctor_id IS NOT NULL
+                        UNION ALL
+                        SELECT doctor_id, appointment_date as event_date FROM Appointments WHERE patient_id = %s AND doctor_id IS NOT NULL
+                    ) as recent ORDER BY event_date DESC LIMIT 1
+                """, (patient_id, patient_id))
+                doc_row = cur.fetchone()
+                if doc_row and doc_row["doctor_id"]:
+                    cur.execute("""
+                        INSERT INTO Notifications (user_id, notification_type, title, body)
+                        VALUES (%s, 'ABNORMAL_VITALS', 'Abnormal Vitals Alert', %s)
+                    """, (doc_row["doctor_id"], f"Out-of-range reading(s) for your patient: {', '.join(flags)}."))
+
+            conn.commit()
+
+    return {"status": "success", "id": str(vitals_id), "flags": flags}
+
+
+@app.post("/api/nurse/patients/{patient_id}/notes")
+def add_nursing_note(patient_id: str, req: CreateNursingNoteRequest, session: dict = Depends(require_role("Nurse"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT id FROM Users WHERE id = %s AND role = 'Patient'", (patient_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Patient not found")
+
+            cur.execute("""
+                INSERT INTO NursingNotes (patient_id, nurse_id, note_type, content)
+                VALUES (%s, %s, %s, %s) RETURNING id
+            """, (patient_id, user_uuid, req.note_type, req.content))
+            note_id = cur.fetchone()["id"]
+            conn.commit()
+
+    return {"status": "success", "id": str(note_id)}
+
+
+@app.post("/api/nurse/patients/{patient_id}/medications/{prescription_id}/administer")
+def administer_medication(patient_id: str, prescription_id: str, req: CreateMedicationAdministrationRequest, session: dict = Depends(require_role("Nurse"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT id FROM Prescriptions WHERE id = %s AND patient_id = %s", (prescription_id, patient_id))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Prescription not found for this patient")
+
+            cur.execute("""
+                INSERT INTO MedicationAdministration (prescription_id, patient_id, nurse_id, status, remarks)
+                VALUES (%s, %s, %s, %s, %s) RETURNING id
+            """, (prescription_id, patient_id, user_uuid, req.status, req.remarks))
+            admin_id = cur.fetchone()["id"]
+            conn.commit()
+
+    return {"status": "success", "id": str(admin_id)}
+
+
+@app.get("/api/nurse/notifications")
+def get_nurse_notifications(session: dict = Depends(require_role("Nurse"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT * FROM Notifications WHERE user_id = %s ORDER BY created_at DESC", (user_uuid,))
+            rows = cur.fetchall()
+    return [NotificationItem(
+        id=str(r["notification_id"]), notification_type=r["notification_type"],
+        title=r["title"], body=r["body"], read_at=r["read_at"], created_at=r["created_at"]
+    ) for r in rows]
+
+
+@app.post("/api/nurse/notifications/{notification_id}/read")
+def mark_nurse_notification_read(notification_id: str, session: dict = Depends(require_role("Nurse"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE Notifications SET read_at = CURRENT_TIMESTAMP WHERE notification_id = %s AND user_id = %s AND read_at IS NULL", (notification_id, user_uuid))
+            conn.commit()
+    return {"status": "success"}
+
+
+@app.post("/api/nurse/notifications/clear")
+def clear_nurse_notifications(session: dict = Depends(require_role("Nurse"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM Notifications WHERE user_id = %s AND read_at IS NOT NULL", (user_uuid,))
+            conn.commit()
+    return {"status": "success"}
+
 
 if __name__ == "__main__":
     import uvicorn

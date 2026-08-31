@@ -12,3 +12,4 @@ PyJWT
 boto3
 reportlab
 pytest
+httpx          # required by starlette's TestClient

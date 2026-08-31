@@ -8,19 +8,16 @@ import { getPatientSecurity } from "@/lib/session";
 interface SecurityAccountInfo {
   user_id?: string;
   status?: string;
-  [key: string]: unknown;
 }
 
 interface SecurityInfo {
   last_login?: string;
   active_sessions?: number;
-  [key: string]: unknown;
 }
 
 interface SecurityPageData {
   account_info?: SecurityAccountInfo;
   security_info?: SecurityInfo;
-  [key: string]: unknown;
 }
 
 export default function SecurityCenterPage() {

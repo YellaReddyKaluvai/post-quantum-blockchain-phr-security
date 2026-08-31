@@ -11,3 +11,10 @@ env/
 .venv/
 .DS_Store
 .env.local
+
+# Foundry build output (regenerate with `forge build`)
+cache/
+contracts/out/
+
+# Local editor/tooling config (machine-specific paths)
+.claude/

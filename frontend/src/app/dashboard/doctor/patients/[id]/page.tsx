@@ -3,11 +3,11 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { motion } from "framer-motion";
-import { User, Activity, FileText, ChevronLeft, Plus, X, FlaskConical, CheckCircle } from "lucide-react";
+import { User, Activity, FileText, ChevronLeft, Plus, X, FlaskConical, CheckCircle, HeartPulse, ShieldAlert, Loader2, Stethoscope } from "lucide-react";
 import Link from "next/link";
 import {
   getDoctorPatientDetail, createDiagnosis, createPrescription,
-  getDoctorLabPanels, requestLabTest,
+  getDoctorLabPanels, requestLabTest, declareEmergencyAccess, createConsultation,
 } from "@/lib/session";
 
 interface LabPanel {
@@ -17,30 +17,121 @@ interface LabPanel {
   category: string;
 }
 
-interface PatientDetailInfo {
+interface PatientProfileInfo {
   id: string;
-  name?: string;
+  user_id?: string;
+  full_name?: string;
   email?: string;
   gender?: string;
   blood_group?: string;
   date_of_birth?: string;
-  dob?: string;
-  diagnoses?: Record<string, unknown>[];
-  prescriptions?: Record<string, unknown>[];
-  [key: string]: unknown;
 }
+
+interface DiagnosisEntry {
+  id: string;
+  title: string;
+  description?: string | null;
+  symptoms?: string | null;
+  doctor_notes?: string | null;
+  recommended_tests?: string | null;
+  visit_date?: string | null;
+  created_at?: string | null;
+}
+
+interface PrescriptionEntry {
+  id: string;
+  medicine_name: string;
+  dosage: string;
+  frequency: string;
+  duration: string;
+  instructions?: string | null;
+  prescribed_date?: string | null;
+}
+
+interface VitalsEntry {
+  id: string;
+  temperature_celsius?: number | null;
+  blood_pressure_systolic?: number | null;
+  blood_pressure_diastolic?: number | null;
+  heart_rate?: number | null;
+  spo2?: number | null;
+  respiratory_rate?: number | null;
+  notes?: string | null;
+  recorded_at?: string | null;
+  nurse_name?: string | null;
+}
+
+interface NursingNoteEntry {
+  id: string;
+  note_type: string;
+  content: string;
+  created_at?: string | null;
+  nurse_name?: string | null;
+}
+
+interface PatientDetailResponse {
+  profile: PatientProfileInfo;
+  diagnoses: DiagnosisEntry[];
+  prescriptions: PrescriptionEntry[];
+  vitals: VitalsEntry[];
+  nursing_notes: NursingNoteEntry[];
+}
+
+// Same thresholds the backend uses to decide whether to alert the doctor.
+function isAbnormal(key: string, value: number): boolean {
+  switch (key) {
+    case "temperature_celsius": return value >= 38.0 || value <= 35.0;
+    case "heart_rate": return value > 100 || value < 50;
+    case "spo2": return value < 92;
+    case "blood_pressure_systolic": return value > 140 || value < 90;
+    case "blood_pressure_diastolic": return value > 90 || value < 60;
+    case "respiratory_rate": return value > 24 || value < 10;
+    default: return false;
+  }
+}
+
+const todayStr = () => new Date().toISOString().split("T")[0];
+
+const emptyDiagnosisForm = {
+  title: "",
+  description: "",
+  symptoms: "",
+  doctor_notes: "",
+  recommended_tests: "",
+  visit_date: todayStr(),
+};
+
+const emptyConsultationForm = {
+  consultation_date: todayStr(),
+  symptoms: "",
+  diagnosis_summary: "",
+  doctor_notes: "",
+};
+
+const emptyPrescriptionForm = {
+  medicine_name: "",
+  dosage: "",
+  frequency: "",
+  duration: "",
+  instructions: "",
+  prescribed_date: todayStr(),
+};
 
 
 export default function PatientDetails() {
   const params = useParams();
-  const [patient, setPatient] = useState<PatientDetailInfo | null>(null);
+  const [patient, setPatient] = useState<PatientDetailResponse | null>(null);
 
   const [loading, setLoading] = useState(true);
 
-
   const [diagnosisModal, setDiagnosisModal] = useState(false);
   const [prescriptionModal, setPrescriptionModal] = useState(false);
-  const [formData, setFormData] = useState({ description: "", medications: "" });
+  const [diagnosisForm, setDiagnosisForm] = useState(emptyDiagnosisForm);
+  const [prescriptionForm, setPrescriptionForm] = useState(emptyPrescriptionForm);
+  const [diagnosisSubmitting, setDiagnosisSubmitting] = useState(false);
+  const [prescriptionSubmitting, setPrescriptionSubmitting] = useState(false);
+  const [diagnosisError, setDiagnosisError] = useState("");
+  const [prescriptionError, setPrescriptionError] = useState("");
 
   const [labModal, setLabModal] = useState(false);
   const [labPanels, setLabPanels] = useState<LabPanel[]>([]);
@@ -48,6 +139,38 @@ export default function PatientDetails() {
   const [labSubmitting, setLabSubmitting] = useState(false);
   const [labError, setLabError] = useState("");
   const [labSuccess, setLabSuccess] = useState<{ panel: string; priority: string } | null>(null);
+
+  const [consultationModal, setConsultationModal] = useState(false);
+  const [consultationForm, setConsultationForm] = useState(emptyConsultationForm);
+  const [consultationSubmitting, setConsultationSubmitting] = useState(false);
+  const [consultationError, setConsultationError] = useState("");
+
+  const [emergencyModal, setEmergencyModal] = useState(false);
+  const [emergencyForm, setEmergencyForm] = useState({ reason: "", duration_hours: 4 });
+  const [emergencySubmitting, setEmergencySubmitting] = useState(false);
+  const [emergencyError, setEmergencyError] = useState("");
+  const [emergencyGranted, setEmergencyGranted] = useState<string | null>(null);
+
+  const handleEmergencyAccess = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setEmergencyError("");
+    setEmergencySubmitting(true);
+    try {
+      const res = await declareEmergencyAccess({
+        patient_id: params.id as string,
+        reason: emergencyForm.reason,
+        duration_hours: emergencyForm.duration_hours,
+      });
+      setEmergencyGranted(res.message);
+      setEmergencyModal(false);
+      setEmergencyForm({ reason: "", duration_hours: 4 });
+      await fetchDetail();
+    } catch (error) {
+      setEmergencyError(error instanceof Error ? error.message : "Failed to declare emergency access.");
+    } finally {
+      setEmergencySubmitting(false);
+    }
+  };
 
   const fetchDetail = useCallback(async () => {
     try {
@@ -100,27 +223,70 @@ export default function PatientDetails() {
     }
   };
 
+  const handleConsultation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setConsultationError("");
+    setConsultationSubmitting(true);
+    try {
+      await createConsultation(params.id as string, {
+        consultation_date: consultationForm.consultation_date,
+        symptoms: consultationForm.symptoms || undefined,
+        diagnosis_summary: consultationForm.diagnosis_summary || undefined,
+        doctor_notes: consultationForm.doctor_notes || undefined,
+      });
+      setConsultationModal(false);
+      setConsultationForm(emptyConsultationForm);
+      await fetchDetail();
+    } catch (error) {
+      setConsultationError(error instanceof Error ? error.message : "Failed to record consultation.");
+    } finally {
+      setConsultationSubmitting(false);
+    }
+  };
+
   const handleDiagnosis = async (e: React.FormEvent) => {
     e.preventDefault();
+    setDiagnosisError("");
+    setDiagnosisSubmitting(true);
     try {
-      await createDiagnosis(params.id as string, { description: formData.description });
+      await createDiagnosis(params.id as string, {
+        title: diagnosisForm.title,
+        description: diagnosisForm.description || undefined,
+        symptoms: diagnosisForm.symptoms || undefined,
+        doctor_notes: diagnosisForm.doctor_notes || undefined,
+        recommended_tests: diagnosisForm.recommended_tests || undefined,
+        visit_date: diagnosisForm.visit_date,
+      });
       setDiagnosisModal(false);
-      setFormData({ ...formData, description: "" });
-      // Refresh logic would go here
+      setDiagnosisForm(emptyDiagnosisForm);
+      await fetchDetail();
     } catch (error) {
-      console.error(error);
+      setDiagnosisError(error instanceof Error ? error.message : "Failed to create diagnosis.");
+    } finally {
+      setDiagnosisSubmitting(false);
     }
   };
 
   const handlePrescription = async (e: React.FormEvent) => {
     e.preventDefault();
+    setPrescriptionError("");
+    setPrescriptionSubmitting(true);
     try {
-      await createPrescription(params.id as string, { medications: formData.medications });
+      await createPrescription(params.id as string, {
+        medicine_name: prescriptionForm.medicine_name,
+        dosage: prescriptionForm.dosage,
+        frequency: prescriptionForm.frequency,
+        duration: prescriptionForm.duration,
+        instructions: prescriptionForm.instructions || undefined,
+        prescribed_date: prescriptionForm.prescribed_date,
+      });
       setPrescriptionModal(false);
-      setFormData({ ...formData, medications: "" });
-      // Refresh logic would go here
+      setPrescriptionForm(emptyPrescriptionForm);
+      await fetchDetail();
     } catch (error) {
-      console.error(error);
+      setPrescriptionError(error instanceof Error ? error.message : "Failed to create prescription.");
+    } finally {
+      setPrescriptionSubmitting(false);
     }
   };
 
@@ -147,23 +313,23 @@ export default function PatientDetails() {
         <div className="flex-1 grid grid-cols-2 md:grid-cols-4 gap-4 w-full">
           <div>
             <p className="text-xs text-slate-400 uppercase tracking-wider">Name</p>
-            <p className="text-lg font-bold text-slate-800">{patient.name || "Unknown"}</p>
+            <p className="text-lg font-bold text-slate-800">{patient.profile.full_name || "Unknown"}</p>
           </div>
           <div>
             <p className="text-xs text-slate-400 uppercase tracking-wider">Email</p>
-            <p className="text-sm font-medium text-slate-700">{patient.email || "N/A"}</p>
+            <p className="text-sm font-medium text-slate-700">{patient.profile.email || "N/A"}</p>
           </div>
           <div>
             <p className="text-xs text-slate-400 uppercase tracking-wider">Gender</p>
-            <p className="text-sm font-medium text-slate-700">{patient.gender || "N/A"}</p>
+            <p className="text-sm font-medium text-slate-700">{patient.profile.gender || "N/A"}</p>
           </div>
           <div>
             <p className="text-xs text-slate-400 uppercase tracking-wider">Blood Group</p>
-            <p className="text-sm font-medium text-slate-700">{patient.blood_group || "N/A"}</p>
+            <p className="text-sm font-medium text-slate-700">{patient.profile.blood_group || "N/A"}</p>
           </div>
           <div>
             <p className="text-xs text-slate-400 uppercase tracking-wider">DOB</p>
-            <p className="text-sm font-medium text-slate-700">{patient.dob || "N/A"}</p>
+            <p className="text-sm font-medium text-slate-700">{patient.profile.date_of_birth || "N/A"}</p>
           </div>
         </div>
         <div className="flex flex-col gap-2 w-full md:w-auto">
@@ -173,10 +339,137 @@ export default function PatientDetails() {
           <button onClick={() => setPrescriptionModal(true)} className="flex items-center justify-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold transition-colors">
             <Plus className="w-4 h-4" /> New Prescription
           </button>
+          <button onClick={() => { setConsultationError(""); setConsultationModal(true); }} className="flex items-center justify-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-sm font-bold transition-colors">
+            <Stethoscope className="w-4 h-4" /> Record Consultation
+          </button>
           <button onClick={openLabModal} className="flex items-center justify-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-bold transition-colors">
             <FlaskConical className="w-4 h-4" /> Request Lab Test
           </button>
+          {/* Deliberately understated and last: break-glass should be reachable
+              in an emergency but never look like a routine action. */}
+          <button
+            onClick={() => { setEmergencyError(""); setEmergencyModal(true); }}
+            className="flex items-center justify-center gap-2 px-4 py-2 bg-white border border-rose-200 text-rose-600 hover:bg-rose-50 rounded-xl text-xs font-bold transition-colors"
+          >
+            <ShieldAlert className="w-4 h-4" /> Emergency Access
+          </button>
         </div>
+      </motion.div>
+
+      {emergencyGranted && (
+        <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-sm font-semibold flex items-start gap-3">
+          <ShieldAlert className="w-5 h-5 flex-shrink-0 mt-0.5" />
+          <span>{emergencyGranted}</span>
+          <button onClick={() => setEmergencyGranted(null)} className="ml-auto opacity-60 hover:opacity-100">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Nursing observations — recorded by nurses, read here by the treating doctor */}
+      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.05 }}
+        className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+        <div className="flex items-center gap-3 mb-5 border-b border-slate-100 pb-4">
+          <HeartPulse className="w-5 h-5 text-rose-500" />
+          <h2 className="text-lg font-bold text-slate-800">Nursing Observations</h2>
+          {patient.vitals?.[0]?.recorded_at && (
+            <span className="ml-auto text-xs text-slate-400">
+              Last reading {new Date(patient.vitals[0].recorded_at).toLocaleString()}
+              {patient.vitals[0].nurse_name ? ` · ${patient.vitals[0].nurse_name}` : ""}
+            </span>
+          )}
+        </div>
+
+        {!patient.vitals || patient.vitals.length === 0 ? (
+          <p className="text-sm text-slate-500">No vitals recorded by nursing staff.</p>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
+              {([
+                { key: "temperature_celsius", label: "Temp", unit: "°C" },
+                { key: "heart_rate", label: "Heart Rate", unit: "bpm" },
+                { key: "spo2", label: "SpO₂", unit: "%" },
+                { key: "blood_pressure_systolic", label: "BP Sys", unit: "mmHg" },
+                { key: "blood_pressure_diastolic", label: "BP Dia", unit: "mmHg" },
+                { key: "respiratory_rate", label: "Resp", unit: "/min" },
+              ] as const).map((c) => {
+                const v = patient.vitals[0][c.key] as number | null | undefined;
+                const has = v !== null && v !== undefined;
+                const abnormal = has && isAbnormal(c.key, Number(v));
+                return (
+                  <div key={c.key} className={`p-3 rounded-xl border ${abnormal ? "bg-amber-50 border-amber-200" : "bg-slate-50 border-slate-100"}`}>
+                    <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wide">{c.label}</p>
+                    <p className={`text-lg font-bold tabular-nums ${abnormal ? "text-amber-700" : "text-slate-800"}`}>
+                      {has ? v : "—"}{has && <span className="text-xs font-medium ml-0.5">{c.unit}</span>}
+                    </p>
+                    {abnormal && <p className="text-[10px] font-bold text-amber-600 mt-0.5">Out of range</p>}
+                  </div>
+                );
+              })}
+            </div>
+
+            {patient.vitals.length > 1 && (
+              <details className="group">
+                <summary className="cursor-pointer text-xs font-bold text-slate-500 hover:text-slate-700 select-none">
+                  Show {patient.vitals.length - 1} earlier reading{patient.vitals.length > 2 ? "s" : ""}
+                </summary>
+                <div className="overflow-x-auto mt-3">
+                  <table className="w-full text-sm min-w-[560px]">
+                    <thead>
+                      <tr className="text-left text-[10px] uppercase tracking-wide text-slate-400 border-b border-slate-100">
+                        <th className="py-2 pr-4 font-bold">Recorded</th>
+                        <th className="py-2 pr-4 font-bold">Temp</th>
+                        <th className="py-2 pr-4 font-bold">HR</th>
+                        <th className="py-2 pr-4 font-bold">SpO₂</th>
+                        <th className="py-2 pr-4 font-bold">BP</th>
+                        <th className="py-2 font-bold">By</th>
+                      </tr>
+                    </thead>
+                    <tbody className="tabular-nums">
+                      {patient.vitals.slice(1).map((v) => (
+                        <tr key={v.id} className="border-b border-slate-50 last:border-0">
+                          <td className="py-2 pr-4 text-slate-600 whitespace-nowrap">
+                            {v.recorded_at ? new Date(v.recorded_at).toLocaleString() : "—"}
+                          </td>
+                          <td className="py-2 pr-4 text-slate-800">{v.temperature_celsius ?? "—"}</td>
+                          <td className="py-2 pr-4 text-slate-800">{v.heart_rate ?? "—"}</td>
+                          <td className="py-2 pr-4 text-slate-800">{v.spo2 ?? "—"}</td>
+                          <td className="py-2 pr-4 text-slate-800">
+                            {v.blood_pressure_systolic && v.blood_pressure_diastolic
+                              ? `${v.blood_pressure_systolic}/${v.blood_pressure_diastolic}` : "—"}
+                          </td>
+                          <td className="py-2 text-slate-500">{v.nurse_name || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            )}
+          </>
+        )}
+
+        {patient.nursing_notes && patient.nursing_notes.length > 0 && (
+          <div className="mt-5 pt-5 border-t border-slate-100 space-y-2">
+            <p className="text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Nursing Notes</p>
+            {patient.nursing_notes.map((n) => (
+              <div key={n.id} className="p-3 bg-slate-50 rounded-xl border border-slate-100">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wide ${
+                    n.note_type === "Incident" ? "bg-rose-100 text-rose-700"
+                      : n.note_type === "Care" ? "bg-blue-100 text-blue-700"
+                      : "bg-slate-200 text-slate-600"
+                  }`}>{n.note_type}</span>
+                  <span className="text-[11px] text-slate-400 ml-auto">
+                    {n.created_at ? new Date(n.created_at).toLocaleString() : ""}
+                  </span>
+                </div>
+                <p className="text-sm text-slate-700">{n.content}</p>
+                {n.nurse_name && <p className="text-[11px] text-slate-400 mt-1">— {n.nurse_name}</p>}
+              </div>
+            ))}
+          </div>
+        )}
       </motion.div>
 
       {/* Middle Section */}
@@ -187,11 +480,16 @@ export default function PatientDetails() {
             <h2 className="text-lg font-bold text-slate-800">Previous Diagnoses</h2>
           </div>
           <div className="space-y-4">
-            {patient.diagnoses && (patient.diagnoses as Record<string, unknown>[]).length > 0 ? (
-              (patient.diagnoses as Record<string, unknown>[]).map((d: Record<string, unknown>, i: number) => (
-                <div key={i} className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-                  <p className="text-sm text-slate-700">{d.description as string}</p>
-                  <p className="text-xs text-slate-400 mt-2">{new Date(d.date as string).toLocaleString()}</p>
+            {patient.diagnoses && patient.diagnoses.length > 0 ? (
+              patient.diagnoses.map((d) => (
+                <div key={d.id} className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                  <p className="text-sm font-semibold text-slate-800">{d.title}</p>
+                  {d.description && <p className="text-sm text-slate-600 mt-1">{d.description}</p>}
+                  {d.symptoms && <p className="text-xs text-slate-500 mt-1"><span className="font-medium">Symptoms:</span> {d.symptoms}</p>}
+                  {d.recommended_tests && <p className="text-xs text-slate-500 mt-1"><span className="font-medium">Recommended tests:</span> {d.recommended_tests}</p>}
+                  <p className="text-xs text-slate-400 mt-2">
+                    {d.visit_date ? new Date(d.visit_date).toLocaleDateString() : (d.created_at ? new Date(d.created_at).toLocaleDateString() : "")}
+                  </p>
                 </div>
               ))
             ) : (
@@ -206,11 +504,13 @@ export default function PatientDetails() {
             <h2 className="text-lg font-bold text-slate-800">Previous Prescriptions</h2>
           </div>
           <div className="space-y-4">
-            {patient.prescriptions && (patient.prescriptions as Record<string, unknown>[]).length > 0 ? (
-              (patient.prescriptions as Record<string, unknown>[]).map((p: Record<string, unknown>, i: number) => (
-                <div key={i} className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-                  <p className="text-sm text-slate-700">{p.medications as string}</p>
-                  <p className="text-xs text-slate-400 mt-2">{new Date(p.date as string).toLocaleString()}</p>
+            {patient.prescriptions && patient.prescriptions.length > 0 ? (
+              patient.prescriptions.map((p) => (
+                <div key={p.id} className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                  <p className="text-sm font-semibold text-slate-800">{p.medicine_name} — {p.dosage}</p>
+                  <p className="text-xs text-slate-500 mt-1">{p.frequency} · {p.duration}</p>
+                  {p.instructions && <p className="text-xs text-slate-500 mt-1">{p.instructions}</p>}
+                  <p className="text-xs text-slate-400 mt-2">{p.prescribed_date ? new Date(p.prescribed_date).toLocaleDateString() : ""}</p>
                 </div>
               ))
             ) : (
@@ -223,21 +523,77 @@ export default function PatientDetails() {
       {/* Modals */}
       {diagnosisModal && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-bold">New Diagnosis</h3>
               <button onClick={() => setDiagnosisModal(false)}><X className="w-5 h-5 text-slate-500" /></button>
             </div>
-            <form onSubmit={handleDiagnosis}>
-              <textarea
-                required
-                className="w-full border border-slate-200 rounded-xl p-3 mb-4 focus:ring-2 focus:ring-cyan-500 outline-none"
-                rows={4}
-                placeholder="Enter diagnosis details..."
-                value={formData.description}
-                onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-              />
-              <button type="submit" className="w-full bg-cyan-600 text-white rounded-xl py-2 font-bold hover:bg-cyan-700">Submit</button>
+            {diagnosisError && <div className="p-3 mb-4 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-semibold">{diagnosisError}</div>}
+            <form onSubmit={handleDiagnosis} className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Title *</label>
+                <input
+                  required
+                  type="text"
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-cyan-500 outline-none"
+                  placeholder="e.g. Type 2 Diabetes Mellitus"
+                  value={diagnosisForm.title}
+                  onChange={(e) => setDiagnosisForm({ ...diagnosisForm, title: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Visit Date *</label>
+                <input
+                  required
+                  type="date"
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-cyan-500 outline-none"
+                  value={diagnosisForm.visit_date}
+                  onChange={(e) => setDiagnosisForm({ ...diagnosisForm, visit_date: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Description</label>
+                <textarea
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-cyan-500 outline-none"
+                  rows={2}
+                  placeholder="Diagnosis summary..."
+                  value={diagnosisForm.description}
+                  onChange={(e) => setDiagnosisForm({ ...diagnosisForm, description: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Symptoms</label>
+                <textarea
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-cyan-500 outline-none"
+                  rows={2}
+                  placeholder="Reported symptoms..."
+                  value={diagnosisForm.symptoms}
+                  onChange={(e) => setDiagnosisForm({ ...diagnosisForm, symptoms: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Doctor Notes</label>
+                <textarea
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-cyan-500 outline-none"
+                  rows={2}
+                  placeholder="Clinical notes..."
+                  value={diagnosisForm.doctor_notes}
+                  onChange={(e) => setDiagnosisForm({ ...diagnosisForm, doctor_notes: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Recommended Tests</label>
+                <input
+                  type="text"
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-cyan-500 outline-none"
+                  placeholder="e.g. Fasting Blood Sugar, HbA1c"
+                  value={diagnosisForm.recommended_tests}
+                  onChange={(e) => setDiagnosisForm({ ...diagnosisForm, recommended_tests: e.target.value })}
+                />
+              </div>
+              <button type="submit" disabled={diagnosisSubmitting} className="w-full bg-cyan-600 text-white rounded-xl py-2.5 font-bold hover:bg-cyan-700 disabled:opacity-60">
+                {diagnosisSubmitting ? "Saving..." : "Submit"}
+              </button>
             </form>
           </div>
         </div>
@@ -245,21 +601,223 @@ export default function PatientDetails() {
 
       {prescriptionModal && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-bold">New Prescription</h3>
               <button onClick={() => setPrescriptionModal(false)}><X className="w-5 h-5 text-slate-500" /></button>
             </div>
-            <form onSubmit={handlePrescription}>
-              <textarea
-                required
-                className="w-full border border-slate-200 rounded-xl p-3 mb-4 focus:ring-2 focus:ring-emerald-500 outline-none"
-                rows={4}
-                placeholder="Enter medications (e.g. Paracetamol 500mg, 1x/day)"
-                value={formData.medications}
-                onChange={(e) => setFormData({ ...formData, medications: e.target.value })}
-              />
-              <button type="submit" className="w-full bg-emerald-600 text-white rounded-xl py-2 font-bold hover:bg-emerald-700">Submit</button>
+            {prescriptionError && <div className="p-3 mb-4 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-semibold">{prescriptionError}</div>}
+            <form onSubmit={handlePrescription} className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Medicine Name *</label>
+                <input
+                  required
+                  type="text"
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                  placeholder="e.g. Metformin"
+                  value={prescriptionForm.medicine_name}
+                  onChange={(e) => setPrescriptionForm({ ...prescriptionForm, medicine_name: e.target.value })}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Dosage *</label>
+                  <input
+                    required
+                    type="text"
+                    className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                    placeholder="e.g. 500mg"
+                    value={prescriptionForm.dosage}
+                    onChange={(e) => setPrescriptionForm({ ...prescriptionForm, dosage: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Frequency *</label>
+                  <input
+                    required
+                    type="text"
+                    className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                    placeholder="e.g. Twice daily"
+                    value={prescriptionForm.frequency}
+                    onChange={(e) => setPrescriptionForm({ ...prescriptionForm, frequency: e.target.value })}
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Duration *</label>
+                  <input
+                    required
+                    type="text"
+                    className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                    placeholder="e.g. 90 days"
+                    value={prescriptionForm.duration}
+                    onChange={(e) => setPrescriptionForm({ ...prescriptionForm, duration: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Prescribed Date *</label>
+                  <input
+                    required
+                    type="date"
+                    className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                    value={prescriptionForm.prescribed_date}
+                    onChange={(e) => setPrescriptionForm({ ...prescriptionForm, prescribed_date: e.target.value })}
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Instructions</label>
+                <textarea
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
+                  rows={2}
+                  placeholder="e.g. Take after meals"
+                  value={prescriptionForm.instructions}
+                  onChange={(e) => setPrescriptionForm({ ...prescriptionForm, instructions: e.target.value })}
+                />
+              </div>
+              <button type="submit" disabled={prescriptionSubmitting} className="w-full bg-emerald-600 text-white rounded-xl py-2.5 font-bold hover:bg-emerald-700 disabled:opacity-60">
+                {prescriptionSubmitting ? "Saving..." : "Submit"}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+
+
+      {consultationModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-1">
+              <h3 className="text-lg font-bold">Record Consultation</h3>
+              <button onClick={() => setConsultationModal(false)}><X className="w-5 h-5 text-slate-500" /></button>
+            </div>
+            <p className="text-xs text-slate-500 mb-4">
+              A record of the visit itself. The patient can read this in their portal.
+            </p>
+            {consultationError && (
+              <div className="p-3 mb-4 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-semibold">
+                {consultationError}
+              </div>
+            )}
+            <form onSubmit={handleConsultation} className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Consultation Date *</label>
+                <input
+                  required type="date"
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-violet-500 outline-none"
+                  value={consultationForm.consultation_date}
+                  onChange={(e) => setConsultationForm({ ...consultationForm, consultation_date: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Presenting Symptoms</label>
+                <textarea
+                  rows={2}
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-violet-500 outline-none"
+                  placeholder="What the patient reported"
+                  value={consultationForm.symptoms}
+                  onChange={(e) => setConsultationForm({ ...consultationForm, symptoms: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Assessment</label>
+                <textarea
+                  rows={2}
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-violet-500 outline-none"
+                  placeholder="Your clinical assessment of the visit"
+                  value={consultationForm.diagnosis_summary}
+                  onChange={(e) => setConsultationForm({ ...consultationForm, diagnosis_summary: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Notes &amp; Advice</label>
+                <textarea
+                  rows={3}
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-violet-500 outline-none"
+                  placeholder="Advice given, follow-up plan — the patient will read this"
+                  value={consultationForm.doctor_notes}
+                  onChange={(e) => setConsultationForm({ ...consultationForm, doctor_notes: e.target.value })}
+                />
+              </div>
+              <button
+                type="submit" disabled={consultationSubmitting}
+                className="w-full bg-violet-600 text-white rounded-xl py-2.5 font-bold hover:bg-violet-700 disabled:opacity-60 flex items-center justify-center gap-2"
+              >
+                {consultationSubmitting ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving…</> : "Save Consultation"}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {emergencyModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+            <div className="flex justify-between items-center mb-1">
+              <h3 className="text-lg font-bold flex items-center gap-2">
+                <ShieldAlert className="w-5 h-5 text-rose-500" /> Emergency Access
+              </h3>
+              <button onClick={() => setEmergencyModal(false)}><X className="w-5 h-5 text-slate-500" /></button>
+            </div>
+
+            {/* State the consequences before the form, not after. */}
+            <div className="p-3 my-4 rounded-xl bg-rose-50 border border-rose-100 text-rose-800 text-xs font-semibold">
+              This overrides the patient&apos;s consent settings. The patient is notified
+              immediately, an administrator can review it, and the declaration is anchored
+              on-chain permanently. Use it only when clinical need is genuine and urgent.
+            </div>
+
+            {emergencyError && (
+              <div className="p-3 mb-4 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-semibold">
+                {emergencyError}
+              </div>
+            )}
+
+            <form onSubmit={handleEmergencyAccess} className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">
+                  Clinical reason *
+                </label>
+                <textarea
+                  required
+                  rows={3}
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-rose-500 outline-none"
+                  placeholder="Why is immediate access necessary? This is recorded verbatim."
+                  value={emergencyForm.reason}
+                  onChange={(e) => setEmergencyForm({ ...emergencyForm, reason: e.target.value })}
+                />
+                <p className="text-[11px] text-slate-400 mt-1">
+                  At least 10 characters. {emergencyForm.reason.trim().length}/10
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">
+                  Access expires after
+                </label>
+                <select
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-rose-500 outline-none"
+                  value={emergencyForm.duration_hours}
+                  onChange={(e) => setEmergencyForm({ ...emergencyForm, duration_hours: Number(e.target.value) })}
+                >
+                  <option value={1}>1 hour</option>
+                  <option value={4}>4 hours</option>
+                  <option value={8}>8 hours</option>
+                  <option value={24}>24 hours</option>
+                </select>
+              </div>
+
+              <button
+                type="submit"
+                disabled={emergencySubmitting || emergencyForm.reason.trim().length < 10}
+                className="w-full bg-rose-600 text-white rounded-xl py-2.5 font-bold hover:bg-rose-700 disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {emergencySubmitting
+                  ? <><Loader2 className="w-4 h-4 animate-spin" /> Declaring…</>
+                  : "Declare Emergency Access"}
+              </button>
             </form>
           </div>
         </div>

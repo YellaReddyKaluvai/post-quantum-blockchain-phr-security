@@ -12,7 +12,6 @@ interface LabActivityItem {
   time?: string;
   created_at?: string;
   type?: string;
-  [key: string]: unknown;
 }
 
 interface LabTechSummary {
@@ -28,7 +27,6 @@ interface LabTechSummary {
   awaitingReview?: number;
   recent_activities?: LabActivityItem[];
   recentActivity?: LabActivityItem[];
-  [key: string]: unknown;
 }
 
 
@@ -37,6 +35,7 @@ export default function LabTechnicianDashboard() {
   const [summary, setSummary] = useState<LabTechSummary | null>(null);
 
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
 
 
   useEffect(() => {
@@ -46,19 +45,10 @@ export default function LabTechnicianDashboard() {
         setSummary(data);
       } catch (error) {
         console.error(error);
-        // Fallback mock data
-        setSummary({
-          testsAssigned: 42,
-          reportsGenerated: 28,
-          pendingRequests: 14,
-          reportsShared: 25,
-          awaitingReview: 5,
-          recentActivity: [
-            { id: 1, action: "Report Generated for John Doe (CBC)", time: "10 mins ago", type: "success" },
-            { id: 2, action: "New Test Request: MRI Scan (Jane Smith)", time: "1 hour ago", type: "info" },
-            { id: 3, action: "Urgent: Blood Sugar test pending for Mark Johnson", time: "2 hours ago", type: "warning" },
-          ]
-        });
+        // No invented counts. Showing a busy-looking dashboard while the
+        // backend is unreachable misrepresents the state of the lab.
+        setSummary(null);
+        setLoadError("Could not load dashboard data. Check that the backend is running.");
       } finally {
         setLoading(false);
       }
@@ -91,6 +81,12 @@ export default function LabTechnicianDashboard() {
 
   return (
     <div className="space-y-8">
+      {loadError && (
+        <div className="p-3 rounded-xl bg-rose-50 border border-rose-100 text-rose-700 text-sm font-semibold">
+          {loadError}
+        </div>
+      )}
+
       {/* Stat Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
         {statCards.map((stat, idx) => (
