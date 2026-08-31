@@ -69,7 +69,8 @@ export default function SignupPage() {
         gender: formData.gender,
         date_of_birth: formData.date_of_birth,
         blood_group: formData.role === "Patient" ? formData.blood_group : null,
-        specialization: formData.role !== "Patient" ? formData.specialization : null
+        // Specialization is a clinical field that only applies to Doctors.
+        specialization: formData.role === "Doctor" ? formData.specialization : null
       });
       setSuccess(true);
     } catch (err: unknown) {
@@ -97,7 +98,7 @@ export default function SignupPage() {
             <ShieldCheck className="w-6 h-6 text-white" />
           </div>
           <span className="text-2xl font-extrabold tracking-wider bg-clip-text text-transparent bg-gradient-to-r from-slate-800 to-slate-600 drop-shadow-sm">
-            AEGIS
+            QuantumCare
           </span>
         </Link>
 
@@ -175,7 +176,7 @@ export default function SignupPage() {
                         <input type="text" value={formData.blood_group} onChange={e => setFormData({...formData, blood_group: e.target.value})} className={inputClass} placeholder="O+" />
                       </div>
                     )}
-                    {(formData.role === "Doctor" || formData.role === "Nurse" || formData.role === "Lab Technician") && (
+                    {formData.role === "Doctor" && (
                       <div>
                         <label className={labelClass}>Specialization</label>
                         <input type="text" required value={formData.specialization} onChange={e => setFormData({...formData, specialization: e.target.value})} className={inputClass} placeholder="Cardiology" />

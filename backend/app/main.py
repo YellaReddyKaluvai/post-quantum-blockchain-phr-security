@@ -1,36 +1,57 @@
+import hashlib
+import json
+import logging
 import math
+import os
 from fastapi import FastAPI, Depends, HTTPException, Request, Response, status, Body
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 from typing import Optional
 import psycopg
 from psycopg.rows import dict_row
+
+logger = logging.getLogger(__name__)
 
 from app.schemas import (
     RegistrationRequest, LoginRequest, RegistrationResponse, LoginResponse, 
     PendingRegistration, AdminActionRequest, AdminActionResponse,
     RejectRequest, DashboardStats, UserDetail, AuditLogEntry, SecurityStats,
     PatientProfile, PatientDashboardSummary, DiagnosisRecord, LabReportItem,
+    PatientInfoSection, MedicalSummarySection, ReportsSummarySection,
+    AppointmentsSummarySection, PatientActivityItem,
     PrescriptionRecord, ConsultationRecord, AppointmentRecord, NotificationItem,
+    AvailableDoctorItem, CreateAppointmentRequest,
     PatientSecurityInfo, DoctorProfile, DoctorDashboardSummary, DoctorPatientListItem,
     CreateDiagnosisRequest, CreatePrescriptionRequest, CreateConsultationRequest,
     MedicalDocumentItem, CreateDocumentRequest, DoctorAppointmentItem,
     LabTechProfile, LabTechDashboardSummary, LabTestRequestItem,
     CreateLabTestRequest, CreateStructuredLabReportRequest,
-    CreateImagingReportRequest, ImagingReportItem
+    CreateImagingReportRequest, ImagingReportItem,
+    LabPanelSummary, FinalizedReportResponse, ReportVerification
 )
 from app.database import get_db, init_db
 from app.security import (
     hash_password, verify_password, encrypt_data, decrypt_data,
-    create_session_token, get_current_session, require_role, require_permission
+    create_session_token, get_current_session, require_role, require_permission,
+    SESSION_COOKIE_NAME
 )
-from app.crypto_service import generate_mlkem_keypair, generate_mldsa_keypair, decapsulate_aes_key, verify_mldsa_signature
+from app.crypto_service import (
+    generate_mlkem_keypair, generate_mldsa_keypair, verify_mldsa_signature,
+    encapsulate_aes_key, decapsulate_aes_key, sign_document_hash,
+    derive_aes_key, encrypt_document, decrypt_document, sha256_hex,
+    pqc_available, PQCUnavailableError, ML_KEM_ALG, ML_DSA_ALG,
+)
 from app.email_service import send_and_log_email, retry_failed_email, send_admin_notification
-from app.user_id_service import generate_user_id
+from app.user_id_service import generate_user_id, generate_report_number
 from app.rbac import get_permissions_for_role, normalize_role
 from app.storage_service import process_and_pin_ipfs, download_file_from_s3
 
 from app.audit_service import log_admin_action
+from app.anchor_service import anchor_document
+from app.lab_catalog import (
+    get_panel, list_panels, apply_computed, interpretation_for, analytes_of,
+)
+from app.report_pdf import build_report_pdf
 
 app = FastAPI(title="PQC Hospital IAM API", version="2.0.0")
 
@@ -133,7 +154,7 @@ def login(request: LoginRequest, response: Response):
                         (user["id"], user["user_id"], "LOGIN_SUCCESS"))
             conn.commit()
             
-    response.set_cookie("aegis_access_token", token, httponly=True, secure=False, samesite="lax", path="/")
+    response.set_cookie(SESSION_COOKIE_NAME, token, httponly=True, secure=False, samesite="lax", path="/")
     
     permissions = list(get_permissions_for_role(user["role"]))
     
@@ -154,7 +175,7 @@ def logout(response: Response, session: dict = Depends(get_current_session)):
             cur.execute("INSERT INTO AuthLogs (user_id, action) VALUES (%s, %s)", (session["user_id"], "LOGOUT"))
             conn.commit()
             
-    response.delete_cookie("aegis_access_token", path="/")
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
     return {"status": "success"}
 
 @app.get("/api/auth/me")
@@ -726,7 +747,7 @@ def get_patient_dashboard_summary(session: dict = Depends(require_role("Patient"
             cur.execute("SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = 'Pending') as pending FROM LabReports WHERE patient_id = %s", (user_uuid,))
             report_stats = cur.fetchone()
             
-            cur.execute("SELECT report_name FROM LabReports WHERE patient_id = %s ORDER BY upload_date DESC LIMIT 1", (user_uuid,))
+            cur.execute("SELECT report_name, upload_date FROM LabReports WHERE patient_id = %s ORDER BY upload_date DESC LIMIT 1", (user_uuid,))
             latest_report = cur.fetchone()
             
             # Upcoming appointment
@@ -747,18 +768,39 @@ def get_patient_dashboard_summary(session: dict = Depends(require_role("Patient"
 
     return PatientDashboardSummary(
         full_name=user["full_name"],
-        user_id=user["user_id"],
-        blood_group=decrypt_data(user["blood_group_encrypted"]) if user.get("blood_group_encrypted") else None,
-        assigned_doctor=assigned_doc["full_name"] if assigned_doc else None,
-        latest_diagnosis=latest_diag["title"] if latest_diag else None,
-        current_treatment=f"{latest_rx['medicine_name']} ({latest_rx['dosage']})" if latest_rx else None,
-        latest_prescription=latest_rx["medicine_name"] if latest_rx else None,
-        total_reports=report_stats["total"],
-        pending_reports=report_stats["pending"],
-        latest_report=latest_report["report_name"] if latest_report else None,
-        upcoming_appointment={"date": str(upcoming["appointment_date"]), "time": str(upcoming["appointment_time"]), "doctor": upcoming["doctor_name"], "department": upcoming["department"]} if upcoming else None,
-        previous_visit={"date": str(previous["appointment_date"]), "doctor": previous["doctor_name"], "department": previous["department"]} if previous else None,
-        recent_activities=[{"title": a["title"], "body": a["body"], "created_at": a["created_at"].isoformat() if a["created_at"] else None} for a in activities]
+        patient_info=PatientInfoSection(
+            name=user["full_name"],
+            user_id=user["user_id"],
+            blood_group=decrypt_data(user["blood_group_encrypted"]) if user.get("blood_group_encrypted") else None,
+            assigned_doctor=assigned_doc["full_name"] if assigned_doc else None,
+        ),
+        medical_summary=MedicalSummarySection(
+            latest_diagnosis=latest_diag["title"] if latest_diag else None,
+            current_treatment=f"{latest_rx['medicine_name']} ({latest_rx['dosage']})" if latest_rx else None,
+            latest_prescription=latest_rx["medicine_name"] if latest_rx else None,
+        ),
+        reports_summary=ReportsSummarySection(
+            total=report_stats["total"],
+            pending=report_stats["pending"],
+            latest_report=latest_report["report_name"] if latest_report else None,
+            latest_report_date=latest_report["upload_date"] if latest_report else None,
+        ),
+        appointments_summary=AppointmentsSummarySection(
+            upcoming_date=upcoming["appointment_date"] if upcoming else None,
+            upcoming_time=str(upcoming["appointment_time"]) if upcoming and upcoming["appointment_time"] else None,
+            upcoming_doctor=upcoming["doctor_name"] if upcoming else None,
+            upcoming_department=upcoming["department"] if upcoming else None,
+            previous_visit_date=previous["appointment_date"] if previous else None,
+            previous_doctor=previous["doctor_name"] if previous else None,
+        ),
+        recent_activities=[
+            PatientActivityItem(
+                title=a["title"],
+                description=a["body"],
+                created_at=a["created_at"],
+            )
+            for a in activities
+        ],
     )
 
 
@@ -847,58 +889,62 @@ def get_patient_lab_report_detail(report_id: str, session: dict = Depends(requir
 
 
 @app.get("/api/patient/lab-reports/{report_id}/download")
-def download_patient_lab_report(report_id: str, session: dict = Depends(require_role("Patient"))):
+def download_patient_lab_report(report_id: str, request: Request, session: dict = Depends(require_role("Patient"))):
+    """Release the patient's own report as a decrypted PDF.
+
+    Ownership is enforced in the query itself (``patient_id = session user``),
+    so a patient cannot fetch another patient's report by guessing its id.
+    """
     user_uuid = session["user_id"]
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("""
-                SELECT lr.*, u.mlkem_private_key_encrypted, tech.mldsa_public_key 
-                FROM LabReports lr 
-                JOIN Users u ON lr.patient_id = u.id
-                LEFT JOIN Users tech ON lr.lab_tech_id = tech.id
-                WHERE lr.id = %s AND lr.patient_id = %s
-            """, (report_id, user_uuid))
-            r = cur.fetchone()
-            
-    if not r:
-        raise HTTPException(status_code=404, detail="Report not found")
-        
-    if not r.get("s3_key"):
-        raise HTTPException(status_code=400, detail="This report does not have an associated cloud file.")
-        
-    try:
-        # 1. Fetch the encrypted file from S3
-        encrypted_payload = download_file_from_s3(r["s3_key"])
-        
-        # 2. Decrypt Patient's ML-KEM private key using the AES encryption key (simulating session vault)
-        patient_mlkem_priv = decrypt_data(r["mlkem_private_key_encrypted"]) if r.get("mlkem_private_key_encrypted") else ""
-        
-        # 3. Decapsulate the AES key
-        aes_key = decapsulate_aes_key(r["encrypted_aes_key"], patient_mlkem_priv)
-        
-        # 4. Decrypt the actual payload (Mock decryption for now since upload was mock)
-        decrypted_content = encrypted_payload.decode('utf-8')
-        
-        # 5. Verify Signature
-        if r.get("digital_signature") and r.get("mldsa_public_key"):
-            is_valid = verify_mldsa_signature(r["document_hash"], r["digital_signature"], r["mldsa_public_key"])
-            if not is_valid:
-                logger.warning(f"Signature verification failed for report {report_id}")
-                
-        # 6. Audit Logging for Download
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO AdminAuditLogs (admin_user_id, action, target_user_id, details)
-                    VALUES (%s, 'PATIENT_DOWNLOADED_PQC_REPORT', %s, %s)
-                """, (session.get("public_user_id", "SYS"), user_uuid, json.dumps({"report_id": str(report_id), "s3_key": r["s3_key"]})))
-                conn.commit()
+            cur.execute(_REPORT_SELECT + " WHERE lr.id = %s AND lr.patient_id = %s",
+                        (report_id, user_uuid))
+            report = cur.fetchone()
 
-        return Response(content=decrypted_content, media_type="application/json")
-        
-    except Exception as e:
-        logger.error(f"Error decrypting lab report: {e}")
-        raise HTTPException(status_code=500, detail="Failed to decrypt the report securely.")
+        if not report:
+            raise HTTPException(status_code=404, detail="Report not found")
+
+        pdf_bytes = _decrypt_report_pdf(report)
+
+        if not verify_mldsa_signature(report.get("document_hash") or "",
+                                      report.get("digital_signature") or "",
+                                      report.get("signer_mldsa_public_key") or ""):
+            logger.warning("Releasing report %s with an unverified ML-DSA signature", report_id)
+
+        anchor_document(
+            conn, document_type="LabReport", document_id=str(report["id"]),
+            document_hash=report.get("document_hash") or "", action="PATIENT_ACCESSED_REPORT",
+            patient_id=str(user_uuid), actor_id=user_uuid,
+            actor_public_id=session.get("public_user_id"),
+            report_id_public=report.get("report_id_public"),
+        )
+        log_admin_action(
+            conn, user_uuid, session.get("public_user_id"),
+            "PATIENT_DOWNLOADED_REPORT", str(user_uuid), session.get("public_user_id"),
+            request.client.host if request and request.client else None,
+            {"report_id": str(report["id"]), "report_no": report.get("report_id_public")},
+        )
+
+    filename = f"{report.get('report_id_public') or 'report'}.pdf"
+    return Response(
+        content=pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
+@app.get("/api/patient/lab-reports/{report_id}/verify", response_model=ReportVerification)
+def verify_patient_lab_report(report_id: str, session: dict = Depends(require_role("Patient"))):
+    """Let the patient confirm their report is authentic and unaltered."""
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(_REPORT_SELECT + " WHERE lr.id = %s AND lr.patient_id = %s",
+                        (report_id, user_uuid))
+            report = cur.fetchone()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return _verify_report(report)
 
 
 @app.get("/api/patient/prescriptions")
@@ -955,6 +1001,48 @@ def get_patient_appointments(session: dict = Depends(require_role("Patient"))):
         appointment_time=str(r["appointment_time"]) if r["appointment_time"] else None,
         status=r["status"], notes=r["notes"]
     ) for r in rows]
+
+
+@app.get("/api/patient/doctors")
+def get_available_doctors(session: dict = Depends(require_role("Patient"))):
+    """List active doctors a patient can request an appointment with."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT id, full_name, specialization
+                FROM Users
+                WHERE role = 'Doctor' AND status = 'Approved'
+                ORDER BY full_name ASC
+            """)
+            rows = cur.fetchall()
+    return [AvailableDoctorItem(id=str(r["id"]), full_name=r["full_name"], specialization=r["specialization"]) for r in rows]
+
+
+@app.post("/api/patient/appointments")
+def create_patient_appointment(req: CreateAppointmentRequest, session: dict = Depends(require_role("Patient"))):
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT id, full_name FROM Users WHERE id = %s AND role = 'Doctor' AND status = 'Approved'", (req.doctor_id,))
+            doctor = cur.fetchone()
+            if not doctor:
+                raise HTTPException(status_code=404, detail="Selected doctor is not available.")
+
+            cur.execute("""
+                INSERT INTO Appointments (patient_id, doctor_id, department, appointment_date, appointment_time, status, notes)
+                VALUES (%s, %s, %s, %s, %s, 'Pending', %s)
+                RETURNING id
+            """, (user_uuid, req.doctor_id, req.department, req.appointment_date, req.appointment_time, req.notes))
+            appointment_id = cur.fetchone()["id"]
+
+            cur.execute("""
+                INSERT INTO Notifications (user_id, notification_type, title, body)
+                VALUES (%s, 'APPOINTMENT_REQUEST', 'New Appointment Request',
+                        'A patient has requested an appointment on ' || %s || ' at ' || %s || '.')
+            """, (req.doctor_id, str(req.appointment_date), req.appointment_time))
+            conn.commit()
+
+    return {"status": "success", "appointment_id": str(appointment_id), "message": f"Appointment requested with Dr. {doctor['full_name']}. Awaiting confirmation."}
 
 
 @app.get("/api/patient/notifications")
@@ -1247,21 +1335,24 @@ def get_doctor_reports(session: dict = Depends(require_role("Doctor"))):
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
-                SELECT lr.*, u.full_name as patient_name
+                SELECT lr.*, u.full_name as patient_name, u.user_id as patient_user_id
                 FROM LabReports lr
                 JOIN Users u ON lr.patient_id = u.id
-                JOIN (
-                    SELECT patient_id FROM Diagnoses WHERE doctor_id = %s
-                    UNION SELECT patient_id FROM Appointments WHERE doctor_id = %s
-                ) as assigned ON lr.patient_id = assigned.patient_id
+                WHERE lr.doctor_id = %s
+                   OR EXISTS (SELECT 1 FROM Diagnoses d
+                               WHERE d.patient_id = lr.patient_id AND d.doctor_id = %s)
+                   OR EXISTS (SELECT 1 FROM DoctorConsultations c
+                               WHERE c.patient_id = lr.patient_id AND c.doctor_id = %s)
+                   OR EXISTS (SELECT 1 FROM Appointments a
+                               WHERE a.patient_id = lr.patient_id AND a.doctor_id = %s)
                 ORDER BY lr.upload_date DESC
-            """, (user_uuid, user_uuid))
+            """, (user_uuid, user_uuid, user_uuid, user_uuid))
             rows = cur.fetchall()
     return [LabReportItem(
         id=str(r["id"]), report_name=r["report_name"], report_type=r["report_type"],
         report_id_public=r["report_id_public"], findings=r["findings"],
         normal_range=r["normal_range"], status=r["status"],
-        uploaded_by_name=r["patient_name"],  # Reusing this field for patient_name in UI
+        patient_name=r["patient_name"], patient_user_id=r.get("patient_user_id"),
         upload_date=r["upload_date"]
     ) for r in rows]
 
@@ -1367,17 +1458,176 @@ def clear_doctor_notifications(session: dict = Depends(require_role("Doctor"))):
             conn.commit()
     return {"status": "success"}
 
+@app.get("/api/doctor/lab-panels")
+def get_doctor_lab_panels(session: dict = Depends(require_role("Doctor"))):
+    """Investigations a doctor can order, so the request names a real panel."""
+    return list_panels()
+
+
 @app.post("/api/doctor/requests")
-def create_lab_test_request(req: CreateLabTestRequest, session: dict = Depends(require_role("Doctor"))):
+def create_lab_test_request(
+    req: CreateLabTestRequest,
+    request: Request,
+    session: dict = Depends(require_role("Doctor")),
+):
+    """Raise a laboratory test request against an approved patient."""
+    user_uuid = session["user_id"]
+
+    panel = get_panel(req.panel_code) if req.panel_code else None
+    if req.panel_code and not panel:
+        raise HTTPException(status_code=400, detail=f"Unknown investigation panel '{req.panel_code}'")
+    if req.priority not in ("Routine", "Urgent", "Emergency"):
+        raise HTTPException(status_code=400, detail="Priority must be Routine, Urgent or Emergency")
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT id, user_id, full_name FROM Users
+                WHERE role = 'Patient' AND status = 'Approved'
+                  AND (id::text = %s OR user_id = %s)
+            """, (req.patient_id, req.patient_id))
+            patient = cur.fetchone()
+            if not patient:
+                raise HTTPException(status_code=404, detail="Patient not found or not an approved patient account")
+
+            test_name = req.test_name or (panel["name"] if panel else None)
+            if not test_name:
+                raise HTTPException(status_code=400, detail="A test name or panel must be supplied")
+
+            cur.execute("""
+                INSERT INTO LabTestRequests
+                    (patient_id, doctor_id, test_name, panel_code, priority, clinical_notes, status)
+                VALUES (%s, %s, %s, %s, %s, %s, 'Pending')
+                RETURNING id, requested_date
+            """, (patient["id"], user_uuid, test_name,
+                  panel["code"] if panel else None, req.priority, req.clinical_notes))
+            row = cur.fetchone()
+            conn.commit()
+
+        log_admin_action(
+            conn, user_uuid, session.get("public_user_id"),
+            "LAB_TEST_REQUESTED", str(patient["id"]), patient["user_id"],
+            request.client.host if request and request.client else None,
+            {"request_id": str(row["id"]), "test": test_name,
+             "panel": panel["code"] if panel else None, "priority": req.priority},
+        )
+
+    return {
+        "status": "success",
+        "request_id": str(row["id"]),
+        "patient_user_id": patient["user_id"],
+        "test_name": test_name,
+        "panel_code": panel["code"] if panel else None,
+        "priority": req.priority,
+        "requested_date": row["requested_date"],
+    }
+
+
+@app.get("/api/doctor/requests")
+def get_doctor_lab_requests(
+    status_filter: Optional[str] = None,
+    session: dict = Depends(require_role("Doctor")),
+):
+    """Test requests this doctor raised, with the resulting report once filed."""
+    user_uuid = session["user_id"]
+    query = """
+        SELECT r.*, p.full_name AS patient_name, p.user_id AS patient_user_id,
+               lr.id AS report_id, lr.report_id_public AS report_no
+        FROM LabTestRequests r
+        JOIN Users p ON r.patient_id = p.id
+        LEFT JOIN LabReports lr ON lr.lab_request_id = r.id
+        WHERE r.doctor_id = %s
+    """
+    params: list = [user_uuid]
+    if status_filter:
+        query += " AND r.status = %s"
+        params.append(status_filter)
+    query += " ORDER BY r.requested_date DESC"
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+    return [LabTestRequestItem(
+        id=str(r["id"]), patient_id=str(r["patient_id"]), patient_name=r["patient_name"],
+        patient_user_id=r["patient_user_id"], doctor_id=str(user_uuid),
+        test_name=r["test_name"], panel_code=r.get("panel_code"),
+        priority=r["priority"], status=r["status"], clinical_notes=r["clinical_notes"],
+        requested_date=r["requested_date"],
+        report_id=str(r["report_id"]) if r.get("report_id") else None,
+        report_no=r.get("report_no"),
+    ) for r in rows]
+
+
+def _doctor_may_read_report(cur, doctor_uuid: str, report_id: str) -> Optional[dict]:
+    """
+    Fetch a report only if this doctor is entitled to it.
+
+    Entitlement means the doctor either requested the investigation or has an
+    existing clinical relationship with the patient (diagnosis, consultation or
+    appointment). Anything else returns nothing, so an unrelated doctor cannot
+    read a report by id.
+    """
+    cur.execute(_REPORT_SELECT + """
+        WHERE lr.id = %s
+          AND (
+            lr.doctor_id = %s
+            OR EXISTS (SELECT 1 FROM Diagnoses d
+                        WHERE d.patient_id = lr.patient_id AND d.doctor_id = %s)
+            OR EXISTS (SELECT 1 FROM DoctorConsultations c
+                        WHERE c.patient_id = lr.patient_id AND c.doctor_id = %s)
+            OR EXISTS (SELECT 1 FROM Appointments a
+                        WHERE a.patient_id = lr.patient_id AND a.doctor_id = %s)
+          )
+    """, (report_id, doctor_uuid, doctor_uuid, doctor_uuid, doctor_uuid))
+    return cur.fetchone()
+
+
+@app.get("/api/doctor/reports/{report_id}/download")
+def download_doctor_lab_report(report_id: str, request: Request, session: dict = Depends(require_role("Doctor"))):
+    """Release a report as PDF to a doctor entitled to read it."""
     user_uuid = session["user_id"]
     with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO LabTestRequests (patient_id, doctor_id, test_name, priority, clinical_notes, status)
-                VALUES (%s, %s, %s, %s, %s, 'Pending') RETURNING id
-            """, (req.patient_id, user_uuid, req.test_name, req.priority, req.clinical_notes))
-            conn.commit()
-    return {"status": "success"}
+        with conn.cursor(row_factory=dict_row) as cur:
+            report = _doctor_may_read_report(cur, user_uuid, report_id)
+
+        if not report:
+            raise HTTPException(status_code=404, detail="Report not found or not authorised")
+
+        pdf_bytes = _decrypt_report_pdf(report)
+
+        anchor_document(
+            conn, document_type="LabReport", document_id=str(report["id"]),
+            document_hash=report.get("document_hash") or "", action="DOCTOR_ACCESSED_REPORT",
+            patient_id=str(report["patient_id"]), actor_id=user_uuid,
+            actor_public_id=session.get("public_user_id"),
+            report_id_public=report.get("report_id_public"),
+        )
+        log_admin_action(
+            conn, user_uuid, session.get("public_user_id"),
+            "DOCTOR_DOWNLOADED_REPORT", str(report["patient_id"]), None,
+            request.client.host if request and request.client else None,
+            {"report_id": str(report["id"]), "report_no": report.get("report_id_public")},
+        )
+
+    filename = f"{report.get('report_id_public') or 'report'}.pdf"
+    return Response(
+        content=pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
+@app.get("/api/doctor/reports/{report_id}/verify", response_model=ReportVerification)
+def verify_doctor_lab_report(report_id: str, session: dict = Depends(require_role("Doctor"))):
+    """Verify a report's digest and post-quantum signature."""
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            report = _doctor_may_read_report(cur, user_uuid, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found or not authorised")
+    return _verify_report(report)
 
 # ─── Lab Technician Dashboard Endpoints ────────────────────────────────────
 
@@ -1434,41 +1684,131 @@ def get_lab_tech_dashboard_summary(session: dict = Depends(require_role("Lab Tec
 
 @app.get("/api/lab-tech/requests")
 def get_lab_test_requests(status: Optional[str] = None, session: dict = Depends(require_role("Lab Technician"))):
+    """Test requests queue. Includes the panel so the correct form can be opened."""
+    query = """
+        SELECT r.*, p.full_name as patient_name, p.user_id as patient_user_id,
+               d.full_name as doctor_name, d.user_id as doctor_user_id,
+               lr.id AS report_id, lr.report_id_public AS report_no
+        FROM LabTestRequests r
+        JOIN Users p ON r.patient_id = p.id
+        LEFT JOIN Users d ON r.doctor_id = d.id
+        LEFT JOIN LabReports lr ON lr.lab_request_id = r.id
+    """
+    params: list = []
+    if status:
+        query += " WHERE r.status = %s"
+        params.append(status)
+    query += " ORDER BY CASE r.priority WHEN 'Emergency' THEN 0 WHEN 'Urgent' THEN 1 ELSE 2 END, r.requested_date DESC"
+
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            query = """
-                SELECT r.*, p.full_name as patient_name, p.user_id as patient_user_id, d.full_name as doctor_name
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+    return [LabTestRequestItem(
+        id=str(r["id"]), patient_id=str(r["patient_id"]), patient_name=r["patient_name"],
+        patient_user_id=r["patient_user_id"],
+        doctor_id=str(r["doctor_id"]) if r.get("doctor_id") else None,
+        doctor_name=r["doctor_name"], doctor_user_id=r.get("doctor_user_id"),
+        test_name=r["test_name"], panel_code=r.get("panel_code"),
+        priority=r["priority"], status=r["status"],
+        clinical_notes=r["clinical_notes"], requested_date=r["requested_date"],
+        report_id=str(r["report_id"]) if r.get("report_id") else None,
+        report_no=r.get("report_no"),
+    ) for r in rows]
+
+
+@app.get("/api/lab-tech/requests/{request_id}")
+def get_lab_test_request_detail(request_id: str, session: dict = Depends(require_role("Lab Technician"))):
+    """
+    One request with the patient context needed to fill its report.
+
+    Patient demographics are returned from the record so the technician never
+    re-types them, which is also what keeps the printed report consistent with
+    the patient file.
+    """
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT r.*, p.id AS pid, p.user_id AS patient_user_id, p.full_name AS patient_name,
+                       p.gender, p.date_of_birth_encrypted, p.blood_group_encrypted,
+                       p.mlkem_public_key,
+                       d.full_name AS doctor_name, d.user_id AS doctor_user_id, d.specialization,
+                       lr.id AS report_id, lr.report_id_public AS report_no
                 FROM LabTestRequests r
                 JOIN Users p ON r.patient_id = p.id
                 LEFT JOIN Users d ON r.doctor_id = d.id
-            """
-            params = []
-            if status:
-                query += " WHERE r.status = %s"
-                params.append(status)
-            query += " ORDER BY r.requested_date DESC"
-            
-            cur.execute(query, params)
-            rows = cur.fetchall()
-            
-    return [LabTestRequestItem(
-        id=str(r["id"]), patient_id=str(r["patient_id"]), patient_name=r["patient_name"],
-        patient_user_id=r["patient_user_id"], doctor_name=r["doctor_name"],
-        test_name=r["test_name"], priority=r["priority"], status=r["status"],
-        clinical_notes=r["clinical_notes"], requested_date=r["requested_date"]
-    ) for r in rows]
+                LEFT JOIN LabReports lr ON lr.lab_request_id = r.id
+                WHERE r.id = %s
+            """, (request_id,))
+            r = cur.fetchone()
+
+    if not r:
+        raise HTTPException(status_code=404, detail="Test request not found")
+
+    return {
+        "id": str(r["id"]),
+        "test_name": r["test_name"],
+        "panel_code": r.get("panel_code"),
+        "priority": r["priority"],
+        "status": r["status"],
+        "clinical_notes": r["clinical_notes"],
+        "requested_date": r["requested_date"],
+        "report_id": str(r["report_id"]) if r.get("report_id") else None,
+        "report_no": r.get("report_no"),
+        "patient": {
+            "id": str(r["pid"]),
+            "user_id": r["patient_user_id"],
+            "full_name": r["patient_name"],
+            "gender": r.get("gender"),
+            "date_of_birth": decrypt_data(r["date_of_birth_encrypted"]) if r.get("date_of_birth_encrypted") else None,
+            "age_display": _age_display(decrypt_data(r["date_of_birth_encrypted"]) if r.get("date_of_birth_encrypted") else None),
+            "blood_group": decrypt_data(r["blood_group_encrypted"]) if r.get("blood_group_encrypted") else None,
+            "pqc_ready": bool(r.get("mlkem_public_key")),
+        },
+        "doctor": {
+            "full_name": r.get("doctor_name"),
+            "user_id": r.get("doctor_user_id"),
+            "specialization": r.get("specialization"),
+        } if r.get("doctor_name") else None,
+    }
+
 
 @app.post("/api/lab-tech/requests/{request_id}/status")
 def update_lab_test_request_status(request_id: str, payload: dict = Body(...), session: dict = Depends(require_role("Lab Technician"))):
+    """Advance a request through the queue: Accepted → In Progress → Completed.
+
+    'Completed' is set by finalising a report, not by hand, so the status can
+    never claim a report exists when none was filed.
+    """
     new_status = payload.get("status")
-    if new_status not in ['Accepted', 'In Progress', 'Completed']:
-        raise HTTPException(status_code=400, detail="Invalid status")
-        
+    if new_status not in ("Accepted", "In Progress"):
+        raise HTTPException(
+            status_code=400,
+            detail="Status must be 'Accepted' or 'In Progress'. A request is completed by finalising its report.",
+        )
+
+    user_uuid = session["user_id"]
     with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE LabTestRequests SET status = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (new_status, request_id))
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT status FROM LabTestRequests WHERE id = %s", (request_id,))
+            existing = cur.fetchone()
+            if not existing:
+                raise HTTPException(status_code=404, detail="Test request not found")
+            if existing["status"] == "Completed":
+                raise HTTPException(status_code=409, detail="This request is already completed.")
+
+            cur.execute("""
+                UPDATE LabTestRequests
+                SET status = %s,
+                    accepted_by = COALESCE(accepted_by, %s),
+                    accepted_at = COALESCE(accepted_at, CURRENT_TIMESTAMP),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (new_status, user_uuid, request_id))
             conn.commit()
-    return {"status": "success"}
+    return {"status": "success", "new_status": new_status}
+
 
 @app.get("/api/lab-tech/patients/search")
 def search_patients(q: str, session: dict = Depends(require_role("Lab Technician"))):
@@ -1486,92 +1826,388 @@ def search_patients(q: str, session: dict = Depends(require_role("Lab Technician
             
     return [{"id": str(r["id"]), "user_id": r["user_id"], "full_name": r["full_name"], "email": r["email"], "gender": r["gender"]} for r in rows]
 
-import hashlib
-import os
-import json
+@app.get("/api/lab-tech/report-templates")
+def get_report_templates(session: dict = Depends(require_role("Lab Technician"))):
+    """Catalogue of investigations the technician can report on."""
+    return list_panels()
 
-@app.post("/api/lab-tech/reports/create")
-def create_structured_lab_report(req: CreateStructuredLabReportRequest, session: dict = Depends(require_role("Lab Technician"))):
-    user_uuid = session["user_id"]
-    
-    # Process report with full PQC pipeline
-    structured_content = json.dumps(req.structured_data, sort_keys=True)
-    document_hash = hashlib.sha256(structured_content.encode('utf-8')).hexdigest()
-    
-    # Mock AES key generation and encryption
-    aes_key = os.urandom(32).hex()
-    encrypted_payload = f"ENCRYPTED_{document_hash}_{aes_key[:10]}" # Payload bytes
-    
-    # Upload encrypted payload to AWS S3 & Format/Pin in IPFS format (Multihash CIDv0)
-    ipfs_cid, ipfs_gateway_url, s3_key = process_and_pin_ipfs(encrypted_payload.encode('utf-8'), req.report_name)
+
+@app.get("/api/lab-tech/report-templates/{panel_code}")
+def get_report_template(panel_code: str, session: dict = Depends(require_role("Lab Technician"))):
+    """Full form definition for one investigation, used to render its data-entry form."""
+    panel = get_panel(panel_code)
+    if not panel:
+        raise HTTPException(status_code=404, detail="Unknown investigation panel")
+    return panel
+
+
+def _age_display(dob_text: Optional[str]) -> str:
+    """Render a date of birth as the 'NN Y' age laboratories print."""
+    if not dob_text:
+        return ""
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
+        try:
+            born = datetime.strptime(dob_text.strip(), fmt).date()
+            break
+        except ValueError:
+            continue
+    else:
+        return ""
+    today = date.today()
+    years = today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+    return f"{years} Y"
+
+
+def _load_report_subject(cur, req: CreateStructuredLabReportRequest, tech_uuid: str) -> dict:
+    """
+    Resolve which patient, doctor and request this report belongs to.
+
+    Binding is deliberately strict. When a request_id is supplied the patient
+    and referring doctor come from that request and nothing else, so a report
+    cannot be filed against the wrong patient. A patient_id is honoured only
+    for a direct walk-in report, and must resolve to exactly one approved
+    patient — never a "first patient we could find" fallback.
+    """
+    if req.request_id:
+        cur.execute("""
+            SELECT r.id AS request_id, r.status, r.test_name, r.panel_code AS requested_panel,
+                   r.requested_date, r.doctor_id,
+                   p.id AS patient_id, p.user_id AS patient_user_id, p.full_name AS patient_name,
+                   p.gender, p.date_of_birth_encrypted, p.blood_group_encrypted,
+                   p.mlkem_public_key,
+                   d.full_name AS doctor_name, d.user_id AS doctor_user_id, d.specialization
+            FROM LabTestRequests r
+            JOIN Users p ON r.patient_id = p.id
+            LEFT JOIN Users d ON r.doctor_id = d.id
+            WHERE r.id = %s
+        """, (req.request_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Test request not found")
+        if row["status"] == "Completed":
+            raise HTTPException(status_code=409, detail="A report has already been filed for this request.")
+
+        cur.execute("SELECT id FROM LabReports WHERE lab_request_id = %s", (req.request_id,))
+        if cur.fetchone():
+            raise HTTPException(status_code=409, detail="A report has already been filed for this request.")
+        return row
+
+    cur.execute("""
+        SELECT NULL::uuid AS request_id, NULL AS status, NULL AS test_name,
+               NULL AS requested_panel, NULL AS requested_date, NULL::uuid AS doctor_id,
+               p.id AS patient_id, p.user_id AS patient_user_id, p.full_name AS patient_name,
+               p.gender, p.date_of_birth_encrypted, p.blood_group_encrypted,
+               p.mlkem_public_key,
+               NULL AS doctor_name, NULL AS doctor_user_id, NULL AS specialization
+        FROM Users p
+        WHERE p.role = 'Patient' AND p.status = 'Approved'
+          AND (p.id::text = %s OR p.user_id = %s)
+    """, (req.patient_id, req.patient_id))
+    rows = cur.fetchall()
+    if not rows:
+        raise HTTPException(status_code=404, detail="Patient not found or not an approved patient account")
+    if len(rows) > 1:
+        raise HTTPException(status_code=409, detail="Patient identifier is ambiguous")
+    return rows[0]
+
+
+@app.post("/api/lab-tech/reports/create", response_model=FinalizedReportResponse)
+def create_structured_lab_report(
+    req: CreateStructuredLabReportRequest,
+    request: Request,
+    session: dict = Depends(require_role("Lab Technician")),
+):
+    """
+    Finalise a laboratory report.
+
+    Runs the full pipeline: render the hospital-format PDF, hash it, encrypt it
+    under a fresh AES-256 key, protect that key with the patient's ML-KEM
+    public key, sign the digest with the technician's ML-DSA private key, store
+    the ciphertext in cloud storage, anchor the digest for audit, and notify
+    the patient and referring doctor. Once written the report is locked.
+    """
+    tech_uuid = session["user_id"]
+
+    panel = get_panel(req.panel_code)
+    if not panel:
+        raise HTTPException(status_code=400, detail=f"Unknown investigation panel '{req.panel_code}'")
+
+    if not pqc_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Post-quantum cryptography is unavailable; refusing to issue an unsigned medical report.",
+        )
+
+    # Keep only the fields this panel actually defines, then fill in the values
+    # a real analyser derives rather than measures.
+    if panel.get("layout") == "narrative":
+        allowed = {f["key"] for s in panel.get("sections", []) for f in s.get("fields", [])}
+        allowed |= {m["key"] for m in panel.get("measurements", [])}
+    else:
+        allowed = {a["key"] for a in analytes_of(panel)}
+    values = {k: v for k, v in (req.values or {}).items() if k in allowed and str(v).strip() != ""}
+    if not values:
+        raise HTTPException(status_code=400, detail="No results were supplied for this investigation.")
+    values = apply_computed(panel["code"], values)
 
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            # Lookup patient by UUID, public user_id, or fallback to first approved patient
+            subject = _load_report_subject(cur, req, tech_uuid)
+
+            cur.execute(
+                "SELECT id, user_id, full_name, mldsa_private_key_encrypted FROM Users WHERE id = %s",
+                (tech_uuid,),
+            )
+            technician = cur.fetchone()
+
+            patient_uuid = subject["patient_id"]
+            doctor_uuid = subject["doctor_id"]
+
+            if not subject.get("mlkem_public_key"):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Patient has no ML-KEM public key on record; report cannot be secured.",
+                )
+            if not technician or not technician.get("mldsa_private_key_encrypted"):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Technician has no ML-DSA signing key on record; report cannot be signed.",
+                )
+
+            report_no, accession = generate_report_number()
+            reported_at = datetime.now(timezone.utc)
+            collected_at = req.collected_at or subject.get("requested_date")
+
+            doctor_block = None
+            if subject.get("doctor_name"):
+                display = f"Dr. {subject['doctor_name']}"
+                if subject.get("specialization"):
+                    display += f", {subject['specialization']}"
+                doctor_block = {"display": display, "user_id": subject.get("doctor_user_id")}
+
+            patient_block = {
+                "full_name": subject["patient_name"],
+                "user_id": subject["patient_user_id"],
+                "gender": subject.get("gender") or "",
+                "age_display": _age_display(decrypt_data(subject["date_of_birth_encrypted"])
+                                            if subject.get("date_of_birth_encrypted") else None),
+                "blood_group": decrypt_data(subject["blood_group_encrypted"])
+                               if subject.get("blood_group_encrypted") else None,
+            }
+
+            interpretation = interpretation_for(panel["code"], values, patient_block["gender"])
+
+            # 1. Render the hospital-format document.
+            pdf_bytes = build_report_pdf(
+                panel=panel, values=values,
+                patient=patient_block, doctor=doctor_block,
+                technician={"full_name": technician["full_name"], "user_id": technician["user_id"]},
+                report_no=report_no, accession=accession,
+                collected_at=collected_at, reported_at=reported_at,
+                remarks=req.remarks, interpretation=interpretation,
+                signature_algorithm=ML_DSA_ALG, kem_algorithm=ML_KEM_ALG,
+            )
+
+            # 2-4. Hash → AES-256-GCM encrypt → protect the AES key with ML-KEM
+            #      → sign the digest with ML-DSA.
+            try:
+                document_hash = sha256_hex(pdf_bytes)
+                kem_ciphertext, shared_secret = encapsulate_aes_key(subject["mlkem_public_key"])
+                aes_key = derive_aes_key(shared_secret)
+                encrypted = encrypt_document(pdf_bytes, aes_key)
+                signature = sign_document_hash(document_hash, technician["mldsa_private_key_encrypted"])
+            except PQCUnavailableError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+            # 5. Store only the ciphertext in cloud storage.
+            ipfs_cid, ipfs_gateway_url, s3_key = process_and_pin_ipfs(
+                encrypted["ciphertext"].encode("utf-8"), f"{report_no}_{panel['code']}"
+            )
+
+            # 6. Persist, permanently linked to request + patient + doctor + technician.
             cur.execute("""
-                SELECT id, mlkem_public_key, mldsa_private_key_encrypted FROM Users 
-                WHERE id::text = %s OR user_id = %s OR role = 'Patient'
-                ORDER BY (CASE WHEN id::text = %s OR user_id = %s THEN 0 ELSE 1 END), created_at ASC LIMIT 1
-            """, (req.patient_id, req.patient_id, req.patient_id, req.patient_id))
-            patient = cur.fetchone()
-            
-            cur.execute("SELECT mldsa_private_key_encrypted FROM Users WHERE id = %s", (user_uuid,))
-            lab_tech = cur.fetchone()
-            
-            if not patient:
-                raise HTTPException(status_code=404, detail="Patient not found")
-                
-            patient_uuid = patient["id"]
-                
-            # Mock Key Encapsulation (wrapping AES key using patient's ML-KEM public key)
-            encrypted_aes_key = f"WRAPPED_BY_{patient['mlkem_public_key'][:10]}_{aes_key[:10]}" if patient.get('mlkem_public_key') else f"UNWRAPPED_{aes_key[:10]}"
-            
-            # Mock Digital Signature
-            digital_signature = f"SIGNED_BY_{user_uuid[:8]}_{document_hash[:10]}"
-            
-            blockchain_tx_hash = f"0x{hashlib.sha256(os.urandom(32)).hexdigest()}"
-            
-            # Insert into LabReports with IPFS CID & AWS S3 Key
-            cur.execute("""
-                INSERT INTO LabReports (patient_id, uploaded_by, lab_tech_id, report_name, report_type, findings, normal_range, structured_data, document_hash, encrypted_aes_key, digital_signature, blockchain_tx_hash, ipfs_cid, s3_key, status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'Completed') RETURNING id
-            """, (patient_uuid, user_uuid, user_uuid, req.report_name, req.report_type, req.findings, req.normal_range, json.dumps(req.structured_data), document_hash, encrypted_aes_key, digital_signature, blockchain_tx_hash, ipfs_cid, s3_key))
+                INSERT INTO LabReports (
+                    patient_id, uploaded_by, lab_tech_id, doctor_id, lab_request_id,
+                    report_name, report_type, panel_code, report_id_public, accession_number,
+                    structured_data, interpretation, remarks,
+                    document_hash, encrypted_aes_key, encryption_nonce, encryption_tag,
+                    encrypted_document, digital_signature, kem_algorithm, signature_algorithm,
+                    ipfs_cid, s3_key, collected_at, finalized_at, is_locked, status
+                ) VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s, TRUE, 'Completed'
+                ) RETURNING id
+            """, (
+                patient_uuid, tech_uuid, tech_uuid, doctor_uuid, subject.get("request_id"),
+                panel["name"], panel["db_report_type"], panel["code"], report_no, accession,
+                json.dumps(values), interpretation, req.remarks,
+                document_hash, kem_ciphertext, encrypted["nonce"], encrypted["tag"],
+                encrypted["ciphertext"], signature, ML_KEM_ALG, ML_DSA_ALG,
+                ipfs_cid, s3_key, collected_at, reported_at,
+            ))
             report_id = cur.fetchone()["id"]
-            
-            # Audit log
-            cur.execute("""
-                INSERT INTO AdminAuditLogs (admin_user_id, action, target_user_id, details)
-                VALUES (%s, 'LAB_REPORT_CREATED_BLOCKCHAIN_IPFS', %s, %s)
-            """, (session.get("public_user_id", "SYS"), patient_uuid, json.dumps({"report_id": str(report_id), "tx_hash": blockchain_tx_hash, "ipfs_cid": ipfs_cid, "s3_key": s3_key})))
-            
-            # Create notification for Patient
+
+            if subject.get("request_id"):
+                cur.execute("""
+                    UPDATE LabTestRequests
+                    SET status = 'Completed', completed_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (subject["request_id"],))
+
+            # 7. Notify the patient and the requesting doctor. Neither message
+            #    carries a result value — only that a report is available.
+            notified: list[str] = []
             cur.execute("""
                 INSERT INTO Notifications (user_id, notification_type, title, body)
-                VALUES (%s, 'REPORT_READY', 'New Lab Report Available (IPFS Pinned)', 'Your lab report for ' || %s || ' is now available on IPFS and AWS Cloud.')
-            """, (patient_uuid, req.report_name))
-            
-            # Create notification for Doctor (find assigned doctor)
-            cur.execute("""
-                SELECT doctor_id FROM Diagnoses WHERE patient_id = %s ORDER BY visit_date DESC LIMIT 1
-            """, (patient_uuid,))
-            doc_row = cur.fetchone()
-            if doc_row and doc_row["doctor_id"]:
+                VALUES (%s, 'REPORT_READY', %s, %s)
+            """, (
+                patient_uuid, "New laboratory report available",
+                f"Your {panel['short_name']} report ({report_no}) is now available in your medical records.",
+            ))
+            notified.append(subject["patient_user_id"])
+
+            if doctor_uuid:
                 cur.execute("""
                     INSERT INTO Notifications (user_id, notification_type, title, body)
-                    VALUES (%s, 'REPORT_READY', 'Patient Report Ready', 'Lab report ' || %s || ' for your patient is ready on IPFS.')
-                """, (doc_row["doctor_id"], req.report_name))
-                
+                    VALUES (%s, 'REPORT_READY', %s, %s)
+                """, (
+                    doctor_uuid, "Requested laboratory report ready",
+                    f"The {panel['short_name']} you requested for patient "
+                    f"{subject['patient_user_id']} is ready for review (Report {report_no}).",
+                ))
+                notified.append(subject.get("doctor_user_id"))
+
             conn.commit()
 
-            
-    return {
-        "status": "success",
-        "report_id": str(report_id),
-        "blockchain_tx_hash": blockchain_tx_hash,
-        "ipfs_cid": ipfs_cid,
-        "ipfs_gateway_url": ipfs_gateway_url,
-        "s3_key": s3_key
-    }
+        # 8. Anchor the digest for the audit trail (identifiers + hash only).
+        anchor = anchor_document(
+            conn,
+            document_type="LabReport", document_id=str(report_id),
+            document_hash=document_hash, action="REPORT_FINALIZED",
+            patient_id=str(patient_uuid), actor_id=tech_uuid,
+            actor_public_id=session.get("public_user_id"), report_id_public=report_no,
+        )
+
+        with conn.cursor() as cur:
+            cur.execute("UPDATE LabReports SET blockchain_tx_hash = %s WHERE id = %s",
+                        (anchor["tx_hash"], report_id))
+            conn.commit()
+
+        log_admin_action(
+            conn, tech_uuid, session.get("public_user_id"),
+            "LAB_REPORT_FINALIZED", str(patient_uuid), subject["patient_user_id"],
+            request.client.host if request and request.client else None,
+            {"report_id": str(report_id), "report_no": report_no, "panel": panel["code"],
+             "document_hash": document_hash, "tx_hash": anchor["tx_hash"]},
+        )
+
+    return FinalizedReportResponse(
+        status="success",
+        report_id=str(report_id), report_no=report_no, accession=accession,
+        panel_code=panel["code"], patient_user_id=subject["patient_user_id"],
+        document_hash=document_hash,
+        signature_algorithm=ML_DSA_ALG, kem_algorithm=ML_KEM_ALG,
+        blockchain_tx_hash=anchor["tx_hash"], anchored_on=anchor["anchored_on"],
+        ipfs_cid=ipfs_cid, s3_key=s3_key,
+        notified=[n for n in notified if n],
+    )
+
+
+def _decrypt_report_pdf(report: dict) -> bytes:
+    """
+    Recover the plaintext PDF for an authorised reader.
+
+    The AES key is released only by decapsulating the stored ML-KEM ciphertext
+    with the patient's private key, so possession of the ciphertext alone is
+    not enough. GCM's tag check then proves the stored bytes were not altered.
+    """
+    if not report.get("encrypted_document"):
+        raise HTTPException(status_code=404, detail="No encrypted document is stored for this report.")
+    if not report.get("mlkem_private_key_encrypted"):
+        raise HTTPException(status_code=409, detail="Patient decryption key unavailable.")
+
+    try:
+        shared_secret = decapsulate_aes_key(
+            report["encrypted_aes_key"], report["mlkem_private_key_encrypted"]
+        )
+        aes_key = derive_aes_key(shared_secret)
+        pdf_bytes = decrypt_document(
+            report["encrypted_document"], aes_key,
+            report["encryption_nonce"], report["encryption_tag"],
+        )
+    except PQCUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        # GCM authentication failed: the stored ciphertext does not match its tag.
+        logger.error("Integrity failure decrypting report %s: %s", report.get("id"), exc)
+        raise HTTPException(
+            status_code=409,
+            detail="Report failed its integrity check and was not released.",
+        ) from exc
+    except Exception as exc:
+        logger.error("Failed to decrypt report %s: %s", report.get("id"), exc)
+        raise HTTPException(status_code=500, detail="Unable to decrypt this report.") from exc
+
+    if sha256_hex(pdf_bytes) != report.get("document_hash"):
+        raise HTTPException(
+            status_code=409,
+            detail="Report digest does not match the recorded hash; release withheld.",
+        )
+    return pdf_bytes
+
+
+def _verify_report(report: dict) -> ReportVerification:
+    """Check a stored report's digest and ML-DSA signature."""
+    hash_matches = False
+    detail = "Signature could not be verified."
+
+    try:
+        pdf_bytes = _decrypt_report_pdf(report)
+        hash_matches = sha256_hex(pdf_bytes) == report.get("document_hash")
+    except HTTPException as exc:
+        detail = str(exc.detail)
+
+    signature_valid = verify_mldsa_signature(
+        report.get("document_hash") or "",
+        report.get("digital_signature") or "",
+        report.get("signer_mldsa_public_key") or "",
+    )
+
+    if hash_matches and signature_valid:
+        detail = ("Document digest matches and the ML-DSA signature is valid. "
+                  "The report is authentic and unaltered.")
+    elif hash_matches and not signature_valid:
+        detail = "Document is intact but its signature could not be validated."
+
+    return ReportVerification(
+        report_id=str(report["id"]), report_no=report.get("report_id_public"),
+        document_hash=report.get("document_hash"),
+        hash_matches=hash_matches, signature_valid=signature_valid,
+        signature_algorithm=report.get("signature_algorithm"),
+        kem_algorithm=report.get("kem_algorithm"),
+        signed_by=report.get("signer_name"),
+        blockchain_tx_hash=report.get("blockchain_tx_hash"),
+        anchored_on=report.get("anchored_on"),
+        verified_at=datetime.now(timezone.utc), detail=detail,
+    )
+
+
+_REPORT_SELECT = """
+    SELECT lr.*, u.mlkem_private_key_encrypted,
+           tech.mldsa_public_key AS signer_mldsa_public_key,
+           tech.full_name AS signer_name,
+           (SELECT anchored_on FROM DocumentAnchors
+             WHERE document_id = lr.id ORDER BY created_at DESC LIMIT 1) AS anchored_on
+    FROM LabReports lr
+    JOIN Users u ON lr.patient_id = u.id
+    LEFT JOIN Users tech ON lr.lab_tech_id = tech.id
+"""
+
 
 @app.get("/api/lab-tech/reports")
 def get_lab_tech_reports(session: dict = Depends(require_role("Lab Technician"))):

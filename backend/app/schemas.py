@@ -1,6 +1,11 @@
 from datetime import datetime, date
 from typing import Any, Optional
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+
+# Roles a member of the public may request during self-registration.
+# 'Administrator' is deliberately excluded: admin accounts are provisioned
+# out-of-band (seed_admin.py), never through the public registration form.
+SELF_REGISTERABLE_ROLES = {"Patient", "Doctor", "Nurse", "Lab Technician"}
 
 class RegistrationRequest(BaseModel):
     full_name: str
@@ -12,6 +17,31 @@ class RegistrationRequest(BaseModel):
     date_of_birth: str # Format: YYYY-MM-DD
     blood_group: Optional[str] = None
     specialization: Optional[str] = None
+
+    @field_validator("role")
+    @classmethod
+    def role_must_be_self_registerable(cls, v: str) -> str:
+        normalized = v.strip().title() if v else v
+        # 'Lab Technician'.title() is already correct; guard the rest explicitly.
+        if normalized not in SELF_REGISTERABLE_ROLES:
+            raise ValueError(
+                "Invalid role. Choose one of: " + ", ".join(sorted(SELF_REGISTERABLE_ROLES))
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def enforce_role_specific_fields(self):
+        # Specialization is a clinical field that only applies to Doctors.
+        if self.role != "Doctor":
+            self.specialization = None
+        elif not (self.specialization or "").strip():
+            raise ValueError("Specialization is required for the Doctor role.")
+
+        # Blood group is only collected for Patients.
+        if self.role != "Patient":
+            self.blood_group = None
+
+        return self
 
 class LoginRequest(BaseModel):
     user_id: str
@@ -133,20 +163,52 @@ class PatientProfile(BaseModel):
     created_at: Optional[datetime] = None
     approved_at: Optional[datetime] = None
 
-class PatientDashboardSummary(BaseModel):
-    full_name: str
+# The patient dashboard groups its cards into sections; the response is nested
+# to match those cards one-for-one so the UI never has to reshape the payload.
+class PatientInfoSection(BaseModel):
+    name: str
     user_id: Optional[str] = None
     blood_group: Optional[str] = None
     assigned_doctor: Optional[str] = None
+
+
+class MedicalSummarySection(BaseModel):
     latest_diagnosis: Optional[str] = None
     current_treatment: Optional[str] = None
     latest_prescription: Optional[str] = None
-    total_reports: int = 0
-    pending_reports: int = 0
+
+
+class ReportsSummarySection(BaseModel):
+    total: int = 0
+    pending: int = 0
     latest_report: Optional[str] = None
-    upcoming_appointment: Optional[dict] = None
-    previous_visit: Optional[dict] = None
-    recent_activities: list = []
+    latest_report_date: Optional[datetime] = None
+
+
+class AppointmentsSummarySection(BaseModel):
+    upcoming_date: Optional[date] = None
+    upcoming_time: Optional[str] = None
+    upcoming_doctor: Optional[str] = None
+    upcoming_department: Optional[str] = None
+    previous_visit_date: Optional[date] = None
+    previous_doctor: Optional[str] = None
+
+
+class PatientActivityItem(BaseModel):
+    title: Optional[str] = None
+    # 'description' mirrors the notification body; the dashboard timeline renders
+    # this field directly.
+    description: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class PatientDashboardSummary(BaseModel):
+    full_name: str
+    patient_info: PatientInfoSection
+    medical_summary: MedicalSummarySection
+    reports_summary: ReportsSummarySection
+    appointments_summary: AppointmentsSummarySection
+    recent_activities: list[PatientActivityItem] = []
 
 class DiagnosisRecord(BaseModel):
     id: str
@@ -168,6 +230,8 @@ class LabReportItem(BaseModel):
     normal_range: Optional[str] = None
     status: str
     uploaded_by_name: Optional[str] = None
+    patient_name: Optional[str] = None
+    patient_user_id: Optional[str] = None
     upload_date: Optional[datetime] = None
 
 class PrescriptionRecord(BaseModel):
@@ -197,6 +261,25 @@ class AppointmentRecord(BaseModel):
     appointment_time: Optional[str] = None
     status: str
     notes: Optional[str] = None
+
+class AvailableDoctorItem(BaseModel):
+    id: str
+    full_name: str
+    specialization: Optional[str] = None
+
+class CreateAppointmentRequest(BaseModel):
+    doctor_id: str
+    department: str
+    appointment_date: date
+    appointment_time: str
+    notes: Optional[str] = None
+
+    @field_validator("appointment_date")
+    @classmethod
+    def date_not_in_past(cls, v: date) -> date:
+        if v < date.today():
+            raise ValueError("Appointment date cannot be in the past.")
+        return v
 
 class NotificationItem(BaseModel):
     id: str
@@ -314,27 +397,91 @@ class LabTestRequestItem(BaseModel):
     patient_id: str
     patient_name: Optional[str] = None
     patient_user_id: Optional[str] = None
+    doctor_id: Optional[str] = None
     doctor_name: Optional[str] = None
+    doctor_user_id: Optional[str] = None
     test_name: str
+    panel_code: Optional[str] = None
     priority: str
     status: str
     clinical_notes: Optional[str] = None
     requested_date: Optional[datetime] = None
+    report_id: Optional[str] = None          # set once a report is finalised
+    report_no: Optional[str] = None
 
 class CreateLabTestRequest(BaseModel):
     patient_id: str
-    test_name: str
+    panel_code: Optional[str] = None   # which report form the technician should open
+    test_name: Optional[str] = None    # defaults to the panel's name when omitted
     priority: str = "Routine"
     clinical_notes: Optional[str] = None
 
+    @model_validator(mode="after")
+    def require_panel_or_test_name(self):
+        if not (self.panel_code or self.test_name):
+            raise ValueError("Either panel_code or test_name must be supplied.")
+        return self
+
 class CreateStructuredLabReportRequest(BaseModel):
-    patient_id: str
-    report_name: str
-    report_type: str  # CBC, Blood Sugar, Urine Test, Liver Function, ECG, Imaging Report, Other
-    findings: Optional[str] = None
-    normal_range: Optional[str] = None
-    structured_data: dict = {}
+    """Finalisation payload for a laboratory report.
+
+    ``request_id`` binds the report to the doctor's original test request,
+    which is what fixes the patient and referring doctor. ``patient_id`` is
+    accepted only for direct (walk-in) reports raised without a request.
+    """
+    request_id: Optional[str] = None
+    patient_id: Optional[str] = None
+    panel_code: str
+    values: dict[str, Any] = {}
     remarks: Optional[str] = None
+    collected_at: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def require_a_subject(self):
+        if not (self.request_id or self.patient_id):
+            raise ValueError("Either request_id or patient_id must be supplied.")
+        return self
+
+
+class LabPanelSummary(BaseModel):
+    code: str
+    name: str
+    short_name: str
+    category: str
+    layout: str
+    specimen: str
+
+
+class FinalizedReportResponse(BaseModel):
+    status: str
+    report_id: str
+    report_no: str
+    accession: str
+    panel_code: str
+    patient_user_id: Optional[str] = None
+    document_hash: str
+    signature_algorithm: Optional[str] = None
+    kem_algorithm: Optional[str] = None
+    blockchain_tx_hash: Optional[str] = None
+    anchored_on: Optional[str] = None
+    ipfs_cid: Optional[str] = None
+    s3_key: Optional[str] = None
+    notified: list[str] = []
+
+
+class ReportVerification(BaseModel):
+    report_id: str
+    report_no: Optional[str] = None
+    document_hash: Optional[str] = None
+    hash_matches: bool
+    signature_valid: bool
+    signature_algorithm: Optional[str] = None
+    kem_algorithm: Optional[str] = None
+    signed_by: Optional[str] = None
+    blockchain_tx_hash: Optional[str] = None
+    anchored_on: Optional[str] = None
+    verified_at: datetime
+    detail: str
 
 class CreateImagingReportRequest(BaseModel):
     patient_id: str

@@ -2,16 +2,22 @@
 
 import React, { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { FileText, CheckCircle, Upload, X } from "lucide-react";
-import { getDoctorReports, getDoctorDocuments, reviewLabReport, createMedicalDocument } from "@/lib/session";
+import { FileText, CheckCircle, Upload, X, Download, ShieldCheck, ShieldAlert, Loader2, Eye } from "lucide-react";
+import {
+  getDoctorReports, getDoctorDocuments, reviewLabReport, createMedicalDocument,
+  downloadDoctorLabReport, verifyDoctorLabReport,
+} from "@/lib/session";
+import { saveBlobAsFile, openBlobInNewTab } from "@/lib/utils";
 
 interface DoctorReportItem {
   id: string;
   title?: string;
   report_name?: string;
+  report_id_public?: string;
   status?: string;
-  date?: string;
+  upload_date?: string;
   patient_name?: string;
+  patient_user_id?: string;
   file_url?: string;
   [key: string]: unknown;
 }
@@ -35,6 +41,8 @@ export default function ReportsAndDocuments() {
 
   const [uploadModal, setUploadModal] = useState(false);
   const [docData, setDocData] = useState({ title: "", type: "", file_url: "" });
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [verifyResult, setVerifyResult] = useState<Record<string, { valid: boolean; detail: string }>>({});
 
   useEffect(() => {
     async function fetchData() {
@@ -57,6 +65,43 @@ export default function ReportsAndDocuments() {
       setReports(reports.map(r => r.id === id ? { ...r, status: "Reviewed" } : r));
     } catch (error) {
       console.error(error);
+    }
+  };
+
+  const handleView = async (id: string, filename: string) => {
+    setBusyId(id);
+    try {
+      openBlobInNewTab(await downloadDoctorLabReport(id), filename);
+    } catch (error) {
+      console.error(error);
+      alert(error instanceof Error ? error.message : "Failed to open the report");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleDownload = async (id: string, filename: string) => {
+    setBusyId(id);
+    try {
+      saveBlobAsFile(await downloadDoctorLabReport(id), filename);
+    } catch (error) {
+      console.error(error);
+      alert(error instanceof Error ? error.message : "Failed to download the report");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleVerify = async (id: string) => {
+    setBusyId(id);
+    try {
+      const res = await verifyDoctorLabReport(id);
+      setVerifyResult((prev) => ({ ...prev, [id]: { valid: res.hash_matches && res.signature_valid, detail: res.detail } }));
+    } catch (error) {
+      console.error(error);
+      setVerifyResult((prev) => ({ ...prev, [id]: { valid: false, detail: "Verification request failed." } }));
+    } finally {
+      setBusyId(null);
     }
   };
 
@@ -116,8 +161,45 @@ export default function ReportsAndDocuments() {
                     {report.status || "Pending"}
                   </span>
                 </div>
-                <p className="text-sm text-slate-600 mb-2">Patient: {report.patient_name || "N/A"}</p>
-                <p className="text-xs text-slate-400 mb-6">{report.date ? new Date(report.date).toLocaleDateString() : "N/A"}</p>
+                <p className="text-sm text-slate-600 mb-1">
+                  Patient: {report.patient_name || "—"}
+                  {report.patient_user_id ? ` (${report.patient_user_id})` : ""}
+                </p>
+                <p className="text-xs text-slate-400 mb-4">
+                  {report.report_id_public ? `${report.report_id_public} · ` : ""}
+                  {report.upload_date ? new Date(report.upload_date as string).toLocaleDateString() : ""}
+                </p>
+
+                {verifyResult[report.id] && (
+                  <p className={`text-xs mb-3 flex items-center gap-1.5 ${verifyResult[report.id].valid ? "text-emerald-600" : "text-rose-600"}`}>
+                    {verifyResult[report.id].valid ? <ShieldCheck className="w-3.5 h-3.5" /> : <ShieldAlert className="w-3.5 h-3.5" />}
+                    {verifyResult[report.id].detail}
+                  </p>
+                )}
+
+                <div className="flex gap-2 mb-2">
+                  <button
+                    onClick={() => handleView(report.id, `${report.report_id_public || "lab-report"}.pdf`)}
+                    disabled={busyId === report.id}
+                    className="flex-1 flex items-center justify-center gap-1.5 py-2 px-2 bg-slate-50 hover:bg-slate-100 text-slate-700 rounded-xl font-semibold text-xs transition-colors disabled:opacity-50"
+                  >
+                    {busyId === report.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Eye className="w-3.5 h-3.5" />} View
+                  </button>
+                  <button
+                    onClick={() => handleDownload(report.id, `${report.report_id_public || "lab-report"}.pdf`)}
+                    disabled={busyId === report.id}
+                    className="flex-1 flex items-center justify-center gap-1.5 py-2 px-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-xl font-semibold text-xs transition-colors disabled:opacity-50"
+                  >
+                    <Download className="w-3.5 h-3.5" /> PDF
+                  </button>
+                  <button
+                    onClick={() => handleVerify(report.id)}
+                    disabled={busyId === report.id}
+                    className="flex-1 flex items-center justify-center gap-1.5 py-2 px-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl font-semibold text-xs transition-colors disabled:opacity-50"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5" /> Verify
+                  </button>
+                </div>
                 {report.status !== "Reviewed" && (
                   <button onClick={() => handleReview(report.id)} className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-cyan-50 hover:bg-cyan-100 text-cyan-700 rounded-xl font-semibold text-sm transition-colors">
                     <CheckCircle className="w-4 h-4" /> Mark as Reviewed

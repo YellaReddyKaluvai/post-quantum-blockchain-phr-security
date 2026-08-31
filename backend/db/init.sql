@@ -361,3 +361,63 @@ ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS ipfs_cid VARCHAR(255);
 ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS s3_key VARCHAR(512);
 
 
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Laboratory report workflow: Doctor request → Lab technician → Signed report
+-- Links the report permanently to its originating request, referring doctor and
+-- performing technician, and stores the hybrid-encryption material needed to
+-- decrypt it later (ML-KEM ciphertext + AES-GCM nonce/tag).
+-- ─────────────────────────────────────────────────────────────────────────────
+
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS lab_request_id UUID REFERENCES LabTestRequests(id) ON DELETE SET NULL;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS doctor_id UUID REFERENCES Users(id) ON DELETE SET NULL;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS panel_code VARCHAR(32);
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS accession_number VARCHAR(32);
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS collected_at TIMESTAMPTZ;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS finalized_at TIMESTAMPTZ;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS is_locked BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS interpretation TEXT;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS remarks TEXT;
+
+-- Hybrid encryption material. encrypted_aes_key already exists and now holds
+-- the ML-KEM ciphertext; these carry the AES-256-GCM parameters beside it.
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS encryption_nonce TEXT;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS encryption_tag TEXT;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS kem_algorithm VARCHAR(32);
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS signature_algorithm VARCHAR(32);
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS encrypted_document TEXT;
+
+-- One finalised report per test request.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_labreports_request_unique
+    ON LabReports(lab_request_id) WHERE lab_request_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_labreports_doctor ON LabReports(doctor_id);
+CREATE INDEX IF NOT EXISTS idx_labreports_labtech ON LabReports(lab_tech_id);
+
+-- Panel selected by the doctor when raising the request, so the technician
+-- opens the correct form rather than choosing one by hand.
+ALTER TABLE LabTestRequests ADD COLUMN IF NOT EXISTS panel_code VARCHAR(32);
+ALTER TABLE LabTestRequests ADD COLUMN IF NOT EXISTS accepted_by UUID REFERENCES Users(id) ON DELETE SET NULL;
+ALTER TABLE LabTestRequests ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
+ALTER TABLE LabTestRequests ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+
+-- Blockchain / integrity anchor. One row per auditable document event; holds
+-- only identifiers, action, timestamp and the SHA-256 digest. Never the
+-- document itself and never key material.
+CREATE TABLE IF NOT EXISTS DocumentAnchors (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    document_type VARCHAR(40) NOT NULL,
+    document_id UUID NOT NULL,
+    report_id_public VARCHAR(30),
+    patient_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    actor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    actor_public_id VARCHAR(20),
+    action VARCHAR(60) NOT NULL,
+    document_hash VARCHAR(64) NOT NULL,
+    tx_hash VARCHAR(66),
+    anchored_on VARCHAR(30) NOT NULL DEFAULT 'local-simulated',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_anchors_document ON DocumentAnchors(document_id);
+CREATE INDEX IF NOT EXISTS idx_anchors_patient ON DocumentAnchors(patient_id);

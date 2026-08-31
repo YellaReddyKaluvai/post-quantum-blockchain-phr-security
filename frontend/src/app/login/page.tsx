@@ -64,7 +64,7 @@ export default function LoginPage() {
             <ShieldCheck className="w-6 h-6 text-white" />
           </div>
           <span className="text-2xl font-extrabold tracking-wider bg-clip-text text-transparent bg-gradient-to-r from-slate-800 to-slate-600 drop-shadow-sm">
-            AEGIS
+            QuantumCare
           </span>
         </Link>
 
@@ -96,7 +96,7 @@ export default function LoginPage() {
                   <label className={labelClass}>User ID</label>
                   <div className="relative group">
                     <User className="absolute left-4 top-1/2 -translate-y-1/2 w-[20px] h-[20px] text-teal-500 group-focus-within:text-cyan-500 group-focus-within:drop-shadow-sm transition-colors" />
-                    <input type="text" required value={userId} onChange={e => setUserId(e.target.value)} className={inputClass} placeholder="P-123456" />
+                    <input type="text" required value={userId} onChange={e => setUserId(e.target.value)} className={inputClass} placeholder="PAT-2026-000001" />
                   </div>
                 </div>
                 <div>

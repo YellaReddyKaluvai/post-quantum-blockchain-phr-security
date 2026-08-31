@@ -16,6 +16,9 @@ from app.rbac import get_permissions_for_role
 bearer_scheme = HTTPBearer(auto_error=False)
 ph = PasswordHasher()
 
+# Name of the HTTP-only cookie carrying the QuantumCare session token.
+SESSION_COOKIE_NAME = "quantumcare_token"
+
 def hash_password(password: str) -> str:
     return ph.hash(password)
 
@@ -81,7 +84,7 @@ def verify_session_token(token: str) -> dict[str, Any]:
 def _extract_token(request: Request, credentials: HTTPAuthorizationCredentials | None) -> str | None:
     if credentials is not None:
         return credentials.credentials
-    return request.cookies.get("aegis_access_token")
+    return request.cookies.get(SESSION_COOKIE_NAME)
 
 def get_current_session(
     request: Request,

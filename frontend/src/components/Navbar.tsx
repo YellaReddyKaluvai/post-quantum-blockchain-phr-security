@@ -36,7 +36,7 @@ export default function Navbar() {
               <Shield className="relative text-cyan-700 w-5 h-5" />
             </div>
             <span className="text-xl font-bold tracking-widest text-slate-800">
-              AEGIS<span className="text-cyan-500">.</span>PHR
+              Quantum<span className="text-cyan-500">.</span>Care
             </span>
           </div>
           

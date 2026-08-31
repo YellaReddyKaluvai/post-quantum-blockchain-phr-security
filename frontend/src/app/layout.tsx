@@ -10,7 +10,7 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "Aegis | Post-Quantum PHR Security",
+  title: "QuantumCare | Post-Quantum PHR Security",
   description: "Next-Generation Blockchain Personal Health Records secured by Lattice Cryptography.",
 };
 

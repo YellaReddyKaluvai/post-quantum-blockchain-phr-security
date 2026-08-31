@@ -2,8 +2,9 @@
 
 import React, { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { TestTubes, Calendar, User, Eye, X, Activity, Download, Lock } from "lucide-react";
-import { getPatientLabReports, downloadPatientLabReport } from "@/lib/session";
+import { TestTubes, Calendar, User, Eye, X, Activity, Download, Lock, ShieldCheck, ShieldAlert } from "lucide-react";
+import { getPatientLabReports, downloadPatientLabReport, verifyPatientLabReport } from "@/lib/session";
+import { saveBlobAsFile, openBlobInNewTab } from "@/lib/utils";
 
 interface LabReportItem {
   id: string;
@@ -26,24 +27,46 @@ export default function LabReportsPage() {
   const [reports, setReports] = useState<LabReportItem[]>([]);
   const [selectedReport, setSelectedReport] = useState<LabReportItem | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<{ valid: boolean; detail: string } | null>(null);
+
+  const reportFilename = (report: LabReportItem | null) =>
+    `${(report?.report_id_public as string) || "lab-report"}.pdf`;
+
+  const handleView = async (reportId: string, filename: string) => {
+    try {
+      setIsDownloading(true);
+      openBlobInNewTab(await downloadPatientLabReport(reportId), filename);
+    } catch (error) {
+      console.error("View failed:", error);
+      alert(error instanceof Error ? error.message : "Failed to securely decrypt the report.");
+    } finally {
+      setIsDownloading(false);
+    }
+  };
 
   const handleDownload = async (reportId: string, filename: string) => {
     try {
       setIsDownloading(true);
-      const blob = await downloadPatientLabReport(reportId);
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${filename.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.json`;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
+      saveBlobAsFile(await downloadPatientLabReport(reportId), filename);
     } catch (error) {
       console.error("Download failed:", error);
-      alert("Failed to securely download and decrypt the report. Please check your keys.");
+      alert(error instanceof Error ? error.message : "Failed to securely download and decrypt the report.");
     } finally {
       setIsDownloading(false);
+    }
+  };
+
+  const handleVerify = async (reportId: string) => {
+    try {
+      setIsVerifying(true);
+      const res = await verifyPatientLabReport(reportId);
+      setVerifyResult({ valid: res.hash_matches && res.signature_valid, detail: res.detail });
+    } catch (error) {
+      console.error("Verify failed:", error);
+      setVerifyResult({ valid: false, detail: "Verification request failed." });
+    } finally {
+      setIsVerifying(false);
     }
   };
 
@@ -153,7 +176,7 @@ export default function LabReportsPage() {
               </div>
               <div className="bg-slate-50 p-4">
                 <button
-                  onClick={() => setSelectedReport(report)}
+                  onClick={() => { setSelectedReport(report); setVerifyResult(null); }}
                   className="w-full flex items-center justify-center gap-2 py-2 bg-white border border-slate-200 rounded-xl text-sm font-semibold text-slate-700 hover:bg-slate-100 hover:text-slate-900 transition-colors shadow-sm"
                 >
                   <Eye className="w-4 h-4" /> View Details
@@ -226,27 +249,49 @@ export default function LabReportsPage() {
                   </div>
                 )}
                 
-                {/* Secure Download Button */}
-                <div className="mt-8">
-                  <button
-                    onClick={() => handleDownload(selectedReport.id, selectedReport.name || selectedReport.report_name || "report")}
-                    disabled={isDownloading}
-                    className="w-full flex items-center justify-center gap-3 py-4 bg-slate-900 text-white rounded-2xl font-bold hover:bg-slate-800 transition-colors disabled:bg-slate-300 disabled:cursor-not-allowed"
-                  >
-                    {isDownloading ? (
-                      <>
-                        <Lock className="w-5 h-5 animate-pulse text-emerald-400" />
-                        Decapsulating & Decrypting File...
-                      </>
-                    ) : (
-                      <>
-                        <Download className="w-5 h-5" />
-                        Download Original File (PQC Secured)
-                      </>
-                    )}
-                  </button>
-                  <p className="text-center text-xs text-slate-500 mt-3 flex items-center justify-center gap-1">
-                    <Lock className="w-3 h-3" /> End-to-end encrypted via AWS S3 & ML-KEM
+                {/* Secure Download & Verification */}
+                <div className="mt-8 space-y-3">
+                  {verifyResult && (
+                    <div className={`flex items-start gap-2 p-3 rounded-xl text-sm ${verifyResult.valid ? "bg-emerald-50 text-emerald-700 border border-emerald-100" : "bg-rose-50 text-rose-700 border border-rose-100"}`}>
+                      {verifyResult.valid ? <ShieldCheck className="w-4 h-4 flex-shrink-0 mt-0.5" /> : <ShieldAlert className="w-4 h-4 flex-shrink-0 mt-0.5" />}
+                      {verifyResult.detail}
+                    </div>
+                  )}
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => handleView(selectedReport.id, reportFilename(selectedReport))}
+                      disabled={isDownloading}
+                      className="flex-1 flex items-center justify-center gap-2 py-4 bg-slate-900 text-white rounded-2xl font-bold hover:bg-slate-800 transition-colors disabled:bg-slate-300 disabled:cursor-not-allowed"
+                    >
+                      {isDownloading ? (
+                        <>
+                          <Lock className="w-5 h-5 animate-pulse text-emerald-400" />
+                          Decrypting...
+                        </>
+                      ) : (
+                        <>
+                          <Eye className="w-5 h-5" />
+                          View Report
+                        </>
+                      )}
+                    </button>
+                    <button
+                      onClick={() => handleDownload(selectedReport.id, reportFilename(selectedReport))}
+                      disabled={isDownloading}
+                      className="flex items-center justify-center gap-2 px-5 py-4 bg-emerald-50 text-emerald-700 rounded-2xl font-bold hover:bg-emerald-100 transition-colors disabled:opacity-50"
+                    >
+                      <Download className="w-5 h-5" /> Download PDF
+                    </button>
+                    <button
+                      onClick={() => handleVerify(selectedReport.id)}
+                      disabled={isVerifying}
+                      className="flex items-center justify-center gap-2 px-5 py-4 bg-indigo-50 text-indigo-700 rounded-2xl font-bold hover:bg-indigo-100 transition-colors disabled:opacity-50"
+                    >
+                      <ShieldCheck className="w-5 h-5" /> Verify
+                    </button>
+                  </div>
+                  <p className="text-center text-xs text-slate-500 flex items-center justify-center gap-1">
+                    <Lock className="w-3 h-3" /> AES-256-GCM encrypted, ML-KEM key protection, ML-DSA signed
                   </p>
                 </div>
               </div>
