@@ -38,6 +38,38 @@ export function getAuthToken(): string | null {
   return getCookie(TOKEN_COOKIE);
 }
 
+export function clearAuthCookies() {
+  [TOKEN_COOKIE, ROLE_COOKIE, USER_ID_COOKIE].forEach((name) => {
+    document.cookie = `${name}=; Path=/; Max-Age=0; SameSite=Lax`;
+  });
+}
+
+// Sessions expire after 30 minutes. Without this, an expired token surfaced as
+// an empty list or a blank card — indistinguishable from "you have no data" —
+// so the app looked broken rather than logged out. Redirect once, with a note
+// explaining why, and preserve where they were so they land back there.
+let redirectingToLogin = false;
+
+function handleSessionExpired() {
+  if (typeof window === "undefined" || redirectingToLogin) return;
+  redirectingToLogin = true;
+  clearAuthCookies();
+  const from = window.location.pathname + window.location.search;
+  const params = new URLSearchParams({ reason: "expired" });
+  // Only round-trip in-app paths, never an absolute URL from elsewhere.
+  if (from.startsWith("/") && !from.startsWith("//") && !from.startsWith("/login")) {
+    params.set("from", from);
+  }
+  window.location.replace(`/login?${params.toString()}`);
+}
+
+export class SessionExpiredError extends Error {
+  constructor() {
+    super("Your session has expired. Please sign in again.");
+    this.name = "SessionExpiredError";
+  }
+}
+
 async function fetchWithAuth(url: string, options: RequestInit = {}) {
   const token = getAuthToken();
   const headers = new Headers(options.headers || {});
@@ -47,7 +79,17 @@ async function fetchWithAuth(url: string, options: RequestInit = {}) {
   if (options.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  return fetch(url, { ...options, headers });
+  const response = await fetch(url, { ...options, headers });
+
+  // 401 means the token is gone or expired. 403 is a genuine permission
+  // decision and must NOT be treated as expiry — that would bounce a user to
+  // login for something they simply aren't allowed to do.
+  if (response.status === 401) {
+    handleSessionExpired();
+    throw new SessionExpiredError();
+  }
+
+  return response;
 }
 
 export async function register(data: Record<string, unknown>) {
@@ -93,11 +135,6 @@ export async function logout() {
   }
 }
 
-export async function getProfile() {
-  const response = await fetchWithAuth(`${backendBaseUrl}/api/auth/me`);
-  if (!response.ok) throw new Error("Failed to fetch profile");
-  return response.json();
-}
 
 export async function getAdminPending() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/registrations/pending`);
@@ -153,11 +190,6 @@ export async function getAllUsers(params: { role?: string; status?: string; sear
   return response.json();
 }
 
-export async function getUserDetail(id: string) {
-  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/users/${id}`);
-  if (!response.ok) throw new Error("Failed to fetch user detail");
-  return response.json();
-}
 
 export async function disableUser(id: string) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/users/${id}/disable`, { method: "POST" });
@@ -178,6 +210,18 @@ export async function getAuditLogs(params: { action?: string; page?: number; per
   if (params.per_page) query.set("per_page", String(params.per_page));
   const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/audit-logs?${query.toString()}`);
   if (!response.ok) throw new Error("Failed to fetch audit logs");
+  return response.json();
+}
+
+export async function getBlockchainStatus() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/blockchain/status`);
+  if (!response.ok) throw new Error("Failed to fetch blockchain status");
+  return response.json();
+}
+
+export async function getStorageStatus() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/storage/status`);
+  if (!response.ok) throw new Error("Failed to fetch storage status");
   return response.json();
 }
 
@@ -224,11 +268,6 @@ export async function getPatientMedicalRecords() {
   return response.json();
 }
 
-export async function getPatientMedicalRecordDetail(id: string) {
-  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/medical-records/${id}`);
-  if (!response.ok) throw new Error("Failed to fetch medical record detail");
-  return response.json();
-}
 
 export async function getPatientLabReports() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/lab-reports`);
@@ -236,11 +275,6 @@ export async function getPatientLabReports() {
   return response.json();
 }
 
-export async function getPatientLabReportDetail(id: string) {
-  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/lab-reports/${id}`);
-  if (!response.ok) throw new Error("Failed to fetch lab report detail");
-  return response.json();
-}
 
 export async function downloadPatientLabReport(id: string) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/lab-reports/${id}/download`);
@@ -272,6 +306,63 @@ export async function getPatientConsultations() {
 export async function getPatientAppointments() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/appointments`);
   if (!response.ok) throw new Error("Failed to fetch appointments");
+  return response.json();
+}
+
+export async function getPatientConsent() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/consent`);
+  if (!response.ok) throw new Error("Failed to fetch consent list");
+  return response.json();
+}
+
+export async function revokePatientConsent(doctorId: string, reason?: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/consent/${doctorId}/revoke`, {
+    method: "POST",
+    body: JSON.stringify({ reason: reason || null }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to withdraw access"));
+  }
+  return response.json();
+}
+
+export async function grantPatientConsent(doctorId: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/consent/${doctorId}/grant`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to restore access"));
+  }
+  return response.json();
+}
+
+export async function declareEmergencyAccess(data: {
+  patient_id: string;
+  reason: string;
+  duration_hours?: number;
+}) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/emergency-access`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to declare emergency access"));
+  }
+  return response.json();
+}
+
+export async function getAdminEmergencyAccess() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/emergency-access`);
+  if (!response.ok) throw new Error("Failed to fetch emergency access log");
+  return response.json();
+}
+
+export async function getPatientVitals() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/vitals`);
+  if (!response.ok) throw new Error("Failed to fetch vitals");
   return response.json();
 }
 
@@ -355,11 +446,23 @@ export async function getDoctorPatientDetail(id: string) {
   return response.json();
 }
 
+function extractErrorMessage(body: unknown, fallback: string): string {
+  const detail = (body as { detail?: unknown } | null)?.detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail) && detail.length > 0) {
+    return detail.map((d: { msg?: string }) => d.msg).filter(Boolean).join("; ") || fallback;
+  }
+  return fallback;
+}
+
 export async function createDiagnosis(patientId: string, data: Record<string, unknown>) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${patientId}/diagnosis`, {
     method: "POST", body: JSON.stringify(data)
   });
-  if (!response.ok) throw new Error("Failed to create diagnosis");
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorMessage(err, "Failed to create diagnosis"));
+  }
   return response.json();
 }
 
@@ -367,7 +470,36 @@ export async function createPrescription(patientId: string, data: Record<string,
   const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${patientId}/prescription`, {
     method: "POST", body: JSON.stringify(data)
   });
-  if (!response.ok) throw new Error("Failed to create prescription");
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorMessage(err, "Failed to create prescription"));
+  }
+  return response.json();
+}
+
+export async function createConsultation(patientId: string, data: Record<string, unknown>) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${patientId}/consultation`, {
+    method: "POST", body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to record consultation"));
+  }
+  return response.json();
+}
+
+export async function getPatientDocuments() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/documents`);
+  if (!response.ok) throw new Error("Failed to fetch documents");
+  return response.json();
+}
+
+export async function getPatientDocumentContent(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/documents/${id}/content`);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to open document"));
+  }
   return response.json();
 }
 
@@ -388,6 +520,15 @@ export async function downloadDoctorLabReport(id: string) {
   if (!response.ok) {
     const err = await response.json().catch(() => null);
     throw new Error(err?.detail || "Failed to securely decrypt and download lab report");
+  }
+  return response.blob();
+}
+
+export async function downloadLabTechReport(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/reports/${id}/download`);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to decrypt and open the report"));
   }
   return response.blob();
 }
@@ -512,11 +653,6 @@ export async function getLabTestRequestDetail(id: string) {
   return response.json();
 }
 
-export async function getLabReportTemplates() {
-  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/report-templates`);
-  if (!response.ok) throw new Error("Failed to fetch report templates");
-  return response.json();
-}
 
 export async function getLabReportTemplate(panelCode: string) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/report-templates/${panelCode}`);
@@ -555,11 +691,6 @@ export async function getLabTechReports() {
   return response.json();
 }
 
-export async function getLabTechReportDetail(id: string) {
-  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/reports/${id}`);
-  if (!response.ok) throw new Error("Failed to fetch lab report details");
-  return response.json();
-}
 
 export async function uploadImagingReport(data: Record<string, unknown>) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/imaging/upload`, {
@@ -577,6 +708,17 @@ export async function getImagingReports() {
   return response.json();
 }
 
+// Images are encrypted at rest and are not included in the list response, so
+// they are decrypted one at a time, only when actually viewed.
+export async function getImagingImage(id: string): Promise<{ image_data: string; encrypted: boolean }> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/imaging/${id}/image`);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorMessage(err, "Failed to decrypt image"));
+  }
+  return response.json();
+}
+
 export async function getLabTechNotifications() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/notifications`);
   if (!response.ok) throw new Error("Failed to fetch notifications");
@@ -591,6 +733,89 @@ export async function markLabNotificationRead(id: string) {
 
 export async function clearLabNotifications() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/notifications/clear`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to clear notifications");
+  return response.json();
+}
+
+// ─── Nurse ────────────────────────────────────────────────────────────────
+
+export async function getNurseProfile() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/profile`);
+  if (!response.ok) throw new Error("Failed to fetch profile");
+  return response.json();
+}
+
+export async function getNurseDashboardSummary() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/dashboard/summary`);
+  if (!response.ok) throw new Error("Failed to fetch dashboard summary");
+  return response.json();
+}
+
+export async function getNursePatients() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients`);
+  if (!response.ok) throw new Error("Failed to fetch patients");
+  return response.json();
+}
+
+export async function searchNursePatients(query: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients/search?q=${encodeURIComponent(query)}`);
+  if (!response.ok) throw new Error("Failed to search patients");
+  return response.json();
+}
+
+export async function getNursePatientDetail(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients/${id}`);
+  if (!response.ok) throw new Error("Failed to fetch patient details");
+  return response.json();
+}
+
+export async function recordPatientVitals(patientId: string, data: Record<string, unknown>) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients/${patientId}/vitals`, {
+    method: "POST", body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorMessage(err, "Failed to record vitals"));
+  }
+  return response.json();
+}
+
+export async function addNursingNote(patientId: string, data: Record<string, unknown>) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients/${patientId}/notes`, {
+    method: "POST", body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorMessage(err, "Failed to add note"));
+  }
+  return response.json();
+}
+
+export async function administerMedication(patientId: string, prescriptionId: string, data: Record<string, unknown>) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients/${patientId}/medications/${prescriptionId}/administer`, {
+    method: "POST", body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorMessage(err, "Failed to record administration"));
+  }
+  return response.json();
+}
+
+export async function getNurseNotifications() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/notifications`);
+  if (!response.ok) throw new Error("Failed to fetch notifications");
+  return response.json();
+}
+
+export async function markNurseNotificationRead(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/notifications/${id}/read`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to mark notification as read");
+  return response.json();
+}
+
+export async function clearNurseNotifications() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/notifications/clear`, { method: "POST" });
   if (!response.ok) throw new Error("Failed to clear notifications");
   return response.json();
 }

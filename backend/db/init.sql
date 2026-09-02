@@ -83,6 +83,19 @@ CREATE TABLE IF NOT EXISTS AuthLogs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- DEPRECATED — MedicalRecords is not used by any code path (0 references in
+-- backend/, 0 rows). It predates the current design and its 'Firestore'
+-- storage default is from an abandoned backend.
+--
+-- Superseded by:
+--   LabReports       — lab results, with the full hybrid-encryption columns
+--   ImagingReports   — imaging studies, same protection
+--   MedicalDocuments — doctor-authored documents
+--
+-- Left in place rather than dropped so an existing deployment is not altered
+-- unilaterally. Safe to remove once the team agrees; nothing reads it.
+-- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS MedicalRecords (
     Medical_Record_ID UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     Patient_ID UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
@@ -421,3 +434,103 @@ CREATE TABLE IF NOT EXISTS DocumentAnchors (
 
 CREATE INDEX IF NOT EXISTS idx_anchors_document ON DocumentAnchors(document_id);
 CREATE INDEX IF NOT EXISTS idx_anchors_patient ON DocumentAnchors(patient_id);
+
+-- Block number is present only for genuine on-chain anchors; NULL means the
+-- anchor was written locally because no chain was reachable.
+ALTER TABLE DocumentAnchors ADD COLUMN IF NOT EXISTS block_number BIGINT;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Nurse module: vitals, nursing notes, and medication administration.
+-- Nurses are not "assigned" to patients the way doctors are (via diagnoses);
+-- any approved nurse can record observations for any approved patient, and the
+-- nurse's own patient list is simply "who I've recorded something for", mirroring
+-- how the Lab Technician's queue works.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS PatientVitals (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    nurse_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    temperature_celsius NUMERIC(4,1),
+    blood_pressure_systolic SMALLINT,
+    blood_pressure_diastolic SMALLINT,
+    heart_rate SMALLINT,
+    spo2 SMALLINT,
+    respiratory_rate SMALLINT,
+    weight_kg NUMERIC(5,2),
+    height_cm NUMERIC(5,2),
+    notes TEXT,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+DO $$ BEGIN
+    CREATE TYPE nursing_note_type AS ENUM ('Observation', 'Care', 'Incident');
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+CREATE TABLE IF NOT EXISTS NursingNotes (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    nurse_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    note_type nursing_note_type NOT NULL DEFAULT 'Observation',
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+DO $$ BEGIN
+    CREATE TYPE medication_admin_status AS ENUM ('Administered', 'Refused', 'Held', 'Missed');
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+-- One administration event per prescription per nurse action; a prescription
+-- can have many rows over its course (e.g. "Twice daily" for 90 days).
+CREATE TABLE IF NOT EXISTS MedicationAdministration (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    prescription_id UUID NOT NULL REFERENCES Prescriptions(id) ON DELETE CASCADE,
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    nurse_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    status medication_admin_status NOT NULL DEFAULT 'Administered',
+    remarks TEXT,
+    administered_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Doctor-authored documents (discharge summaries, referral letters, medical
+-- certificates) previously stored their body as plaintext in `content` and
+-- never reached cloud storage at all, bypassing the security pipeline that
+-- every other document type goes through. They now carry the same hybrid
+-- material. `content` is retained only for rows predating encryption.
+-- ─────────────────────────────────────────────────────────────────────────────
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS encrypted_content TEXT;
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS encrypted_aes_key TEXT;
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS encryption_nonce TEXT;
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS encryption_tag TEXT;
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS document_hash VARCHAR(64);
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS digital_signature TEXT;
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS kem_algorithm VARCHAR(32);
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS signature_algorithm VARCHAR(32);
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS blockchain_tx_hash VARCHAR(66);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Imaging reports carry the same hybrid-encryption material as lab reports.
+-- Previously the image payload was uploaded to cloud storage as plaintext and
+-- stored plaintext in image_data, which contradicts the rule that the cloud
+-- never holds unencrypted medical content. image_data is retained only for
+-- rows predating encryption; new rows populate the encrypted_* columns.
+-- ─────────────────────────────────────────────────────────────────────────────
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS encrypted_image TEXT;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS encrypted_aes_key TEXT;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS encryption_nonce TEXT;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS encryption_tag TEXT;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS document_hash VARCHAR(64);
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS digital_signature TEXT;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS kem_algorithm VARCHAR(32);
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS signature_algorithm VARCHAR(32);
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS blockchain_tx_hash VARCHAR(66);
+
+CREATE INDEX IF NOT EXISTS idx_vitals_patient ON PatientVitals(patient_id);
+CREATE INDEX IF NOT EXISTS idx_vitals_nurse ON PatientVitals(nurse_id);
+CREATE INDEX IF NOT EXISTS idx_vitals_recorded ON PatientVitals(recorded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_nursingnotes_patient ON NursingNotes(patient_id);
+CREATE INDEX IF NOT EXISTS idx_nursingnotes_nurse ON NursingNotes(nurse_id);
+CREATE INDEX IF NOT EXISTS idx_medadmin_patient ON MedicationAdministration(patient_id);
+CREATE INDEX IF NOT EXISTS idx_medadmin_prescription ON MedicationAdministration(prescription_id);
+CREATE INDEX IF NOT EXISTS idx_medadmin_nurse ON MedicationAdministration(nurse_id);

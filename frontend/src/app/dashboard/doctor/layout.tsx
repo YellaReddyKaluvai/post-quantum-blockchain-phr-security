@@ -16,6 +16,7 @@ import {
   Menu,
   X,
   ChevronLeft,
+  FlaskConical,
 } from "lucide-react";
 import { logout } from "@/lib/session";
 import { useAuth } from "@/context/AuthContext";
@@ -23,6 +24,7 @@ import { useAuth } from "@/context/AuthContext";
 const navItems = [
   { label: "Dashboard", icon: LayoutDashboard, href: "/dashboard/doctor" },
   { label: "My Patients", icon: Users, href: "/dashboard/doctor/patients" },
+  { label: "Lab Requests", icon: FlaskConical, href: "/dashboard/doctor/lab-requests" },
   { label: "Reports & Documents", icon: FileText, href: "/dashboard/doctor/reports" },
   { label: "Appointments", icon: Calendar, href: "/dashboard/doctor/appointments" },
   { label: "Notifications", icon: Bell, href: "/dashboard/doctor/notifications" },

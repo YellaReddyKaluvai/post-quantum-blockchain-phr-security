@@ -1,6 +1,6 @@
 # 🔐 QuantumCare — Post-Quantum Cryptography & Blockchain Secure Hospital Management System (PHR)
 
-> **Enterprise-Grade Post-Quantum Health Record Management Platform** powered by **ML-KEM (Kyber-768)**, **ML-DSA (Dilithium-3)**, **AWS S3 Cloud Storage**, **IPFS Multihash CIDs**, and **PostgreSQL**.
+> Post-quantum Personal Health Record platform built on **ML-KEM-768** (FIPS 203), **ML-DSA-65** (FIPS 204), **AES-256-GCM**, encrypted **AWS S3** storage, on-chain integrity anchoring and **PostgreSQL**.
 
 ---
 
@@ -8,7 +8,9 @@
 
 **QuantumCare** is an advanced, commercial-grade healthcare and Personal Health Record (PHR) platform built to defend electronic health records against classical and quantum computing security threats.
 
-The architecture combines **Post-Quantum Key Encapsulation (ML-KEM)**, **Quantum Digital Signatures (ML-DSA)**, **AES-256-GCM Symmetric Encryption**, **AWS S3 Cloud Storage**, and **IPFS Content Addressing** to guarantee zero-knowledge privacy, verifiable integrity, and post-quantum security.
+The architecture combines **ML-KEM-768** key encapsulation, **ML-DSA-65** digital signatures, **AES-256-GCM** document encryption, encrypted **AWS S3** storage and **on-chain integrity anchoring**.
+
+The design rule throughout: *the system never claims a protection it did not actually apply.* A failed upload records no object key, an unreachable chain produces a visibly-simulated anchor, and a missing post-quantum library raises rather than substituting placeholder keys.
 
 ---
 
@@ -18,29 +20,247 @@ The architecture combines **Post-Quantum Key Encapsulation (ML-KEM)**, **Quantum
 - **User Registration Verification & Approval**: Workflow for reviewing and approving newly registered Doctors, Patients, Lab Technicians, and Nurses.
 - **Automated Public ID Generation**: Issues sequential identifiers (`PAT-2026-000001`, `DOC-2026-000001`, `LAB-2026-000001`, `NUR-2026-000001`).
 - **User Management & Role Access Control**: Active user toggles, status management, and permissions.
-- **Cryptographic Key Center**: Real-time stats on ML-KEM public keys, ML-DSA signatures, and Argon2id hash parameters.
-- **Email Notifications**: Live SMTP Gmail dispatch for registration approvals and rejection notices.
+- **Cryptographic Key Center**: Live counts of issued ML-KEM / ML-DSA keypairs and active cryptographic identities.
+- **Infrastructure Health**: Live blockchain and cloud-storage status — chain connectivity and block height, the **on-chain vs locally-simulated** anchor split, and how many reports actually have a cloud copy. Built to surface problems rather than imply everything is fine.
+- **Emergency Access Review**: Every break-glass declaration with its verbatim clinical reason, both parties, expiry and on-chain transaction hash. Active declarations are surfaced first.
+- **Audit Log**: Every administrative action, report access and download, with search and pagination.
+- **Email Notifications**: Live SMTP dispatch for registration approvals and rejections, with delivery status tracked per message.
 
 ### 2. 🏥 Doctor Dashboard (`/dashboard/doctor`)
 - **Patient Workspace**: Patient roster search, chart view, and medical history.
-- **Diagnosis Builder**: Interactive modal for recording diagnoses, symptoms, doctor notes, and recommended tests.
-- **Prescription System**: Form for issuing electronic prescriptions with medicine name, dosage, frequency, and duration.
-- **Lab Report & Document Review**: Direct access to finalized laboratory test results and imaging scans.
-- **Appointment Manager**: Manage scheduled, completed, and cancelled patient consultations.
+- **Nursing Observations**: The vitals and notes recorded by nursing staff, with out-of-range readings highlighted — the reading behind each abnormal-vitals alert.
+- **Diagnosis Builder**: Structured entry for title, visit date, symptoms, clinical notes and recommended tests.
+- **Prescription System**: Electronic prescriptions with medicine, dosage, frequency, duration and instructions.
+- **Lab Requests**: Order an investigation from the patient's chart, then track every request through Pending → Accepted → In Progress → Completed, opening the signed report the moment it is filed.
+- **Report Review & Verification**: Decrypt finalised reports, and re-check each one's signature and on-chain digest.
+- **Appointment Manager**: Confirm, complete or cancel patient appointments.
+- **Record Consultation**: Capture the visit itself — symptoms, assessment and advice — which the patient then reads in their portal.
+- **Emergency Access**: Break-glass override when a patient has withdrawn consent. Requires a substantive clinical reason, is time-boxed, and states its consequences before the form — the patient is notified at once and the declaration is anchored on-chain.
 
 ### 3. 🧪 Laboratory Technician Dashboard (LIMS) (`/dashboard/lab-technician`)
 - **Laboratory Information Management System (LIMS)**: Complete portal for receiving test requests, searching patient directories, and uploading medical documents.
-- **Structured Report Form Builder**: Form templates for CBC, Blood Sugar, Urine Analysis, LFT, ECG, and Imaging.
+- **Structured Report Form Builder**: Nine panels — CBC, Blood Sugar, LFT, KFT, Lipid, Thyroid, Urine, ECG and Radiology — each driving both the data-entry form and the printed report.
 - **Live Hospital Document Preview**: Dynamic preview rendering official hospital letterhead and test result ranges.
-- **12-Step PQC Security Pipeline**: Automated SHA-256 hashing, AES-256-GCM payload encryption, ML-KEM key wrapping, ML-DSA digital signing, and IPFS multihash pinning.
+- **PQC Security Pipeline**: SHA-256 hashing, AES-256-GCM payload encryption, ML-KEM key encapsulation, ML-DSA digital signing, and an on-chain integrity anchor. Only ciphertext reaches cloud storage.
 - **Imaging Gallery**: High-resolution gallery for X-Rays, MRIs, CT Scans, and Ultrasounds with interactive zoom.
-- **Blockchain Audit Trail Modal**: View cryptographic transaction hashes, IPFS CIDs (`ipfs://Qm...`), and AWS S3 storage keys.
+- **Blockchain Audit Trail Modal**: Transaction hash with its network, the document's content CID, and the AWS S3 object key — each shown only when it genuinely exists.
 
 ### 4. 👤 Patient Dashboard (`/dashboard/patient`)
 - **Personal Health Record (PHR)**: Medical records, diagnosis timeline, active prescriptions, and lab report history.
-- **Appointments & Consultations**: Upcoming appointment schedule and consultation notes.
-- **Security & Privacy Center**: Real-time PQC protection status, active session logs, and login IP address tracker.
-- **Real-Time Notification Feed**: System notifications for report readiness and appointment updates.
+- **My Documents**: Discharge summaries, referral letters and certificates written by your doctors — decrypted on demand, with the signing algorithm, digest and on-chain anchor shown so authenticity is checkable rather than asserted.
+- **My Vitals**: Nurse-recorded observations, with out-of-range readings flagged using the same thresholds clinical staff see.
+- **Appointment Booking**: Request an appointment with any approved doctor; the doctor is notified and confirms or declines.
+- **Record Access**: Every clinician who can read the record and how that relationship arose, with one-click withdrawal. Revoking genuinely blocks reads rather than merely noting a preference; an active emergency override is shown plainly.
+- **Security & Privacy Center**: PQC protection status, active session logs, and login IP tracking.
+- **Notification Feed**: Report readiness, appointment updates, and vitals alerts.
+
+### 5. 🩺 Nurse Dashboard (`/dashboard/nurse`)
+- **Patient Chart**: Vitals entry, nursing notes, and medication rounds in one view.
+- **Vitals Recording**: Temperature, blood pressure, heart rate, SpO₂, respiratory rate, weight and height. Out-of-range readings are flagged at the point of entry and the attending doctor is alerted automatically.
+- **Nursing Notes**: Observation, Care and Incident entries, visible to the treating doctor.
+- **Medication Administration**: Records each round against the prescription as Administered, Refused, Held or Missed, with the last outcome shown per medicine.
+
+> Vitals recorded here are readable by the treating **doctor** and by the **patient**. Nursing notes go to the doctor only — they are clinical handover between staff.
+
+---
+
+## 🔄 End-to-End Data Flow
+
+How data actually moves between the five roles. Each arrow below exists in
+code; where a flow stops short, it is marked and listed again under
+[Incomplete workflows](#-incomplete-workflows).
+
+### The security pipeline every document passes through
+
+```
+Structured form  →  Hospital PDF  →  SHA-256 digest
+                                          │
+                    ┌─────────────────────┼─────────────────────┐
+                    ▼                     ▼                     ▼
+              AES-256-GCM           ML-KEM-768             ML-DSA-65
+           encrypts the file    protects the AES key    signs the digest
+                    │                     │                     │
+                    └─────────────────────┼─────────────────────┘
+                                          ▼
+                        Database (authoritative) + AWS S3 (redundant)
+                                          │
+                                          ▼
+                              Digest anchored on-chain
+```
+
+AES handles the bulk data; ML-KEM protects only the 32-byte key; ML-DSA proves
+who issued it. **Only the digest reaches the blockchain — never the document,
+never key material.** On read, the digest is re-checked before release, so a
+tampered record is refused rather than returned.
+
+### 1. Registration → active account
+
+```
+Patient/Doctor/Nurse/Lab signs up
+      → status Pending, DOB + blood group encrypted immediately
+      → Administrator reviews
+            ├─ Reject → reason recorded → rejection email
+            └─ Approve → permanent User ID issued (PAT-2026-000001)
+                       → ML-KEM-768 + ML-DSA-65 keypairs generated
+                       → approval email → account usable
+```
+
+Keys are issued **only on approval**, so a pending or rejected account never
+holds usable key material.
+
+### 2. Doctor → Laboratory → Patient  *(the main clinical workflow)*
+
+```
+Doctor opens patient chart → requests an investigation (panel + priority)
+      → LabTestRequests row (Pending)
+      → Technician's queue, ordered by urgency
+      → Technician opens the matching structured form (1 of 9 panels)
+      → Finalise → hospital PDF → security pipeline above
+      → Notifications: REPORT_READY to BOTH patient and referring doctor
+            ├─ Doctor  → decrypts PDF, verifies signature + on-chain digest
+            └─ Patient → decrypts and downloads their own copy
+```
+
+The report is permanently bound to its originating request, patient, doctor and
+technician. One finalised report per request, enforced by a unique index.
+
+### 3. Doctor → clinical record → Patient
+
+```
+Doctor records diagnosis / prescription / consultation
+      → clinical text encrypted at column level (AES-256-CBC)
+      → Patient sees it in Medical Records / Prescriptions / Consultations
+
+Doctor authors a document (discharge summary, referral, certificate)
+      → full security pipeline → DOCUMENT_READY notification
+      → Patient opens it decrypted, with signature + anchor shown
+```
+
+### 4. Nurse → observations → Doctor and Patient
+
+```
+Nurse records vitals (range-validated at entry)
+      → PatientVitals row
+      → out of range?  ── yes ──→ ABNORMAL_VITALS alert naming the readings
+      │                              → Doctor sees the reading itself on the chart
+      └─ no ──→ VITALS_RECORDED
+      → Patient sees their own vitals in My Vitals
+
+Nurse writes a nursing note → visible to the treating doctor only
+Nurse records a medication round → ✗ no one can read the history (see below)
+```
+
+Vitals are shaped by one shared function for all three views, so a reading
+cannot appear differently depending on who is looking.
+
+### 5. Patient → appointment → Doctor
+
+```
+Patient books (past dates and unknown doctors refused at the schema)
+      → status Pending → APPOINTMENT_REQUEST notification to doctor
+      → Doctor accepts / completes / cancels
+      → ✗ patient is not notified of the outcome (see below)
+```
+
+### 6. Consent and break-glass
+
+```
+Patient revokes a doctor's access
+      → Consent row → every doctor-facing read now returns 404
+      → CONSENT_REVOKED notification to the doctor
+
+Doctor declares emergency access (substantive reason required, ≤24h)
+      → overrides the revocation
+      → EMERGENCY_ACCESS notification to the patient immediately
+      → written to the admin audit log
+      → anchored on-chain so it cannot be quietly removed
+      → Administrator reviews it in Emergency Access
+```
+
+Break-glass is deliberately **not** gated on approval — waiting for a second
+party in an emergency defeats the purpose. The control is accountability, not
+prevention.
+
+### 7. Everything is audited
+
+```
+Every admin action, record access and download
+      → AdminAuditLogs (55+ entries across 10 action types)
+Every login attempt
+      → AuthLogs
+Every finalised document and break-glass declaration
+      → DocumentAnchors + on-chain transaction
+```
+
+---
+
+## 📊 Implementation Status
+
+Verified against the running system, not aspirational. Anything not built is
+listed as not built.
+
+### Working end-to-end
+
+| Area | State | Notes |
+|---|---|---|
+| Registration → admin approval → login | ✅ | Permanent role-scoped User IDs; real SMTP approval/rejection email |
+| Post-quantum key issuance | ✅ | Real ML-KEM-768 + ML-DSA-65 via liboqs, generated on approval |
+| Doctor → Lab → Patient report pipeline | ✅ | 9 structured panels → hospital PDF → AES-256-GCM → ML-KEM → ML-DSA → chain anchor |
+| Imaging studies | ⚠️ | Encrypted, signed and anchored correctly — but only the uploading technician can open one. See Incomplete workflows. |
+| Nurse module | ✅ | Vitals and notes reach the doctor and patient. Medication rounds are recorded but not yet readable — see Incomplete workflows. |
+| Cloud storage (AWS S3) | ✅ | Ciphertext only, verified; doubles as a recovery path if the database copy is lost |
+| Blockchain anchoring | ✅ | Real on-chain writes via `PHR.sol`; falls back to a clearly-labelled local anchor |
+| Session handling | ✅ | 30-minute tokens; expiry redirects to login and returns you to where you were |
+| RBAC across 5 roles | ✅ | Enforced server-side; backend/frontend permission parity is test-enforced |
+| Doctor-authored documents | ✅ | Encrypted, signed and anchored — and readable by the patient they concern, completing the spec's "patient receives authorized access" |
+| Clinical record encryption | ✅ | Diagnoses and prescriptions encrypted at column level; grepping the database for a diagnosis returns nothing |
+| Consent management | ✅ | Revoking a doctor genuinely blocks reads — the same report returns 200 before and 404 after |
+| Emergency break-glass access | ✅ | Time-boxed override, patient notified immediately, anchored on-chain, reviewable by an admin |
+| Automated tests | ✅ | 106 tests, mutation-checked |
+
+### Imaging: encrypted but unreachable
+
+Imaging studies receive the full hybrid pipeline and the patient is notified
+that a study is ready — but **no patient or doctor endpoint exists to open one**.
+Only the uploading technician can view it. The protection is real; the delivery
+is missing. Listed below rather than counted as complete.
+
+---
+
+## ⚠️ Incomplete Workflows
+
+Flows that start but do not finish. These are gaps in delivery, not in
+security — every record below is correctly encrypted, signed and anchored.
+
+| # | Workflow | Where it stops | Impact |
+|---|---|---|---|
+| 1 | **Imaging → clinician / patient** | Technician uploads and the patient is notified, but there is no endpoint or page for either the **patient** or the **doctor** to open the study | A patient is told to view something they cannot open; the doctor who needs to read the scan has no access at all |
+| 2 | **Medication adherence → doctor** | The nurse records every round (Administered / Refused / Held / Missed) but `MedicationAdministrationRecord` is never returned by any endpoint | A prescriber cannot see whether their prescription is being taken; a **refusal is recorded and never surfaces** |
+| 3 | **Appointment outcome → patient** | Accept, complete and cancel update the row with no notification | A patient whose appointment is **cancelled is never told** |
+| 4 | **Lab request → technician** | No notification is raised when a doctor orders a test | An Emergency-priority request is seen only if the technician refreshes the queue |
+| 5 | **Report reviewed → patient** | The doctor's "mark reviewed" works but notifies nobody | The patient is not told a clinician has actually read their result |
+
+The pattern: eight notification events exist, and the gaps cluster around
+*state changes made by one role that another role is waiting on*. Items 1 and 2
+are missing functionality; 3–5 are missing messages.
+
+### Not implemented
+
+| Area | Status |
+|---|---|
+| **Explainable AI (XAI)** | **Not present.** No model, no inference, no SHAP/LIME, no ML dependencies. Never part of this build or its specification. |
+| **Federated Learning** | **Not present.** No training, no aggregation, no Flower/PySyft. Never part of this build or its specification. |
+| **IPFS publishing** | A CIDv0 is computed locally, but nothing is pinned to the IPFS network — see the Content Addressing row below. |
+| `MedicalRecords` table | Dead schema — 0 references, 0 rows. Marked deprecated in `init.sql` and left in place rather than dropped unilaterally; safe to remove once the team agrees. |
+
+> On AI/ML: the two items above are named explicitly because their absence is
+> easy to assume away. This system performs **cryptography and access control**,
+> not prediction. Adding either would mean new dependencies, a training corpus,
+> and a decision about what clinical question a model should answer.
+
+### Known data caveats
+- Two lab reports predate the encryption pipeline and hold no ciphertext, so they cannot be given a cloud copy or be decrypted. They are counted honestly in `/api/admin/storage/status`.
+- Anchors written before the chain integration are marked `local-simulated` and carry no on-chain proof. The admin Security page reports the on-chain vs simulated split rather than hiding it.
 
 ---
 
@@ -49,21 +269,23 @@ The architecture combines **Post-Quantum Key Encapsulation (ML-KEM)**, **Quantum
 | Layer | Protocol / Algorithm | Purpose |
 | --- | --- | --- |
 | **Password Hashing** | **Argon2id** | Memory-hard, GPU-resistant credential protection |
-| **PII Encryption** | **AES-256-CBC** | Encrypts sensitive demographics (DOB, Blood Group) |
+| **PII Encryption** | **AES-256-CBC** | Encrypts sensitive demographics (DOB, blood group) and the clinical text of diagnoses and prescriptions. Defends the database at rest, not a compromised application server — the app holds the key |
 | **Key Encapsulation** | **ML-KEM (Kyber-768)** | Post-Quantum Key Encapsulation (FIPS 203) for payload AES keys |
 | **Digital Signatures** | **ML-DSA (Dilithium-3)** | Post-Quantum Digital Signature (FIPS 204) for document authenticity |
 | **Cloud Storage** | **AWS S3** | Resilient cloud storage bucket (`postquantumcryptography`) |
-| **Decentralized Storage** | **IPFS (v0 Multihash)** | Content-addressed storage CID (`ipfs://Qm...`) |
-| **Audit Logging** | **Blockchain Metadata** | Immutable audit logging in `AdminAuditLogs` |
+| **Content Addressing** | **CIDv0 (IPFS multihash format)** | Deterministic fingerprint of the encrypted document. Computed locally — **not** published to the IPFS network |
+| **Integrity Anchoring** | **Ethereum (`PHR.sol`)** | Document digests committed on-chain via `DocumentAnchors`; falls back to a labelled local anchor when no chain is reachable |
+| **Access Auditing** | **PostgreSQL** | Every read, download and admin action recorded in `AdminAuditLogs` / `AuthLogs` |
+| **Consent Enforcement** | **PostgreSQL + RBAC** | A patient's revocation is checked on every doctor-facing read, so withdrawal actually blocks rather than merely records |
 
 ---
 
 ## 🛠️ Technology Stack
 
-- **Backend**: FastAPI (Python 3.11/3.13), Uvicorn, PostgreSQL, `psycopg3`, `boto3`, `liboqs-python`
+- **Backend**: FastAPI on **Python 3.12+** (3.10 minimum — the codebase uses `X | None` syntax), Uvicorn, PostgreSQL, `psycopg3`, `boto3`, `liboqs-python`, `reportlab`
 - **Frontend**: Next.js 16 (App Router), TailwindCSS v4, Framer Motion 12, Lucide React
 - **Database**: PostgreSQL 15+ (`pqc_hospital`)
-- **Cloud & Storage**: AWS S3, IPFS Gateway (Pinata)
+- **Cloud & Storage**: AWS S3 (encrypted objects only)
 
 ---
 
@@ -92,7 +314,13 @@ AWS_ACCESS_KEY_ID="your_aws_access_key"
 AWS_SECRET_ACCESS_KEY="your_aws_secret_key"
 AWS_REGION="eu-north-1"
 AWS_S3_BUCKET="postquantumcryptography"
-IPFS_GATEWAY_URL="https://gateway.pinata.cloud/ipfs/"
+
+# Blockchain audit anchoring (defaults target a local dev chain)
+BLOCKCHAIN_ENABLED="true"
+BLOCKCHAIN_RPC_URL="http://127.0.0.1:8545"
+BLOCKCHAIN_CHAIN_ID="31337"
+BLOCKCHAIN_NETWORK_NAME="anvil-local"
+BLOCKCHAIN_CONTRACT_ADDRESS="0x5FbDB2315678afecb367f032d93F642f64180aa3"
 ```
 
 ### 3. Run Backend API Server
@@ -109,15 +337,95 @@ npm install
 npm run dev
 ```
 
+### 5. Running the Tests
+
+```bash
+cd backend
+python3 -m pytest
+```
+
+106 tests, no database or running server required — they exercise pure functions
+so they fail for exactly one reason.
+
+What they cover, and why these specific assertions: every test asserts a
+*refusal* as well as a success, because a happy-path-only suite would pass
+against a verifier that always returns true. That is not hypothetical — this
+codebase previously shipped one.
+
+| Area | The property being protected |
+|---|---|
+| `test_crypto_pipeline.py` | A tampered digest fails verification; a forged signature fails; a mock key never verifies; wrong-key decryption raises; ciphertext does not leak plaintext |
+| `test_storage_and_anchoring.py` | A failed upload records no object key; a failed download raises instead of returning placeholder bytes; placeholder credentials read as *unconfigured*; an unreachable chain yields a clearly-labelled local anchor |
+| `test_clinical_validation.py` | Impossible vitals (SpO₂ 990%) are rejected while abnormal-but-real ones (SpO₂ 88%) are accepted; past appointment dates are refused; break-glass demands a substantive reason and a bounded duration |
+| `test_rbac_parity.py` | The backend permission matrix and the frontend IAM map cannot drift apart |
+
+The suite was checked by mutation: reintroducing three real past bugs — a
+signature verifier that always returned true, an upload that recorded a key it
+never wrote, and a dropped vitals validator — made 7, 1 and 2 tests fail
+respectively.
+
+### 6. Blockchain Audit Trail
+
+Document digests are anchored on-chain via `contracts/PHR.sol`. Every developer
+runs their own local chain — no accounts, no funds, no internet required.
+
+Install [Foundry](https://getfoundry.sh), then:
+
+```bash
+# From the repository root — compile the contract
+forge build
+
+# Start a local chain (leave running)
+anvil --port 8545 --chain-id 31337
+
+# Deploy, then copy the printed address into backend/.env
+cd backend && python3 deploy_contract.py
+```
+
+The deploy address is deterministic, so the value already in `.env` works as
+long as you deploy to a fresh chain as the first transaction.
+
+**Verifying it is genuinely on-chain** — `GET /api/admin/blockchain/status`
+reports live connection state and an `on_chain` vs `simulated` anchor count.
+Each report's `/verify` endpoint returns `blockchain_verified`, which re-reads
+the digest from the chain and compares it to the stored one. That check is what
+catches tampering: an attacker who rewrites `document_hash` in Postgres cannot
+alter the digest already committed to the chain, so the two stop agreeing.
+
+If no chain is reachable the system keeps working, but anchors are written with
+`anchored_on='local-simulated'` and no block number — deliberately visible, so a
+simulated anchor is never mistaken for a real one.
+
+**Sharing one ledger across the team** (e.g. for a demo with a public block
+explorer), point every developer at the same testnet instead:
+
+```env
+BLOCKCHAIN_RPC_URL="https://sepolia.infura.io/v3/<your-key>"
+BLOCKCHAIN_CHAIN_ID="11155111"
+BLOCKCHAIN_NETWORK_NAME="sepolia"
+BLOCKCHAIN_PRIVATE_KEY="<testnet-only key, funded from a faucet>"
+BLOCKCHAIN_EXPLORER_URL="https://sepolia.etherscan.io/tx/"
+BLOCKCHAIN_CONTRACT_ADDRESS="<address from deploy_contract.py>"
+```
+
+Deploy once, share the resulting contract address. Use a throwaway key funded
+only with faucet ETH — never a key that holds real funds.
+
 Visit **http://localhost:3000** to log in to the platform!
 
 ---
 
 ## 🔑 Demo Login Credentials
 
-| Role | Public User ID | Email / Password |
-| --- | --- | --- |
-| **Administrator** | `ADM-2026-000001` | `admin@hospital.com` / `Admin@1234` |
-| **Doctor** | `DOC-2026-000001` | `doctor@pqc.com` / `Password123!` |
-| **Patient** | `PAT-2026-000001` | `patient@pqc.com` / `Password123!` |
-| **Lab Technician** | `LAB-2026-000001` | `lab@pqc.com` / `Password123!` |
+Sign in with the **User ID**, not the email address.
+
+| Role | User ID | Password | Seeded as |
+| --- | --- | --- | --- |
+| **Administrator** | `ADM-2026-000001` | `Admin@1234` | System Administrator |
+| **Doctor** | `DOC-2026-000001` | `Password@123` | Dr Carol |
+| **Patient** | `PAT-2026-000001` | `Password@123` | Bob Patient |
+| **Lab Technician** | `LAB-2026-000001` | `Password@123` | Leo LabTech |
+| **Nurse** | `NUR-2026-000001` | `Password@123` | Nina Nurse |
+
+Create these with the seed scripts in `backend/` (`seed_admin.py`, then the
+role seeders). The admin password comes from `ADMIN_PASSWORD` in `.env`.

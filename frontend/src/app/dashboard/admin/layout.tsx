@@ -15,6 +15,7 @@ import {
   Menu,
   X,
   ChevronLeft,
+  ShieldAlert,
 } from "lucide-react";
 import { logout } from "@/lib/session";
 import { useAuth } from "@/context/AuthContext";
@@ -24,6 +25,7 @@ const navItems = [
   { label: "Registrations", icon: UserPlus, href: "/dashboard/admin/registrations" },
   { label: "User Management", icon: Users, href: "/dashboard/admin/users" },
   { label: "Security", icon: Shield, href: "/dashboard/admin/security" },
+  { label: "Emergency Access", icon: ShieldAlert, href: "/dashboard/admin/emergency-access" },
   { label: "Audit Logs", icon: FileText, href: "/dashboard/admin/audit-logs" },
 ];
 

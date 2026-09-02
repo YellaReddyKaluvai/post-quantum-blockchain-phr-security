@@ -5,13 +5,16 @@ import { motion } from "framer-motion";
 import { Calendar, Check, X, Clock } from "lucide-react";
 import { getDoctorAppointments, updateAppointmentStatus } from "@/lib/session";
 
+// Mirrors the backend DoctorAppointmentItem exactly.
 interface DoctorAppointment {
   id: string;
   patient_name?: string;
+  patient_id_public?: string;
+  department?: string | null;
+  appointment_date?: string | null;
+  appointment_time?: string | null;
   status?: string;
-  date?: string;
-  time?: string;
-  [key: string]: unknown;
+  notes?: string | null;
 }
 
 export default function Appointments() {
@@ -85,8 +88,8 @@ export default function Appointments() {
                   </span>
                 </div>
                 <div className="flex items-center gap-4 text-sm text-slate-600">
-                  <span className="flex items-center gap-1"><Calendar className="w-4 h-4" /> {new Date(appt.date || Date.now()).toLocaleDateString()}</span>
-                  <span className="flex items-center gap-1"><Clock className="w-4 h-4" /> {appt.time}</span>
+                  <span className="flex items-center gap-1"><Calendar className="w-4 h-4" /> {appt.appointment_date ? new Date(appt.appointment_date).toLocaleDateString() : "—"}</span>
+                  <span className="flex items-center gap-1"><Clock className="w-4 h-4" /> {appt.appointment_time || "—"}</span>
                 </div>
               </div>
 

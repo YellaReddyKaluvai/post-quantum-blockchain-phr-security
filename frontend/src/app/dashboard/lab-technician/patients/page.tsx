@@ -6,17 +6,15 @@ import { Search, User, Droplet, FilePlus, FileCheck, Stethoscope } from "lucide-
 import { searchPatientsForLab } from "@/lib/session";
 import Link from "next/link";
 
+// Mirrors GET /api/lab-tech/patients/search exactly.
 interface LabPatientItem {
-  id: string;
-  name?: string;
+  id: string;          // internal UUID, used for links
+  user_id?: string;    // public ID shown to people
   full_name?: string;
-  age?: number;
+  email?: string;
   gender?: string;
-  bloodGroup?: string;
-  blood_group?: string;
-  assignedDoctor?: string;
-  user_id?: string;
-  [key: string]: unknown;
+  age?: string;        // pre-formatted "45 Y"
+  blood_group?: string | null;
 }
 
 export default function PatientSearchPage() {
@@ -25,23 +23,23 @@ export default function PatientSearchPage() {
 
   const [loading, setLoading] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
+  const [loadError, setLoadError] = useState("");
 
   const handleSearch = useCallback(async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setLoading(true);
     setHasSearched(true);
+    setLoadError("");
     
     try {
       const data = await searchPatientsForLab(searchTerm || "all");
       setPatients(data);
     } catch (error) {
       console.error(error);
-      // Fallback
-      setPatients([
-        { id: "PAT-8821", name: "John Doe", age: 45, gender: "Male", bloodGroup: "O+", assignedDoctor: "Dr. Sarah Smith" },
-        { id: "PAT-9932", name: "Jane Smith", age: 32, gender: "Female", bloodGroup: "A-", assignedDoctor: "Dr. Michael Jones" },
-        { id: "PAT-1123", name: "Mark Johnson", age: 58, gender: "Male", bloodGroup: "B+", assignedDoctor: "Dr. Emily Davis" },
-      ]);
+      // No placeholder patients. Inventing people a technician might then
+      // create reports against is worse than showing nothing.
+      setPatients([]);
+      setLoadError("Could not search patients. Check that the backend is running.");
     } finally {
       setLoading(false);
     }
@@ -58,6 +56,12 @@ export default function PatientSearchPage() {
         <h1 className="text-2xl font-bold text-slate-800">Patient Directory</h1>
         <p className="text-sm text-slate-500">Search for patients to create or view laboratory reports.</p>
       </div>
+
+      {loadError && (
+        <div className="p-3 rounded-xl bg-rose-50 border border-rose-100 text-rose-700 text-sm font-semibold">
+          {loadError}
+        </div>
+      )}
 
       <div className="bg-white/80 backdrop-blur-md rounded-2xl shadow-sm border border-slate-100 p-6">
         <form onSubmit={handleSearch} className="flex gap-4 max-w-2xl">
@@ -106,26 +110,26 @@ export default function PatientSearchPage() {
               <div className="p-6 flex-1">
                 <div className="flex justify-between items-start mb-4">
                   <div>
-                    <h3 className="text-lg font-bold text-slate-800">{patient.name}</h3>
-                    <p className="text-xs font-semibold text-slate-500">{patient.id}</p>
+                    <h3 className="text-lg font-bold text-slate-800">{patient.full_name}</h3>
+                    <p className="text-xs font-semibold text-slate-500">{patient.user_id}</p>
                   </div>
                   <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center">
                     <User className="w-5 h-5 text-slate-500" />
                   </div>
                 </div>
-                
+
                 <div className="space-y-2 mb-6">
                   <div className="flex items-center gap-2 text-sm text-slate-600">
                     <User className="w-4 h-4 text-slate-400" />
-                    <span>{patient.age} yrs • {patient.gender}</span>
+                    <span>{[patient.age, patient.gender].filter(Boolean).join(" • ") || "—"}</span>
                   </div>
                   <div className="flex items-center gap-2 text-sm text-slate-600">
                     <Droplet className="w-4 h-4 text-rose-400" />
-                    <span>Blood Group: <span className="font-semibold text-slate-800">{patient.bloodGroup}</span></span>
+                    <span>Blood Group: <span className="font-semibold text-slate-800">{patient.blood_group || "Not recorded"}</span></span>
                   </div>
                   <div className="flex items-center gap-2 text-sm text-slate-600">
                     <Stethoscope className="w-4 h-4 text-cyan-500" />
-                    <span>{patient.assignedDoctor}</span>
+                    <span className="truncate">{patient.email}</span>
                   </div>
                 </div>
               </div>
