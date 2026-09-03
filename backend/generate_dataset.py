@@ -497,10 +497,14 @@ def create_reports(conn, jobs: list, upload_s3: bool) -> dict:
     if upload_s3:
         t0 = time.perf_counter()
         def push(r):
-            key = f"reports/{r['patient']['user_id']}/{r['report_no']}.enc"
+            name = f"reports/{r['patient']['user_id']}/{r['report_no']}.enc"
             try:
-                upload_to_aws_s3(r["enc"]["ciphertext"].encode(), key)
-                return r["report_no"], key
+                # Record the key the uploader *returns*, never the one we asked
+                # for: it prefixes the object path, so a constructed key would
+                # point at nothing. Storing a key for an object that does not
+                # exist is the defect this pipeline was rewritten to prevent.
+                stored_key, _url = upload_to_aws_s3(r["enc"]["ciphertext"].encode(), name)
+                return r["report_no"], stored_key
             except Exception:
                 return r["report_no"], None
         with ThreadPoolExecutor(max_workers=16) as ex:
