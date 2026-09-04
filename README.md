@@ -206,8 +206,8 @@ listed as not built.
 | Registration → admin approval → login | ✅ | Permanent role-scoped User IDs; real SMTP approval/rejection email |
 | Post-quantum key issuance | ✅ | Real ML-KEM-768 + ML-DSA-65 via liboqs, generated on approval |
 | Doctor → Lab → Patient report pipeline | ✅ | 9 structured panels → hospital PDF → AES-256-GCM → ML-KEM → ML-DSA → chain anchor |
-| Imaging studies | ⚠️ | Encrypted, signed and anchored correctly — but only the uploading technician can open one. See Incomplete workflows. |
-| Nurse module | ✅ | Vitals and notes reach the doctor and patient. Medication rounds are recorded but not yet readable — see Incomplete workflows. |
+| Imaging studies | ✅ | Encrypted, signed, anchored — and now readable by the patient and by an entitled doctor |
+| Nurse module | ✅ | Vitals, notes and medication rounds all reach the doctor and the patient |
 | Cloud storage (AWS S3) | ✅ | Ciphertext only, verified; doubles as a recovery path if the database copy is lost |
 | Blockchain anchoring | ✅ | Real on-chain writes via `PHR.sol`; falls back to a clearly-labelled local anchor |
 | Session handling | ✅ | 30-minute tokens; expiry redirects to login and returns you to where you were |
@@ -231,26 +231,33 @@ is missing. Listed below rather than counted as complete.
 
 ## ⚠️ Incomplete Workflows
 
-Flows that start but do not finish. These are gaps in delivery, not in
-security — every record below is correctly encrypted, signed and anchored.
+Flows that start but do not finish. Five were closed in this pass; what remains
+is listed honestly rather than quietly dropped.
 
-| # | Workflow | Where it stops | Impact |
-|---|---|---|---|
-| 1 | **Imaging → clinician / patient** | Technician uploads and the patient is notified, but there is no endpoint or page for either the **patient** or the **doctor** to open the study | A patient is told to view something they cannot open; the doctor who needs to read the scan has no access at all |
-| 2 | **Medication adherence → doctor** | The nurse records every round (Administered / Refused / Held / Missed) but `MedicationAdministrationRecord` is never returned by any endpoint | A prescriber cannot see whether their prescription is being taken; a **refusal is recorded and never surfaces** |
-| 3 | **Appointment outcome → patient** | Accept, complete and cancel update the row with no notification | A patient whose appointment is **cancelled is never told** |
-| 4 | **Lab request → technician** | No notification is raised when a doctor orders a test | An Emergency-priority request is seen only if the technician refreshes the queue |
-| 5 | **Report reviewed → patient** | The doctor's "mark reviewed" works but notifies nobody | The patient is not told a clinician has actually read their result |
+### Closed
 
-The pattern: eight notification events exist, and the gaps cluster around
-*state changes made by one role that another role is waiting on*. Items 1 and 2
-are missing functionality; 3–5 are missing messages.
+| Workflow | What was wrong | Now |
+|---|---|---|
+| **Imaging → clinician / patient** | Encrypted, signed, anchored — and openable only by the uploading technician. The patient was notified about something they could not reach. | Patient and entitled doctor both read studies, through one shared release path |
+| **Medication adherence → prescriber** | Every round recorded; no endpoint ever returned it. A refusal was stored and never surfaced. | Doctor sees it on the chart, patient sees their own history; refusals reported in their own right |
+| **Appointment outcome → patient** | Accept, complete and cancel notified nobody, so a cancelled appointment was one the patient turned up for. | Every outcome reaches the patient |
+| **Lab request → laboratory** | The only role in the system not told when work arrived for it. | All technicians notified, priority marked |
+| **Report reviewed → patient** | The moment the patient is really waiting for went unannounced. | Patient told a clinician has read their result |
+
+### Still open
+
+| # | Workflow | Where it stops |
+|---|---|---|
+| 1 | **Zero-knowledge proofs** | Not implemented at all — no circuit, prover or verifier |
+| 2 | **Multi-hospital federation** | FedAvg is real; the three peer nodes are simulated |
+| 3 | **IPFS publishing** | A CIDv0 is computed; nothing is pinned to the network |
+| 4 | **Doctor-facing imaging UI** | The endpoints exist and are authorization-scoped; no screen yet |
 
 ### Not implemented
 
 | Area | Status |
 |---|---|
-| **Zero-Knowledge Proofs** | **Not present.** No circuit, no prover, no verifier. An interface exists nowhere yet; nothing in the system should be described as ZK. |
+| **Zero-Knowledge Proofs** | **Not present.** No circuit, no prover, no verifier. Nothing in the system should be described as ZK — hashing a value and comparing digests is not a zero-knowledge proof. |
 | **Multi-hospital federation** | The FedAvg aggregation is real, but the peer nodes are **simulated** — this is a single-hospital deployment. See the AI security section. |
 | **IPFS publishing** | A CIDv0 is computed locally, but nothing is pinned to the IPFS network — see the Content Addressing row below. |
 | `MedicalRecords` table | Dead schema — 0 references, 0 rows. Marked deprecated in `init.sql` and left in place rather than dropped unilaterally; safe to remove once the team agrees. |
