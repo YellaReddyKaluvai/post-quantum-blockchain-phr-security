@@ -663,3 +663,17 @@ CREATE TABLE IF NOT EXISTS ZkpChallenges (
     expires_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP + INTERVAL '5 minutes'
 );
 CREATE INDEX IF NOT EXISTS idx_zkp_challenge ON ZkpChallenges(challenge);
+
+-- ─── Federated peers (spec §20–21) ───────────────────────────────────────────
+-- A registered peer is a real remote institution that submits model parameters.
+-- Simulated peers stay flagged in FederatedRounds; these are separate and real.
+CREATE TABLE IF NOT EXISTS FederatedPeers (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    node_name VARCHAR(120) UNIQUE NOT NULL,
+    shared_secret_encrypted TEXT NOT NULL,   -- HMAC key, AES-encrypted at rest
+    contact_url TEXT,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    last_submission_at TIMESTAMPTZ,
+    submissions INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

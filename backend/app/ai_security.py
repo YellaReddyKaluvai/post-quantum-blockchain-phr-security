@@ -30,6 +30,7 @@ authentication, RBAC and consent, never in place of them.
 
 from __future__ import annotations
 
+import hashlib
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -318,3 +319,63 @@ def federated_average(node_parameters: list[tuple[str, int, dict]]) -> dict[str,
 
     return {"medians": medians, "scales": scales,
             "contributing_nodes": len(node_parameters), "total_samples": total}
+
+
+# ─── Peer submission integrity (spec §21) ────────────────────────────────────
+
+def parameters_signature(node_name: str, round_number: int, sample_count: int,
+                         parameters: dict, shared_secret: str) -> str:
+    """HMAC over a peer's submission.
+
+    Federation moves model parameters between institutions, so a peer that can
+    submit arbitrary medians can drag the global baseline wherever it likes and
+    silently blind every hospital's detector. Authenticating the submission is
+    therefore not optional book-keeping — it is the control that stops one
+    compromised node degrading everyone else's security.
+
+    Signing a canonical JSON form rather than the raw request body means the
+    signature survives key reordering and whitespace, which would otherwise
+    make valid submissions fail for no reason.
+    """
+    import hmac
+    import json as _json
+    canonical = _json.dumps(
+        {"node": node_name, "round": round_number,
+         "samples": sample_count, "parameters": parameters},
+        sort_keys=True, separators=(",", ":"),
+    )
+    return hmac.new(shared_secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+
+
+def verify_parameters_signature(node_name: str, round_number: int, sample_count: int,
+                                parameters: dict, shared_secret: str,
+                                signature: str) -> bool:
+    """Constant-time check of a peer's submission signature."""
+    import hmac
+    expected = parameters_signature(node_name, round_number, sample_count,
+                                    parameters, shared_secret)
+    return hmac.compare_digest(expected, signature or "")
+
+
+def sane_parameters(parameters: dict) -> bool:
+    """Reject a submission that could not have come from an honest detector.
+
+    A peer sending negative scales or absurd medians would poison the global
+    model, so obviously impossible values are refused before aggregation. This
+    is a floor, not a defence against a subtle adversary — robust aggregation
+    against a determined poisoner is its own research problem, and pretending
+    otherwise would be the kind of overclaim this project has been correcting.
+    """
+    medians = parameters.get("medians")
+    scales = parameters.get("scales")
+    if not isinstance(medians, dict) or not isinstance(scales, dict):
+        return False
+    for feature in FEATURE_WEIGHTS:
+        m, s = medians.get(feature), scales.get(feature)
+        if not isinstance(m, (int, float)) or not isinstance(s, (int, float)):
+            return False
+        if m < 0 or s <= 0:
+            return False
+        if m > 1e6 or s > 1e6:
+            return False
+    return True

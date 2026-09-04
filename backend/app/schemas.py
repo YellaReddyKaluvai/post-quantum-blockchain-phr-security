@@ -780,3 +780,22 @@ class ZkpProofRequest(BaseModel):
     challenge: str = Field(..., min_length=8, max_length=64)
     t: str = Field(..., min_length=1, max_length=1024)
     s: str = Field(..., min_length=1, max_length=1024)
+
+
+class RegisterPeerRequest(BaseModel):
+    """Register a real remote institution as a federation peer."""
+    node_name: str = Field(..., min_length=3, max_length=120)
+    contact_url: Optional[str] = Field(default=None, max_length=500)
+
+
+class PeerSubmissionRequest(BaseModel):
+    """A peer institution's locally-fitted model parameters.
+
+    Carries no records, no identifiers and no events — only the medians and
+    scales describing what normal looks like at that institution.
+    """
+    node_name: str = Field(..., min_length=3, max_length=120)
+    round_number: int = Field(..., ge=1)
+    sample_count: int = Field(..., ge=1, le=10_000_000)
+    parameters: dict = Field(...)
+    signature: str = Field(..., min_length=64, max_length=64)

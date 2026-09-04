@@ -1,4 +1,5 @@
 import hashlib
+import secrets
 import json
 import logging
 import math
@@ -32,6 +33,7 @@ from app.schemas import (
     ConsentEntry, RevokeConsentRequest, EmergencyAccessRequest, EmergencyAccessRecord,
     CreateAccessRequest, AccessRequestDecision, AccessRequestRecord,
     ZkpProofRequest,
+    RegisterPeerRequest, PeerSubmissionRequest,
     PatientDocumentItem,
     NurseProfile, NurseDashboardSummary, NursePatientListItem,
     PatientVitalsRecord, CreateVitalsRequest, NursingNoteRecord, CreateNursingNoteRequest,
@@ -56,6 +58,7 @@ from app.user_id_service import generate_user_id, generate_report_number
 from app.rbac import get_permissions_for_role, normalize_role
 from app.storage_service import (
     store_encrypted_document, download_file_from_s3, storage_status, StorageError,
+    ipfs_status, fetch_from_ipfs, is_ipfs_configured, IPFSError,
 )
 
 from app.audit_service import log_admin_action
@@ -3369,6 +3372,14 @@ def get_imaging_image(imaging_id: str, session: dict = Depends(require_role("Lab
             ciphertext = download_file_from_s3(r["s3_key"]).decode("utf-8")
         except StorageError as exc:
             logger.error("S3 recovery failed for imaging %s: %s", imaging_id, exc)
+    # Third copy. Now that content is genuinely pinned, IPFS is a real recovery
+    # path rather than a fingerprint — worth trying before giving up.
+    if not ciphertext and r.get("ipfs_cid") and is_ipfs_configured():
+        try:
+            ciphertext = fetch_from_ipfs(r["ipfs_cid"]).decode("utf-8")
+            logger.info("Recovered imaging %s from IPFS", imaging_id)
+        except IPFSError as exc:
+            logger.error("IPFS recovery failed for imaging %s: %s", imaging_id, exc)
 
     try:
         shared_secret = decapsulate_aes_key(r["encrypted_aes_key"], r["mlkem_private_key_encrypted"])
@@ -4298,9 +4309,43 @@ def run_federated_round(session: dict = Depends(require_role("Administrator"))):
                  json.dumps(local.to_parameters())))
             nodes.append(("This hospital (local)", local.sample_count, local.to_parameters()))
 
-            # Peers are simulated by perturbing the local baseline. Marked as
-            # such in the database and in the response.
-            for name, m_scale, s_scale in SIMULATED_PEERS:
+            # Real peer submissions for this round take precedence. Simulated
+            # peers exist to demonstrate the aggregation when nobody has
+            # federated yet; the moment a real institution submits, padding the
+            # round with invented nodes would misrepresent the result.
+            cur.execute(
+                """SELECT node_name, sample_count, local_parameters
+                     FROM FederatedRounds
+                    WHERE round_number = %s AND is_simulated = FALSE
+                      AND node_name <> 'This hospital (local)'""",
+                (rnd,))
+            real_peers = cur.fetchall()
+            for peer in real_peers:
+                nodes.append((peer["node_name"], peer["sample_count"], peer["local_parameters"]))
+
+            # Also pick up submissions filed against the previous round, since a
+            # peer cannot know the round number this node is about to open.
+            if not real_peers:
+                cur.execute(
+                    """SELECT DISTINCT ON (node_name) node_name, sample_count, local_parameters
+                         FROM FederatedRounds
+                        WHERE is_simulated = FALSE AND node_name <> 'This hospital (local)'
+                          AND created_at > CURRENT_TIMESTAMP - INTERVAL '7 days'
+                        ORDER BY node_name, round_number DESC""")
+                recent = cur.fetchall()
+                for peer in recent:
+                    nodes.append((peer["node_name"], peer["sample_count"], peer["local_parameters"]))
+                    cur.execute(
+                        """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,
+                                                        sample_count, local_parameters)
+                           VALUES (%s, %s, FALSE, %s, %s)
+                           ON CONFLICT (round_number, node_name) DO NOTHING""",
+                        (rnd, peer["node_name"], peer["sample_count"],
+                         psycopg.types.json.Json(peer["local_parameters"])))
+                real_peers = recent
+
+            simulated_used = 0 if real_peers else len(SIMULATED_PEERS)
+            for name, m_scale, s_scale in (SIMULATED_PEERS if not real_peers else []):
                 params = {
                     "medians": {k: round(v * m_scale, 4) for k, v in local.medians.items()},
                     "scales": {k: round(v * s_scale, 4) for k, v in local.scales.items()},
@@ -4324,19 +4369,31 @@ def run_federated_round(session: dict = Depends(require_role("Administrator"))):
                              "FEDERATED_ROUND_COMPLETED")
             conn.commit()
 
+    real_peer_count = len(real_peers)
+    if real_peer_count:
+        disclosure = (
+            f"{real_peer_count + 1} real nodes: this hospital plus "
+            f"{real_peer_count} peer institution(s) that submitted signed parameters. "
+            "No simulated nodes were included. Only medians and scales are "
+            "aggregated — no record, event or identifier crosses the boundary."
+        )
+    else:
+        disclosure = (
+            f"One real node (this hospital) and {simulated_used} simulated peers, "
+            "because no peer institution has submitted yet. The aggregation is genuine "
+            "FedAvg; the peers are not real institutions. Register a peer and have it "
+            "POST to /api/federated/submit to federate for real."
+        )
+
     return {
         "round": rnd,
         "aggregation": "FedAvg (weighted by sample count)",
         "contributing_nodes": global_params["contributing_nodes"],
         "total_samples": global_params["total_samples"],
         "local_node_is_real": True,
-        "peer_nodes_simulated": len(SIMULATED_PEERS),
-        "disclosure": (
-            "One real node (this hospital) and "
-            f"{len(SIMULATED_PEERS)} simulated peers. The aggregation is genuine FedAvg; "
-            "the peers are not real institutions. Only model parameters — medians and "
-            "scales — are aggregated, never records."
-        ),
+        "real_peer_nodes": real_peer_count,
+        "peer_nodes_simulated": simulated_used,
+        "disclosure": disclosure,
         "global_parameters": global_params,
     }
 
@@ -4436,6 +4493,14 @@ def _release_imaging_payload(r: dict, imaging_id: str) -> dict:
             ciphertext = download_file_from_s3(r["s3_key"]).decode("utf-8")
         except StorageError as exc:
             logger.error("S3 recovery failed for imaging %s: %s", imaging_id, exc)
+    # Third copy. Now that content is genuinely pinned, IPFS is a real recovery
+    # path rather than a fingerprint — worth trying before giving up.
+    if not ciphertext and r.get("ipfs_cid") and is_ipfs_configured():
+        try:
+            ciphertext = fetch_from_ipfs(r["ipfs_cid"]).decode("utf-8")
+            logger.info("Recovered imaging %s from IPFS", imaging_id)
+        except IPFSError as exc:
+            logger.error("IPFS recovery failed for imaging %s: %s", imaging_id, exc)
 
     try:
         shared_secret = decapsulate_aes_key(r["encrypted_aes_key"], r["mlkem_private_key_encrypted"])
@@ -4808,3 +4873,145 @@ def verify_zkp_proof(body: ZkpProofRequest, session: dict = Depends(require_role
                   "Unlike ML-KEM-768 and ML-DSA-65 elsewhere in this system, this "
                   "component is not quantum-resistant.",
     }
+
+
+@app.get("/api/admin/ipfs/status")
+def get_ipfs_status(session: dict = Depends(require_role("Administrator"))):
+    """Live IPFS node health, and an honest count of what is actually published.
+
+    Reports 'not configured' separately from 'configured but unreachable' —
+    those need different actions from whoever is on call — and states plainly
+    that pinning on one node is not replication across the public network.
+    """
+    status = ipfs_status()
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT COUNT(*) AS total,
+                          COUNT(ipfs_cid) AS with_cid
+                     FROM LabReports""")
+            reports = cur.fetchone()
+    status["reports_total"] = reports["total"]
+    status["reports_with_cid"] = reports["with_cid"]
+    return status
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Real federation peers (spec §20–21)
+#
+# The simulated peers demonstrate the aggregation; these endpoints make it
+# deployable. A second QuantumCare instance registers as a peer, fits its own
+# baseline locally, and submits only the parameters — medians and scales. No
+# record, event or identifier crosses the boundary, which is the entire reason
+# to federate rather than pool.
+#
+# Submissions are HMAC-signed with a per-peer shared secret. Without that, any
+# party who can reach this endpoint could drag the global baseline wherever
+# they liked and silently blind every participant's detector.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/admin/federated/peers")
+def register_federated_peer(req: RegisterPeerRequest,
+                            session: dict = Depends(require_role("Administrator"))):
+    """Register a peer institution and mint its shared secret.
+
+    The secret is shown once and stored encrypted, in the same shape as
+    ML-KEM private keys and ZKP consent tokens.
+    """
+    secret = secrets.token_hex(32)
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT 1 FROM FederatedPeers WHERE node_name = %s", (req.node_name,))
+            if cur.fetchone():
+                raise HTTPException(status_code=409, detail="A peer with that name is already registered.")
+            cur.execute(
+                """INSERT INTO FederatedPeers (node_name, shared_secret_encrypted, contact_url)
+                   VALUES (%s, %s, %s) RETURNING id""",
+                (req.node_name, encrypt_data(secret), req.contact_url))
+            peer_id = cur.fetchone()["id"]
+            log_admin_action(conn, session["user_id"], session.get("public_user_id"),
+                             "FEDERATED_PEER_REGISTERED")
+            conn.commit()
+    return {
+        "peer_id": str(peer_id),
+        "node_name": req.node_name,
+        "shared_secret": secret,
+        "delivered_once": True,
+        "notice": "Give this to the peer institution over a secure channel. It is stored "
+                  "encrypted here and will not be shown again.",
+    }
+
+
+@app.get("/api/admin/federated/peers")
+def list_federated_peers(session: dict = Depends(require_role("Administrator"))):
+    """Registered peers, and whether any have actually submitted."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT node_name, contact_url, is_active, submissions,
+                          last_submission_at, created_at
+                     FROM FederatedPeers ORDER BY node_name""")
+            peers = [dict(r) for r in cur.fetchall()]
+    return {
+        "peers": peers,
+        "total": len(peers),
+        "active_contributors": sum(1 for p in peers if p["submissions"] > 0),
+        "note": "Peers listed here are real remote institutions. The simulated nodes that "
+                "appear in a federated round are separate and always flagged as simulated.",
+    }
+
+
+@app.post("/api/federated/submit")
+def receive_peer_parameters(req: PeerSubmissionRequest, request: Request = None):
+    """Accept a peer institution's model parameters.
+
+    Deliberately not behind ``require_role``: the caller is another
+    institution's server, not a user of this one. Authentication is the HMAC
+    over the submission, checked against that peer's shared secret.
+    """
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT id, shared_secret_encrypted, is_active FROM FederatedPeers WHERE node_name = %s",
+                (req.node_name,))
+            peer = cur.fetchone()
+            if not peer or not peer["is_active"]:
+                raise HTTPException(status_code=403, detail="Unknown or inactive peer.")
+
+            secret = decrypt_data(peer["shared_secret_encrypted"])
+            if not aisec.verify_parameters_signature(
+                    req.node_name, req.round_number, req.sample_count,
+                    req.parameters, secret, req.signature):
+                logger.warning("Rejected federated submission from %s: bad signature", req.node_name)
+                aisec.record_security_event(
+                    cur, actor_id=None, actor_role=None,
+                    event_type="FEDERATED_SUBMISSION_REJECTED",
+                    resource=req.node_name,
+                    ip_address=request.client.host if request and request.client else None)
+                conn.commit()
+                raise HTTPException(status_code=401, detail="Signature verification failed.")
+
+            if not aisec.sane_parameters(req.parameters):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Parameters are outside plausible bounds and were not accepted.")
+
+            cur.execute(
+                """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,
+                                                sample_count, local_parameters)
+                   VALUES (%s, %s, FALSE, %s, %s)
+                   ON CONFLICT (round_number, node_name) DO UPDATE
+                     SET sample_count = EXCLUDED.sample_count,
+                         local_parameters = EXCLUDED.local_parameters,
+                         created_at = CURRENT_TIMESTAMP""",
+                (req.round_number, req.node_name, req.sample_count,
+                 psycopg.types.json.Json(req.parameters)))
+            cur.execute(
+                """UPDATE FederatedPeers
+                      SET submissions = submissions + 1,
+                          last_submission_at = CURRENT_TIMESTAMP
+                    WHERE id = %s""", (peer["id"],))
+            conn.commit()
+
+    return {"accepted": True, "round": req.round_number, "node": req.node_name,
+            "note": "Parameters only. No records were transmitted or expected."}

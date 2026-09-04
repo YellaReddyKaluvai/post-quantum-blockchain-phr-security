@@ -248,17 +248,16 @@ is listed honestly rather than quietly dropped.
 
 | # | Workflow | Where it stops |
 |---|---|---|
-| 1 | **Multi-hospital federation** | FedAvg is real; the three peer nodes are simulated |
-| 2 | **IPFS publishing** | A CIDv0 is computed; nothing is pinned to the network |
-| 3 | **Post-quantum ZKP** | The zero-knowledge proof is Schnorr — genuine, but classically secure only. See below. |
+| 1 | **Post-quantum ZKP** | The zero-knowledge proof is Schnorr — genuine, but classically secure only. See below. |
+| 2 | **Public IPFS replication** | Content is really pinned, but on one node. That is not replication across the public network. |
 
 ### Not implemented
 
 | Area | Status |
 |---|---|
 | **Post-quantum ZKP** | The Schnorr proof below is real but rests on discrete logarithm, which Shor's algorithm breaks. A quantum-resistant proof system (hash-based STARKs, lattice-based proofs) is not implemented. |
-| **Multi-hospital federation** | The FedAvg aggregation is real, but the peer nodes are **simulated** — this is a single-hospital deployment. See the AI security section. |
-| **IPFS publishing** | A CIDv0 is computed locally, but nothing is pinned to the IPFS network — see the Content Addressing row below. |
+| **Multi-hospital federation** | Real peers can now register and submit signed parameters, and displace the simulated nodes when they do. Simulated peers remain only as the fallback when nobody has federated yet. |
+| **Public IPFS replication** | Content is genuinely pinned to a running node — real CIDs, real blocks, real retrieval — but on one node, which is not the same as replication across the public network. |
 | `MedicalRecords` table | Dead schema — 0 references, 0 rows. Marked deprecated in `init.sql` and left in place rather than dropped unilaterally; safe to remove once the team agrees. |
 
 > On AI: the security layer performs **behavioural anomaly detection**, not
@@ -366,6 +365,54 @@ cd backend && python3 generate_dataset.py --reset
 entered through the UI are matched by nothing in that scope and are left
 untouched. `--smoke` generates a 14-user sample; `--no-s3` skips cloud upload.
 The random seed is fixed, so a re-run reproduces the same dataset.
+
+---
+
+## 🌐 IPFS Publishing
+
+Content is genuinely published to a running IPFS node — not addressed and left
+on disk, which is what this module used to do while a gateway link in the UI
+implied otherwise.
+
+```
+ciphertext ──► ipfs add --pin ──► node computes CID ──► CID recorded
+                                                          │
+                     recovery order: database → S3 → IPFS ┘
+```
+
+| | |
+|---|---|
+| Node | kubo v0.43, local daemon |
+| CID | computed **by the node**, not by us |
+| Pinned | yes — `pin/ls` confirms, retrieval returns byte-identical content |
+| Payload | **ciphertext only** |
+
+**Only ciphertext is ever published.** IPFS serves content to anyone who asks
+for its hash, so putting a plaintext record there would be a disclosure, not a
+storage decision.
+
+Two CIDs legitimately differ and this is asserted in a test so nobody
+"fixes" it: `generate_ipfs_cid_v0` hashes the raw bytes, while `ipfs add` wraps
+them in a UnixFS node and hashes that. Both are valid CIDv0 values addressing
+different objects. Once content is genuinely published, the node's CID is the
+one that resolves, so it is the one recorded.
+
+Running without a node is a supported configuration: `pin_to_ipfs` returns
+`None` rather than raising, so a hospital that does not run IPFS can still file
+reports. `fetch_from_ipfs` does raise, because asking for content that cannot
+be had is an error rather than empty data. The admin status endpoint reports
+*not configured* separately from *configured but unreachable* — those need
+different actions from whoever is on call.
+
+> **Scope.** Pinning on one node is real IPFS but it is not replication. Content
+> is reachable while that node runs and is dialable; it is not spread across the
+> public network. The status endpoint says exactly this rather than implying
+> global availability.
+
+```bash
+export IPFS_PATH=~/devtools/ipfs-repo
+~/devtools/kubo/ipfs daemon --enable-gc
+```
 
 ---
 
@@ -491,11 +538,23 @@ DOC-2026-000011   score 85.42   HIGH
 | FedAvg aggregation, weighted by sample count | **Real** |
 | Local baseline fitted from this hospital's activity | **Real** |
 | Only parameters (medians, scales) cross the boundary | **Real** |
-| Peer institutions | **Simulated** — 3 of 4 nodes |
+| Peer registration, signed submission, poisoning floor | **Real** |
+| Peer institutions actually running | **Depends on deployment** |
 
-This is a single-hospital deployment, so there are no peers to federate with.
-Every simulated row is flagged `is_simulated`, and the endpoint states this in
-its own response body. **Not a live multi-hospital federation.**
+A second QuantumCare instance registers as a peer, fits its own baseline, and
+POSTs only its parameters to `/api/federated/submit`. Submissions are HMAC-signed
+per peer — without that, anyone who could reach the endpoint could drag the
+global baseline wherever they liked and silently blind every participant's
+detector. Implausible parameters (negative medians, zero scales) are refused
+before aggregation.
+
+**When a real peer submits, the simulated nodes are dropped from the round.**
+They exist only to demonstrate the aggregation before anyone has federated;
+padding a real round with invented nodes would misrepresent the result. The
+endpoint's disclosure states which case applied.
+
+Verified: a signed submission accepted, a forged signature **401**, poisoned
+parameters **400**, and a round that ran with **2 real nodes and 0 simulated**.
 
 What federation buys is precise: no record, event or identifier ever leaves the
 institution — only the few numbers describing what normal looks like.
