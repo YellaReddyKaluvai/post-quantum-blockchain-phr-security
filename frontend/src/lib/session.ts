@@ -936,3 +936,60 @@ export async function runFederatedRound() {
   }
   return response.json();
 }
+
+// ─── Imaging ─────────────────────────────────────────────────────────────────
+
+export async function getPatientImaging() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/imaging`);
+  if (!response.ok) throw new Error("Failed to load your scans");
+  return response.json();
+}
+
+export async function getPatientImagingImage(imagingId: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/imaging/${imagingId}/image`);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not open that scan"));
+  }
+  return response.json();
+}
+
+export async function getDoctorImaging(patientId?: string) {
+  const url = patientId
+    ? `${backendBaseUrl}/api/doctor/imaging?patient_id=${encodeURIComponent(patientId)}`
+    : `${backendBaseUrl}/api/doctor/imaging`;
+  const response = await fetchWithAuth(url);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to load imaging"));
+  }
+  return response.json();
+}
+
+export async function getDoctorImagingImage(imagingId: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/imaging/${imagingId}/image`);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not open that scan"));
+  }
+  return response.json();
+}
+
+// ─── Medication adherence ────────────────────────────────────────────────────
+
+export async function getOwnAdherence() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/adherence`);
+  if (!response.ok) throw new Error("Failed to load your medication history");
+  return response.json();
+}
+
+export async function getPatientAdherence(patientId: string) {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/doctor/patients/${patientId}/adherence`
+  );
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to load adherence"));
+  }
+  return response.json();
+}
