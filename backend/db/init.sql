@@ -552,3 +552,93 @@ ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Requested_At TIMESTAMPTZ;
 ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Decided_At TIMESTAMPTZ;
 ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Decision_Note TEXT;
 CREATE INDEX IF NOT EXISTS idx_consent_patient_status ON Consent(Patient_ID, Status);
+
+-- ─── AI security layer (spec §18–25) ─────────────────────────────────────────
+-- Behavioural metadata only. No clinical content reaches these tables: the
+-- layer analyses *how* records are touched, never what they contain (§18).
+
+CREATE TABLE IF NOT EXISTS SecurityEvents (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    actor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    actor_public_id VARCHAR(20),
+    actor_role user_role,
+    event_type VARCHAR(60) NOT NULL,      -- RECORD_ACCESS, LOGIN_FAILED, EMERGENCY_ACCESS…
+    subject_patient_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    resource VARCHAR(120),
+    ip_address INET,
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS idx_secevent_actor_time ON SecurityEvents(actor_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_secevent_type ON SecurityEvents(event_type, occurred_at DESC);
+
+CREATE TABLE IF NOT EXISTS RiskAssessments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    actor_id UUID REFERENCES Users(id) ON DELETE CASCADE,
+    actor_public_id VARCHAR(20),
+    risk_score NUMERIC(5,2) NOT NULL,
+    risk_level VARCHAR(10) NOT NULL,      -- LOW | MEDIUM | HIGH
+    detection_source VARCHAR(40) NOT NULL,-- LOCAL_ANOMALY | FEDERATED_IDS
+    features JSONB NOT NULL DEFAULT '{}'::jsonb,
+    explanation JSONB NOT NULL DEFAULT '[]'::jsonb,   -- XAI attributions (§22)
+    window_start TIMESTAMPTZ,
+    window_end TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_risk_level ON RiskAssessments(risk_level, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS SecurityAlerts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    assessment_id UUID REFERENCES RiskAssessments(id) ON DELETE CASCADE,
+    actor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    severity VARCHAR(10) NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    summary TEXT NOT NULL,
+    response VARCHAR(40) NOT NULL,        -- MONITOR | WARN | VERIFY | RESTRICT | ESCALATE
+    acknowledged_at TIMESTAMPTZ,
+    acknowledged_by UUID REFERENCES Users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS SecurityIncidents (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    incident_ref VARCHAR(24) UNIQUE NOT NULL,
+    alert_id UUID REFERENCES SecurityAlerts(id) ON DELETE SET NULL,
+    actor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    event_type VARCHAR(60) NOT NULL,
+    affected_resource VARCHAR(160),
+    risk_level VARCHAR(10) NOT NULL,
+    detection_source VARCHAR(40) NOT NULL,
+    explanation TEXT,
+    response TEXT,
+    resolution TEXT,
+    status VARCHAR(20) NOT NULL DEFAULT 'Open',   -- Open | Investigating | Closed
+    audit_reference VARCHAR(80),
+    blockchain_tx_hash VARCHAR(120),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    closed_at TIMESTAMPTZ
+);
+
+-- Federated learning: one row per participating node per round. Holds model
+-- PARAMETERS only (per-feature baselines), never records — that separation is
+-- the entire point of federating (§20).
+CREATE TABLE IF NOT EXISTS FederatedRounds (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    round_number INTEGER NOT NULL,
+    node_name VARCHAR(80) NOT NULL,
+    is_simulated BOOLEAN NOT NULL DEFAULT TRUE,
+    sample_count INTEGER NOT NULL,
+    local_parameters JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(round_number, node_name)
+);
+
+CREATE TABLE IF NOT EXISTS FederatedGlobalModel (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    round_number INTEGER NOT NULL UNIQUE,
+    parameters JSONB NOT NULL,
+    contributing_nodes INTEGER NOT NULL,
+    total_samples INTEGER NOT NULL,
+    aggregation VARCHAR(20) NOT NULL DEFAULT 'FedAvg',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

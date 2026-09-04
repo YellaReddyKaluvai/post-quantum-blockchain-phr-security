@@ -1631,6 +1631,14 @@ def get_doctor_patient_detail(patient_id: str, session: dict = Depends(require_r
                 "DOCTOR_READ_PATIENT_RECORD", str(patient_id), user.get("user_id"),
                 details={"basis": basis},
             )
+            # Feed the AI security layer (§18). Behavioural metadata only —
+            # which record, by whom, when — never the clinical content itself.
+            aisec.record_security_event(
+                cur, actor_id=user_uuid, actor_public_id=session.get("public_user_id"),
+                actor_role="Doctor", event_type="RECORD_ACCESS",
+                subject_patient_id=str(patient_id), resource="patient_chart",
+                metadata={"basis": basis},
+            )
 
             cur.execute("SELECT * FROM Diagnoses WHERE patient_id = %s ORDER BY visit_date DESC LIMIT 5", (patient_id,))
             diagnoses = cur.fetchall()
@@ -2297,6 +2305,15 @@ def declare_emergency_access(
             "EMERGENCY_ACCESS_DECLARED", str(req.patient_id), patient["user_id"],
             request.client.host if request and request.client else None,
             {"reason": req.reason, "expires_at": expires_at.isoformat(), "tx_hash": anchor["tx_hash"]},
+        )
+        # Break-glass is rare by design, so its frequency is a strong signal.
+        # The reason text is deliberately NOT forwarded: the AI layer scores
+        # behaviour, and the clinical justification is none of its business.
+        aisec.record_security_event(
+            cur, actor_id=user_uuid, actor_public_id=session.get("public_user_id"),
+            actor_role="Doctor", event_type="EMERGENCY_ACCESS",
+            subject_patient_id=str(req.patient_id), resource="break_glass",
+            ip_address=request.client.host if request and request.client else None,
         )
 
     return {
@@ -3935,6 +3952,12 @@ def _decide_access_request(request_id: str, session: dict, approve: bool, note: 
                 "ACCESS_APPROVED" if approve else "ACCESS_REJECTED",
                 str(row["doctor_id"]), row["doctor_user_id"],
             )
+            aisec.record_security_event(
+                cur, actor_id=patient_uuid, actor_public_id=session.get("public_user_id"),
+                actor_role="Patient", event_type="CONSENT_EVENT",
+                subject_patient_id=str(patient_uuid),
+                resource="ACCESS_" + ("APPROVED" if approve else "REJECTED"),
+            )
             # A consent decision is an integrity-relevant event: anchoring it
             # means neither party can later dispute what was decided or when.
             anchor = anchor_document(
@@ -3967,3 +3990,312 @@ def reject_access_request(
     session: dict = Depends(require_role("Patient")),
 ):
     return _decide_access_request(request_id, session, False, (body.note if body else None))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI security layer (spec §18–25)
+#
+# Placement matters. This layer runs *after* authentication, RBAC and consent
+# have already decided whether an action is permitted (§23). It never grants
+# access, and on its own it never revokes it: a statistical model must not be
+# the thing standing between a clinician and a patient's record. What it does
+# is score behaviour, explain the score, raise an alert, and open an incident
+# for a human to judge.
+# ─────────────────────────────────────────────────────────────────────────────
+
+from app import ai_security as aisec  # noqa: E402
+
+
+def _persist_assessment(cur, window, risk, level, contributions, source,
+                        hours: int) -> Optional[str]:
+    """Store one risk assessment, and raise an alert when it is not LOW."""
+    import json
+    from datetime import timedelta as _td
+    end = datetime.now(timezone.utc)
+    cur.execute(
+        """INSERT INTO RiskAssessments (actor_id, actor_public_id, risk_score, risk_level,
+                                        detection_source, features, explanation,
+                                        window_start, window_end)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+        (window.actor_id, window.actor_public_id, risk, level, source,
+         json.dumps(window.features), json.dumps(contributions),
+         end - _td(hours=hours), end),
+    )
+    assessment_id = cur.fetchone()["id"]
+    if level == "LOW":
+        return None
+
+    narrative = aisec.narrate(level, contributions)
+    response = aisec.RESPONSE_BY_LEVEL[level]
+    cur.execute(
+        """INSERT INTO SecurityAlerts (assessment_id, actor_id, severity, title, summary, response)
+           VALUES (%s,%s,%s,%s,%s,%s) RETURNING id""",
+        (assessment_id, window.actor_id, level,
+         f"{level} risk behaviour — {window.actor_public_id or 'unknown actor'}",
+         narrative, response),
+    )
+    alert_id = cur.fetchone()["id"]
+
+    # HIGH risk opens a compliance record (§25). MEDIUM stays an alert: opening
+    # an incident for every mild deviation would bury the serious ones.
+    if level == "HIGH":
+        cur.execute("SELECT COUNT(*) AS n FROM SecurityIncidents")
+        ref = f"INC-{datetime.now().year}-{cur.fetchone()['n'] + 1:05d}"
+        cur.execute(
+            """INSERT INTO SecurityIncidents (incident_ref, alert_id, actor_id, event_type,
+                                              affected_resource, risk_level, detection_source,
+                                              explanation, response, audit_reference)
+               VALUES (%s,%s,%s,'ANOMALOUS_ACCESS_PATTERN',%s,%s,%s,%s,%s,%s)""",
+            (ref, alert_id, window.actor_id,
+             f"{int(window.features.get('distinct_patients', 0))} patient records",
+             level, source, narrative, response, str(assessment_id)),
+        )
+    return str(assessment_id)
+
+
+@app.post("/api/admin/security/analyze")
+def run_security_analysis(hours: int = Query(24, ge=1, le=720),
+                          session: dict = Depends(require_role("Administrator"))):
+    """Run local anomaly detection over recent activity (§19).
+
+    Fits a baseline per role, scores every active actor against their own peer
+    group, and records assessments, alerts and incidents.
+    """
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            windows = aisec.extract_windows(cur, hours=hours)
+            if not windows:
+                return {"analysed": 0, "detail": "No activity in this window."}
+
+            by_role: dict[str, list] = {}
+            for w in windows:
+                by_role.setdefault(w.actor_role or "Unknown", []).append(w)
+
+            summary = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
+            for role, group in by_role.items():
+                # Comparing a doctor against nurses would flag ordinary role
+                # differences as anomalies, so each role is its own peer group.
+                baseline = aisec.fit_baseline(group)
+                for w in group:
+                    risk, level, contributions = aisec.score(w, baseline)
+                    _persist_assessment(cur, w, risk, level, contributions,
+                                        "LOCAL_ANOMALY", hours)
+                    summary[level] += 1
+            conn.commit()
+
+    return {"analysed": len(windows), "window_hours": hours,
+            "peer_groups": list(by_role.keys()), "risk_breakdown": summary}
+
+
+@app.get("/api/admin/security/risk-assessments")
+def list_risk_assessments(level: Optional[str] = Query(None, pattern="^(LOW|MEDIUM|HIGH)$"),
+                          page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100),
+                          session: dict = Depends(require_role("Administrator"))):
+    """Scored actors with their Explainable AI attributions (§22)."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            where = "WHERE r.risk_level = %s" if level else ""
+            params: tuple = (level,) if level else ()
+            cur.execute(f"SELECT COUNT(*) AS n FROM RiskAssessments r {where}", params)
+            total = cur.fetchone()["n"]
+            cur.execute(
+                f"""SELECT r.*, u.full_name, u.role::text AS role
+                      FROM RiskAssessments r LEFT JOIN Users u ON u.id = r.actor_id
+                      {where}
+                     ORDER BY r.risk_score DESC, r.created_at DESC
+                     LIMIT %s OFFSET %s""",
+                params + (per_page, (page - 1) * per_page),
+            )
+            rows = []
+            for r in cur.fetchall():
+                rows.append({
+                    "id": str(r["id"]), "actor_name": r["full_name"],
+                    "actor_public_id": r["actor_public_id"], "actor_role": r["role"],
+                    "risk_score": float(r["risk_score"]), "risk_level": r["risk_level"],
+                    "detection_source": r["detection_source"],
+                    "features": r["features"], "explanation": r["explanation"],
+                    "narrative": aisec.narrate(r["risk_level"], r["explanation"] or []),
+                    "created_at": r["created_at"],
+                })
+    return {"total": total, "page": page, "per_page": per_page, "assessments": rows}
+
+
+@app.get("/api/admin/security/alerts")
+def list_security_alerts(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100),
+                         session: dict = Depends(require_role("Administrator"))):
+    """Alert & response queue (§24)."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM SecurityAlerts")
+            total = cur.fetchone()["n"]
+            cur.execute(
+                """SELECT a.*, u.full_name, u.user_id AS actor_public_id
+                     FROM SecurityAlerts a LEFT JOIN Users u ON u.id = a.actor_id
+                    ORDER BY (a.acknowledged_at IS NULL) DESC, a.created_at DESC
+                    LIMIT %s OFFSET %s""", (per_page, (page - 1) * per_page))
+            alerts = [{
+                "id": str(r["id"]), "severity": r["severity"], "title": r["title"],
+                "summary": r["summary"], "response": r["response"],
+                "actor_name": r["full_name"], "actor_public_id": r["actor_public_id"],
+                "acknowledged": r["acknowledged_at"] is not None,
+                "created_at": r["created_at"],
+            } for r in cur.fetchall()]
+    return {"total": total, "page": page, "per_page": per_page, "alerts": alerts}
+
+
+@app.post("/api/admin/security/alerts/{alert_id}/acknowledge")
+def acknowledge_alert(alert_id: str, session: dict = Depends(require_role("Administrator"))):
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """UPDATE SecurityAlerts SET acknowledged_at = CURRENT_TIMESTAMP,
+                          acknowledged_by = %s
+                    WHERE id = %s AND acknowledged_at IS NULL RETURNING id""",
+                (session["user_id"], alert_id))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Alert not found or already acknowledged")
+            log_admin_action(conn, session["user_id"], session.get("public_user_id"),
+                             "SECURITY_ALERT_ACKNOWLEDGED")
+            conn.commit()
+    return {"status": "success"}
+
+
+@app.get("/api/admin/security/incidents")
+def list_security_incidents(session: dict = Depends(require_role("Administrator"))):
+    """Incident and compliance records (§25)."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT i.*, u.full_name, u.user_id AS actor_public_id
+                     FROM SecurityIncidents i LEFT JOIN Users u ON u.id = i.actor_id
+                    ORDER BY (i.status = 'Open') DESC, i.created_at DESC LIMIT 100""")
+            incidents = [{
+                "incident_ref": r["incident_ref"], "event_type": r["event_type"],
+                "affected_resource": r["affected_resource"], "risk_level": r["risk_level"],
+                "detection_source": r["detection_source"], "explanation": r["explanation"],
+                "response": r["response"], "status": r["status"],
+                "actor_name": r["full_name"], "actor_public_id": r["actor_public_id"],
+                "audit_reference": r["audit_reference"], "created_at": r["created_at"],
+            } for r in cur.fetchall()]
+    return {"total": len(incidents), "incidents": incidents}
+
+
+# ─── Federated learning / federated IDS (spec §20–21) ────────────────────────
+#
+# Honest scope. This deployment is ONE hospital, so there are no peer
+# institutions to federate with. What is real here is the *mechanism*: local
+# baselines are fitted from this hospital's own activity, and FedAvg aggregates
+# parameters weighted by sample count exactly as it would across real nodes.
+# The peer nodes are simulated, every stored row is flagged is_simulated, and
+# the API says so in its own response. Claiming a live multi-hospital
+# federation would be a lie the architecture cannot currently back.
+#
+# What federation buys is stated precisely: only medians and scales cross the
+# boundary. No record, event or identifier leaves the institution.
+
+SIMULATED_PEERS = [
+    ("St. Mary's Regional", 1.15, 0.9),
+    ("Northside Teaching Hospital", 0.85, 1.25),
+    ("Coastal Community Clinic", 1.35, 0.75),
+]
+
+
+@app.post("/api/admin/security/federated/round")
+def run_federated_round(session: dict = Depends(require_role("Administrator"))):
+    """Fit this hospital's local model, then aggregate a federated round."""
+    import json
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            windows = aisec.extract_windows(cur, hours=720)
+            if not windows:
+                raise HTTPException(status_code=400, detail="No activity to learn from yet.")
+
+            local = aisec.fit_baseline(windows)
+            cur.execute("SELECT COALESCE(MAX(round_number), 0) + 1 AS n FROM FederatedRounds")
+            rnd = cur.fetchone()["n"]
+
+            nodes: list[tuple[str, int, dict]] = []
+
+            # This node is real: parameters fitted from this hospital's activity.
+            cur.execute(
+                """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,
+                                                sample_count, local_parameters)
+                   VALUES (%s,%s,FALSE,%s,%s)""",
+                (rnd, "This hospital (local)", local.sample_count,
+                 json.dumps(local.to_parameters())))
+            nodes.append(("This hospital (local)", local.sample_count, local.to_parameters()))
+
+            # Peers are simulated by perturbing the local baseline. Marked as
+            # such in the database and in the response.
+            for name, m_scale, s_scale in SIMULATED_PEERS:
+                params = {
+                    "medians": {k: round(v * m_scale, 4) for k, v in local.medians.items()},
+                    "scales": {k: round(v * s_scale, 4) for k, v in local.scales.items()},
+                    "sample_count": max(1, int(local.sample_count * m_scale)),
+                }
+                cur.execute(
+                    """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,
+                                                    sample_count, local_parameters)
+                       VALUES (%s,%s,TRUE,%s,%s)""",
+                    (rnd, name, params["sample_count"], json.dumps(params)))
+                nodes.append((name, params["sample_count"], params))
+
+            global_params = aisec.federated_average(nodes)
+            cur.execute(
+                """INSERT INTO FederatedGlobalModel (round_number, parameters,
+                                                     contributing_nodes, total_samples)
+                   VALUES (%s,%s,%s,%s)""",
+                (rnd, json.dumps(global_params), global_params["contributing_nodes"],
+                 global_params["total_samples"]))
+            log_admin_action(conn, session["user_id"], session.get("public_user_id"),
+                             "FEDERATED_ROUND_COMPLETED")
+            conn.commit()
+
+    return {
+        "round": rnd,
+        "aggregation": "FedAvg (weighted by sample count)",
+        "contributing_nodes": global_params["contributing_nodes"],
+        "total_samples": global_params["total_samples"],
+        "local_node_is_real": True,
+        "peer_nodes_simulated": len(SIMULATED_PEERS),
+        "disclosure": (
+            "One real node (this hospital) and "
+            f"{len(SIMULATED_PEERS)} simulated peers. The aggregation is genuine FedAvg; "
+            "the peers are not real institutions. Only model parameters — medians and "
+            "scales — are aggregated, never records."
+        ),
+        "global_parameters": global_params,
+    }
+
+
+@app.get("/api/admin/security/federated/status")
+def federated_status(session: dict = Depends(require_role("Administrator"))):
+    """Federated IDS status: rounds, nodes, and the current global model."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""SELECT * FROM FederatedGlobalModel
+                            ORDER BY round_number DESC LIMIT 1""")
+            latest = cur.fetchone()
+            cur.execute("""SELECT node_name, is_simulated, sample_count, round_number
+                             FROM FederatedRounds
+                            WHERE round_number = COALESCE(
+                                (SELECT MAX(round_number) FROM FederatedRounds), 0)
+                            ORDER BY is_simulated, node_name""")
+            nodes = cur.fetchall()
+            cur.execute("SELECT COUNT(DISTINCT round_number) AS n FROM FederatedRounds")
+            rounds = cur.fetchone()["n"]
+
+    return {
+        "rounds_completed": rounds,
+        "latest_round": latest["round_number"] if latest else None,
+        "aggregation": "FedAvg",
+        "global_model": latest["parameters"] if latest else None,
+        "nodes": [{"name": n["node_name"], "simulated": n["is_simulated"],
+                   "samples": n["sample_count"]} for n in nodes],
+        "status": "SIMULATED_PEERS" if rounds else "NOT_YET_RUN",
+        "disclosure": (
+            "Federated aggregation is implemented and runs for real; the peer "
+            "institutions are simulated because this is a single-hospital "
+            "deployment. Not a live multi-hospital federation."
+        ),
+    }
