@@ -534,3 +534,21 @@ CREATE INDEX IF NOT EXISTS idx_nursingnotes_nurse ON NursingNotes(nurse_id);
 CREATE INDEX IF NOT EXISTS idx_medadmin_patient ON MedicationAdministration(patient_id);
 CREATE INDEX IF NOT EXISTS idx_medadmin_prescription ON MedicationAdministration(prescription_id);
 CREATE INDEX IF NOT EXISTS idx_medadmin_nurse ON MedicationAdministration(nurse_id);
+
+-- ─── Doctor-initiated access requests (spec §6) ──────────────────────────────
+-- Extends Consent rather than adding a parallel table: a request and a consent
+-- are the same relationship at different stages, and splitting them would give
+-- two sources of truth for "may this doctor read this patient".
+DO $$ BEGIN
+    ALTER TYPE consent_status ADD VALUE IF NOT EXISTS 'Pending';
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN
+    ALTER TYPE consent_status ADD VALUE IF NOT EXISTS 'Rejected';
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Purpose TEXT;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Requested_Resource VARCHAR(120);
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Requested_At TIMESTAMPTZ;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Decided_At TIMESTAMPTZ;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Decision_Note TEXT;
+CREATE INDEX IF NOT EXISTS idx_consent_patient_status ON Consent(Patient_ID, Status);

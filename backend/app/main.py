@@ -30,6 +30,7 @@ from app.schemas import (
     CreateImagingReportRequest, ImagingReportItem,
     LabPanelSummary, FinalizedReportResponse, ReportVerification,
     ConsentEntry, RevokeConsentRequest, EmergencyAccessRequest, EmergencyAccessRecord,
+    CreateAccessRequest, AccessRequestDecision, AccessRequestRecord,
     PatientDocumentItem,
     NurseProfile, NurseDashboardSummary, NursePatientListItem,
     PatientVitalsRecord, CreateVitalsRequest, NursingNoteRecord, CreateNursingNoteRequest,
@@ -1612,18 +1613,24 @@ def get_doctor_patient_detail(patient_id: str, session: dict = Depends(require_r
             if not user:
                 raise HTTPException(status_code=404, detail="Patient not found")
 
-            # Check if assigned to this doctor
-            cur.execute("""
-                SELECT 1 FROM (
-                    SELECT patient_id FROM Diagnoses WHERE doctor_id = %s AND patient_id = %s
-                    UNION SELECT patient_id FROM Appointments WHERE doctor_id = %s AND patient_id = %s
-                    UNION SELECT patient_id FROM DoctorConsultations WHERE doctor_id = %s AND patient_id = %s
-                ) as assigned
-            """, (user_uuid, patient_id, user_uuid, patient_id, user_uuid, patient_id))
-            if not cur.fetchone():
-                # Allow access anyway for emergency / new patients, or enforce it. 
-                # For this demo, let's allow it as they might want to see any patient they search for.
-                pass
+            # Authorization, not decoration. This check previously computed a
+            # relationship and then discarded the result, so any doctor could
+            # open any patient's chart. A doctor with neither a treating
+            # relationship nor consent is refused, and told how to ask.
+            allowed, basis = _doctor_patient_authorization(cur, user_uuid, patient_id)
+            if not allowed:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "You do not have access to this patient's record — "
+                        f"{basis}. Request access from the patient to proceed."
+                    ),
+                )
+            log_admin_action(
+                conn, user_uuid, session.get("public_user_id"),
+                "DOCTOR_READ_PATIENT_RECORD", str(patient_id), user.get("user_id"),
+                details={"basis": basis},
+            )
 
             cur.execute("SELECT * FROM Diagnoses WHERE patient_id = %s ORDER BY visit_date DESC LIMIT 5", (patient_id,))
             diagnoses = cur.fetchall()
@@ -2097,7 +2104,7 @@ def get_doctor_lab_requests(
 _CONSENT_REVOKED = """
     EXISTS (SELECT 1 FROM Consent c
              WHERE c.patient_id = %s AND c.subject_user_id = %s
-               AND c.status = 'Revoked')
+               AND c.status IN ('Revoked', 'Rejected'))
 """
 
 _EMERGENCY_ACTIVE = """
@@ -2127,6 +2134,49 @@ def _emergency_record(row: dict) -> EmergencyAccessRecord:
         expires_at=expires,
         is_active=bool(expires and expires > datetime.now(timezone.utc)),
     )
+
+
+
+def _doctor_patient_authorization(cur, doctor_uuid: str, patient_uuid: str) -> tuple[bool, str]:
+    """Decide whether this doctor may read this patient, and on what basis.
+
+    Spec §8: a read is permitted only when RBAC, relationship and consent all
+    agree. Two bases grant it — an existing treating relationship, or explicit
+    consent the patient granted through an access request — and a withdrawal or
+    rejection overrides both unless break-glass is live.
+
+    Returns ``(allowed, basis)``; the basis is recorded in the audit trail so
+    that *why* a record was opened is answerable later, not just that it was.
+    """
+    cur.execute(
+        f"SELECT {_CONSENT_REVOKED} AS blocked, {_EMERGENCY_ACTIVE} AS emergency",
+        (patient_uuid, doctor_uuid, patient_uuid, doctor_uuid),
+    )
+    row = cur.fetchone()
+    if row["emergency"]:
+        return True, "emergency override"
+    if row["blocked"]:
+        return False, "patient withdrew or declined access"
+
+    cur.execute(
+        """SELECT EXISTS (
+               SELECT 1 FROM Diagnoses WHERE doctor_id = %s AND patient_id = %s
+               UNION ALL SELECT 1 FROM Appointments WHERE doctor_id = %s AND patient_id = %s
+               UNION ALL SELECT 1 FROM DoctorConsultations WHERE doctor_id = %s AND patient_id = %s
+               UNION ALL SELECT 1 FROM LabTestRequests WHERE doctor_id = %s AND patient_id = %s
+           ) AS treating,
+           EXISTS (
+               SELECT 1 FROM Consent WHERE patient_id = %s AND subject_user_id = %s
+                 AND subject_role = 'Doctor' AND status = 'Authorized'
+           ) AS consented""",
+        (doctor_uuid, patient_uuid) * 4 + (patient_uuid, doctor_uuid),
+    )
+    r = cur.fetchone()
+    if r["treating"]:
+        return True, "treating relationship"
+    if r["consented"]:
+        return True, "patient consent"
+    return False, "no treating relationship and no consent"
 
 
 def _doctor_access_blocked(cur, doctor_uuid: str, patient_uuid: str) -> bool:
@@ -3688,3 +3738,232 @@ def clear_nurse_notifications(session: dict = Depends(require_role("Nurse"))):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Doctor access requests (spec §6)
+#
+# Two routes to a patient's record coexist deliberately:
+#
+#   * A doctor already treating the patient — one who raised the investigation,
+#     recorded a diagnosis, or holds an appointment — reads it on that
+#     relationship. Making an oncologist file a form before opening the chart of
+#     a patient they are actively treating would be obstructive, and clinicians
+#     route around obstructive controls.
+#   * A doctor with no such relationship has no implicit access at all and must
+#     ask. The patient decides, and until they do the answer is no.
+#
+# Both routes remain subject to revocation, which the patient may exercise at
+# any time and which this module treats as final unless break-glass is declared.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ACCESS_REQUEST_SELECT = """
+    SELECT c.consent_id, c.patient_id, c.subject_user_id AS doctor_id,
+           c.status::text AS status, c.purpose, c.requested_resource,
+           c.requested_at, c.decided_at, c.decision_note,
+           d.user_id AS doctor_user_id, d.full_name AS doctor_name,
+           d.specialization,
+           p.user_id AS patient_user_id, p.full_name AS patient_name
+      FROM Consent c
+      JOIN Users d ON d.id = c.subject_user_id
+      JOIN Users p ON p.id = c.patient_id
+"""
+
+
+def _access_request_record(row: dict) -> AccessRequestRecord:
+    """Shape one Consent row as an access request, for both sides of it."""
+    return AccessRequestRecord(
+        request_id=str(row["consent_id"]),
+        doctor_id=str(row["doctor_id"]),
+        doctor_user_id=row.get("doctor_user_id"),
+        doctor_name=row.get("doctor_name"),
+        specialization=row.get("specialization"),
+        patient_id=str(row["patient_id"]),
+        patient_user_id=row.get("patient_user_id"),
+        patient_name=row.get("patient_name"),
+        requested_resource=row.get("requested_resource"),
+        purpose=row.get("purpose"),
+        status=row["status"],
+        requested_at=row.get("requested_at"),
+        decided_at=row.get("decided_at"),
+        decision_note=row.get("decision_note"),
+    )
+
+
+@app.post("/api/doctor/access-requests", response_model=AccessRequestRecord)
+def create_access_request(
+    req: CreateAccessRequest,
+    session: dict = Depends(require_role("Doctor")),
+):
+    """Ask a patient for permission to read their record."""
+    doctor_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT id, user_id, full_name FROM Users WHERE id = %s AND role = 'Patient' AND status = 'Approved'",
+                (req.patient_id,),
+            )
+            patient = cur.fetchone()
+            if not patient:
+                raise HTTPException(status_code=404, detail="Patient not found")
+
+            cur.execute(
+                """SELECT consent_id, status::text AS status FROM Consent
+                    WHERE patient_id = %s AND subject_user_id = %s AND subject_role = 'Doctor'""",
+                (req.patient_id, doctor_uuid),
+            )
+            existing = cur.fetchone()
+            if existing and existing["status"] == "Pending":
+                raise HTTPException(
+                    status_code=409, detail="A request for this patient is already awaiting their decision."
+                )
+            if existing and existing["status"] == "Authorized":
+                raise HTTPException(status_code=409, detail="You already have this patient's consent.")
+
+            # A previously revoked or rejected relationship may be asked about
+            # again — circumstances change — but it re-enters as Pending, never
+            # straight back to Authorized.
+            if existing:
+                cur.execute(
+                    """UPDATE Consent SET status = 'Pending', purpose = %s, requested_resource = %s,
+                              requested_at = CURRENT_TIMESTAMP, decided_at = NULL, decision_note = NULL,
+                              revoked_at = NULL
+                        WHERE consent_id = %s RETURNING consent_id""",
+                    (req.purpose, req.requested_resource, existing["consent_id"]),
+                )
+                request_id = cur.fetchone()["consent_id"]
+            else:
+                cur.execute(
+                    """INSERT INTO Consent (patient_id, subject_user_id, subject_role, status,
+                                            purpose, requested_resource, requested_at)
+                       VALUES (%s, %s, 'Doctor', 'Pending', %s, %s, CURRENT_TIMESTAMP)
+                       RETURNING consent_id""",
+                    (req.patient_id, doctor_uuid, req.purpose, req.requested_resource),
+                )
+                request_id = cur.fetchone()["consent_id"]
+
+            cur.execute(
+                """INSERT INTO Notifications (user_id, notification_type, title, body)
+                   VALUES (%s, 'ACCESS_REQUEST', %s, %s)""",
+                (req.patient_id, "A doctor is requesting access to your records",
+                 f"Dr. {session.get('full_name') or 'A clinician'} has asked to read your "
+                 f"{req.requested_resource.lower()}. Reason given: {req.purpose}"),
+            )
+            log_admin_action(
+                conn, doctor_uuid, session.get("public_user_id"),
+                "ACCESS_REQUESTED", str(req.patient_id), patient["user_id"],
+            )
+            conn.commit()
+
+            cur.execute(_ACCESS_REQUEST_SELECT + " WHERE c.consent_id = %s", (request_id,))
+            return _access_request_record(cur.fetchone())
+
+
+@app.get("/api/doctor/access-requests", response_model=list[AccessRequestRecord])
+def list_doctor_access_requests(session: dict = Depends(require_role("Doctor"))):
+    """Every request this doctor has made, and where each one stands."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                _ACCESS_REQUEST_SELECT + """
+                 WHERE c.subject_user_id = %s AND c.subject_role = 'Doctor'
+                   AND c.requested_at IS NOT NULL
+                 ORDER BY c.requested_at DESC""",
+                (session["user_id"],),
+            )
+            return [_access_request_record(r) for r in cur.fetchall()]
+
+
+@app.get("/api/patient/access-requests", response_model=list[AccessRequestRecord])
+def list_patient_access_requests(session: dict = Depends(require_role("Patient"))):
+    """Requests awaiting this patient's decision, most recent first."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                _ACCESS_REQUEST_SELECT + """
+                 WHERE c.patient_id = %s AND c.requested_at IS NOT NULL
+                 ORDER BY (c.status = 'Pending') DESC, c.requested_at DESC""",
+                (session["user_id"],),
+            )
+            return [_access_request_record(r) for r in cur.fetchall()]
+
+
+def _decide_access_request(request_id: str, session: dict, approve: bool, note: Optional[str]):
+    """Record a patient's decision on one request.
+
+    Scoped by patient_id as well as request id, so a patient cannot decide
+    another patient's request by substituting an identifier.
+    """
+    patient_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT c.consent_id, c.subject_user_id AS doctor_id, c.status::text AS status,
+                          d.user_id AS doctor_user_id
+                     FROM Consent c JOIN Users d ON d.id = c.subject_user_id
+                    WHERE c.consent_id = %s AND c.patient_id = %s""",
+                (request_id, patient_uuid),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Access request not found")
+            if row["status"] != "Pending":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"This request was already {row['status'].lower()}.",
+                )
+
+            status = "Authorized" if approve else "Rejected"
+            cur.execute(
+                """UPDATE Consent
+                      SET status = %s, decided_at = CURRENT_TIMESTAMP, decision_note = %s,
+                          granted_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE granted_at END
+                    WHERE consent_id = %s""",
+                (status, note, approve, request_id),
+            )
+            cur.execute(
+                """INSERT INTO Notifications (user_id, notification_type, title, body)
+                   VALUES (%s, %s, %s, %s)""",
+                (row["doctor_id"],
+                 "ACCESS_GRANTED" if approve else "ACCESS_REJECTED",
+                 "Access request approved" if approve else "Access request declined",
+                 f"{session.get('full_name') or 'The patient'} "
+                 + ("approved your request; their record is now available to you."
+                    if approve else "declined your request.")),
+            )
+            log_admin_action(
+                conn, patient_uuid, session.get("public_user_id"),
+                "ACCESS_APPROVED" if approve else "ACCESS_REJECTED",
+                str(row["doctor_id"]), row["doctor_user_id"],
+            )
+            # A consent decision is an integrity-relevant event: anchoring it
+            # means neither party can later dispute what was decided or when.
+            anchor = anchor_document(
+                conn,
+                document_type="ConsentDecision", document_id=str(request_id),
+                document_hash=sha256_hex(f"{request_id}:{status}:{row['doctor_id']}".encode()),
+                action="ACCESS_" + ("APPROVED" if approve else "REJECTED"),
+                patient_id=str(patient_uuid), actor_id=patient_uuid,
+                actor_public_id=session.get("public_user_id"),
+            )
+            conn.commit()
+
+            cur.execute(_ACCESS_REQUEST_SELECT + " WHERE c.consent_id = %s", (request_id,))
+            record = _access_request_record(cur.fetchone())
+    return {"status": "success", "request": record,
+            "blockchain_tx_hash": (anchor or {}).get("tx_hash")}
+
+
+@app.post("/api/patient/access-requests/{request_id}/approve")
+def approve_access_request(
+    request_id: str, body: AccessRequestDecision | None = None,
+    session: dict = Depends(require_role("Patient")),
+):
+    return _decide_access_request(request_id, session, True, (body.note if body else None))
+
+
+@app.post("/api/patient/access-requests/{request_id}/reject")
+def reject_access_request(
+    request_id: str, body: AccessRequestDecision | None = None,
+    session: dict = Depends(require_role("Patient")),
+):
+    return _decide_access_request(request_id, session, False, (body.note if body else None))

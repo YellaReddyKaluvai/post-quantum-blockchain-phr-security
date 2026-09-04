@@ -731,3 +731,45 @@ class PatientDocumentItem(BaseModel):
     kem_algorithm: Optional[str] = None
     signature_algorithm: Optional[str] = None
     blockchain_tx_hash: Optional[str] = None
+
+
+# ─── Doctor access requests (spec §6) ────────────────────────────────────────
+
+class CreateAccessRequest(BaseModel):
+    """A doctor asking a patient for permission to read their record."""
+    patient_id: str
+    purpose: str = Field(..., min_length=15, max_length=500)
+    requested_resource: str = Field(default="Full medical record", max_length=120)
+
+    @field_validator("purpose")
+    @classmethod
+    def purpose_must_be_substantive(cls, v: str) -> str:
+        # The patient reads this to decide. "need it" tells them nothing, and a
+        # consent decision made on no information is not informed consent.
+        cleaned = " ".join(v.split())
+        if len(cleaned) < 15 or len(cleaned.split()) < 3:
+            raise ValueError(
+                "State a clinical reason the patient can weigh — at least a short sentence."
+            )
+        return cleaned
+
+
+class AccessRequestDecision(BaseModel):
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+class AccessRequestRecord(BaseModel):
+    request_id: str
+    doctor_id: str
+    doctor_user_id: Optional[str] = None
+    doctor_name: Optional[str] = None
+    specialization: Optional[str] = None
+    patient_id: str
+    patient_user_id: Optional[str] = None
+    patient_name: Optional[str] = None
+    requested_resource: Optional[str] = None
+    purpose: Optional[str] = None
+    status: str
+    requested_at: Optional[datetime] = None
+    decided_at: Optional[datetime] = None
+    decision_note: Optional[str] = None
