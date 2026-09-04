@@ -821,3 +821,118 @@ export async function clearNurseNotifications() {
 }
 
 
+
+// ─── Doctor access requests ──────────────────────────────────────────────────
+
+export async function requestPatientAccess(payload: {
+  patient_id: string;
+  purpose: string;
+  requested_resource?: string;
+}) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/access-requests`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    // The backend explains *why* (already pending, already consented, purpose
+    // too thin). Surfacing that beats a generic failure the doctor can't act on.
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not send the access request"));
+  }
+  return response.json();
+}
+
+export async function getDoctorAccessRequests() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/access-requests`);
+  if (!response.ok) throw new Error("Failed to load your access requests");
+  return response.json();
+}
+
+export async function getPatientAccessRequests() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/access-requests`);
+  if (!response.ok) throw new Error("Failed to load access requests");
+  return response.json();
+}
+
+export async function decideAccessRequest(
+  requestId: string,
+  decision: "approve" | "reject",
+  note?: string
+) {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/patient/access-requests/${requestId}/${decision}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: note || null }),
+    }
+  );
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not record your decision"));
+  }
+  return response.json();
+}
+
+// ─── Admin: AI security layer ────────────────────────────────────────────────
+
+export async function runSecurityAnalysis(hours = 720) {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/admin/security/analyze?hours=${hours}`,
+    { method: "POST" }
+  );
+  if (!response.ok) throw new Error("Could not run the analysis");
+  return response.json();
+}
+
+export async function getRiskAssessments(level?: string, page = 1) {
+  const query = new URLSearchParams({ page: String(page), per_page: "20" });
+  if (level) query.set("level", level);
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/admin/security/risk-assessments?${query}`
+  );
+  if (!response.ok) throw new Error("Failed to load risk assessments");
+  return response.json();
+}
+
+export async function getSecurityAlerts(page = 1) {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/admin/security/alerts?page=${page}&per_page=20`
+  );
+  if (!response.ok) throw new Error("Failed to load alerts");
+  return response.json();
+}
+
+export async function acknowledgeAlert(alertId: string) {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/admin/security/alerts/${alertId}/acknowledge`,
+    { method: "POST" }
+  );
+  if (!response.ok) throw new Error("Could not acknowledge that alert");
+  return response.json();
+}
+
+export async function getSecurityIncidents() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/security/incidents`);
+  if (!response.ok) throw new Error("Failed to load incidents");
+  return response.json();
+}
+
+export async function getFederatedStatus() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/security/federated/status`);
+  if (!response.ok) throw new Error("Failed to load federated status");
+  return response.json();
+}
+
+export async function runFederatedRound() {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/admin/security/federated/round`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not run a federated round"));
+  }
+  return response.json();
+}

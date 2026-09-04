@@ -13,7 +13,9 @@ interface MedicalRecordItem {
   description?: string;
   symptoms?: string;
   doctor_notes?: string;
-  recommended_tests?: string[];
+  // The API returns this as a single string, the way a doctor typed it —
+  // typing it as string[] here is what made .map() crash at runtime.
+  recommended_tests?: string | null;
 }
 
 export default function MedicalRecordsPage() {
@@ -139,15 +141,19 @@ export default function MedicalRecordsPage() {
                           </div>
 
 
-                          {record.recommended_tests && record.recommended_tests.length > 0 && (
+                          {record.recommended_tests && record.recommended_tests.trim().length > 0 && (
                             <div>
                               <h4 className="text-sm font-semibold text-slate-700 mb-2">Recommended Tests</h4>
                               <div className="flex flex-wrap gap-2">
-                                {record.recommended_tests.map((test: string, i: number) => (
-                                  <span key={i} className="px-3 py-1 bg-white border border-slate-200 rounded-full text-xs font-medium text-slate-600">
-                                    {test}
-                                  </span>
-                                ))}
+                                {record.recommended_tests
+                                  .split(",")
+                                  .map((test) => test.trim())
+                                  .filter(Boolean)
+                                  .map((test: string, i: number) => (
+                                    <span key={i} className="px-3 py-1 bg-white border border-slate-200 rounded-full text-xs font-medium text-slate-600">
+                                      {test}
+                                    </span>
+                                  ))}
                               </div>
                             </div>
                           )}
