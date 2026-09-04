@@ -4,7 +4,7 @@ import React, { useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
-import { Bell, Calendar, ChevronLeft, FileText, FlaskConical, KeyRound, LayoutDashboard, LogOut, Menu, ShieldCheck, User, Users, X } from "lucide-react";
+import { Bell, Calendar, ChevronLeft, FileText, Film, FlaskConical, KeyRound, LayoutDashboard, LogOut, Menu, ShieldCheck, User, Users, X } from "lucide-react";
 import { logout } from "@/lib/session";
 import { useAuth } from "@/context/AuthContext";
 
@@ -14,6 +14,7 @@ const navItems = [
   { label: "Lab Requests", icon: FlaskConical, href: "/dashboard/doctor/lab-requests" },
   { label: "Access Requests", icon: KeyRound, href: "/dashboard/doctor/access-requests" },
   { label: "Reports & Documents", icon: FileText, href: "/dashboard/doctor/reports" },
+  { label: "Imaging", icon: Film, href: "/dashboard/doctor/imaging" },
   { label: "Appointments", icon: Calendar, href: "/dashboard/doctor/appointments" },
   { label: "Notifications", icon: Bell, href: "/dashboard/doctor/notifications" },
   { label: "My Profile", icon: User, href: "/dashboard/doctor/profile" },

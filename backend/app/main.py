@@ -31,6 +31,7 @@ from app.schemas import (
     LabPanelSummary, FinalizedReportResponse, ReportVerification,
     ConsentEntry, RevokeConsentRequest, EmergencyAccessRequest, EmergencyAccessRecord,
     CreateAccessRequest, AccessRequestDecision, AccessRequestRecord,
+    ZkpProofRequest,
     PatientDocumentItem,
     NurseProfile, NurseDashboardSummary, NursePatientListItem,
     PatientVitalsRecord, CreateVitalsRequest, NursingNoteRecord, CreateNursingNoteRequest,
@@ -3989,12 +3990,24 @@ def _decide_access_request(request_id: str, session: dict, approve: bool, note: 
                 )
 
             status = "Authorized" if approve else "Rejected"
+
+            # On approval, mint the zero-knowledge consent token (§17). Only the
+            # commitment is public; the token is encrypted at rest exactly as
+            # ML-KEM private keys are, and handed to the doctor once.
+            zkp_commitment = zkp_token_enc = None
+            if approve:
+                token_hex, zkp_commitment = zkp.issue_consent_token()
+                zkp_token_enc = encrypt_data(token_hex)
+
             cur.execute(
                 """UPDATE Consent
                       SET status = %s, decided_at = CURRENT_TIMESTAMP, decision_note = %s,
-                          granted_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE granted_at END
+                          granted_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE granted_at END,
+                          zkp_commitment = COALESCE(%s, zkp_commitment),
+                          zkp_token_encrypted = COALESCE(%s, zkp_token_encrypted),
+                          zkp_token_collected_at = CASE WHEN %s THEN NULL ELSE zkp_token_collected_at END
                     WHERE consent_id = %s""",
-                (status, note, approve, request_id),
+                (status, note, approve, zkp_commitment, zkp_token_enc, approve, request_id),
             )
             cur.execute(
                 """INSERT INTO Notifications (user_id, notification_type, title, body)
@@ -4063,6 +4076,7 @@ def reject_access_request(
 # ─────────────────────────────────────────────────────────────────────────────
 
 from app import ai_security as aisec  # noqa: E402
+from app import zkp_service as zkp  # noqa: E402
 
 
 def _persist_assessment(cur, window, risk, level, contributions, source,
@@ -4643,3 +4657,154 @@ def get_own_adherence(session: dict = Depends(require_role("Patient"))):
                 (session["user_id"],))
             rows = [_adherence_record(r) for r in cur.fetchall()]
     return {"summary": _adherence_summary(rows), "rounds": rows}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Zero-knowledge consent proofs (spec §17)
+#
+# A doctor proves they hold the consent token the patient's approval issued,
+# without transmitting it. See app/zkp_service.py for the protocol — and for
+# the statement that this component, unlike the rest of the system, is NOT
+# post-quantum secure.
+#
+# This runs *alongside* the ordinary consent check rather than instead of it.
+# A proof failing does not open a record, and a proof succeeding does not open
+# one either: authorization is still decided by relationship and consent state.
+# What the proof adds is evidence that the party presenting it is the one the
+# patient actually approved.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/doctor/consent-token/{patient_id}")
+def collect_consent_token(patient_id: str, session: dict = Depends(require_role("Doctor"))):
+    """Collect the consent token for an approved relationship.
+
+    Delivered once. After collection the server keeps only the commitment, so a
+    later database compromise cannot recover the token.
+    """
+    doctor_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT consent_id, status::text AS status, zkp_commitment,
+                          zkp_token_encrypted, zkp_token_collected_at
+                     FROM Consent
+                    WHERE patient_id = %s AND subject_user_id = %s AND subject_role = 'Doctor'""",
+                (patient_id, doctor_uuid))
+            row = cur.fetchone()
+            if not row or row["status"] != "Authorized":
+                raise HTTPException(status_code=404, detail="No approved consent for this patient.")
+            if not row["zkp_token_encrypted"]:
+                # Two very different situations. Telling a doctor their consent
+                # predates the feature when in fact they already collected the
+                # token would send them to the patient for no reason.
+                if row["zkp_token_collected_at"]:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="You already collected this token on "
+                               f"{row['zkp_token_collected_at']:%d %b %Y at %H:%M}. It is "
+                               "delivered once and the server no longer holds it. Ask the "
+                               "patient to withdraw and re-approve to have a new one issued.")
+                raise HTTPException(
+                    status_code=409,
+                    detail="This consent predates zero-knowledge tokens. Ask the patient to "
+                           "withdraw and re-approve to have one issued.")
+
+            token = decrypt_data(row["zkp_token_encrypted"])
+            cur.execute(
+                """UPDATE Consent SET zkp_token_encrypted = NULL,
+                          zkp_token_collected_at = CURRENT_TIMESTAMP
+                    WHERE consent_id = %s""", (row["consent_id"],))
+            log_admin_action(conn, doctor_uuid, session.get("public_user_id"),
+                             "ZKP_TOKEN_COLLECTED", str(patient_id), None)
+            conn.commit()
+
+    return {
+        "consent_token": token,
+        "commitment": row["zkp_commitment"],
+        "delivered_once": True,
+        "notice": "Store this securely. The server has now discarded it and keeps only "
+                  "the public commitment.",
+    }
+
+
+@app.post("/api/doctor/zkp/challenge")
+def request_zkp_challenge(patient_id: str = Query(...),
+                          session: dict = Depends(require_role("Doctor"))):
+    """Get a single-use nonce to bind one proof to one verification."""
+    doctor_uuid = session["user_id"]
+    challenge = zkp.make_challenge()
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT 1 FROM Consent
+                    WHERE patient_id = %s AND subject_user_id = %s
+                      AND status = 'Authorized' AND zkp_commitment IS NOT NULL""",
+                (patient_id, doctor_uuid))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="No approved consent for this patient.")
+            cur.execute(
+                """INSERT INTO ZkpChallenges (challenge, subject_user_id, patient_id)
+                   VALUES (%s, %s, %s)""", (challenge, doctor_uuid, patient_id))
+            conn.commit()
+    return {"challenge": challenge, "expires_in_seconds": 300,
+            "context": f"consent:{patient_id}"}
+
+
+@app.post("/api/doctor/zkp/verify")
+def verify_zkp_proof(body: ZkpProofRequest, session: dict = Depends(require_role("Doctor"))):
+    """Verify a proof of knowledge of the consent token."""
+    doctor_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT id, patient_id, consumed_at, expires_at
+                     FROM ZkpChallenges
+                    WHERE challenge = %s AND subject_user_id = %s""",
+                (body.challenge, doctor_uuid))
+            ch = cur.fetchone()
+            if not ch:
+                raise HTTPException(status_code=404, detail="Unknown challenge.")
+            if ch["consumed_at"]:
+                raise HTTPException(status_code=409, detail="That challenge was already used.")
+            if ch["expires_at"] < datetime.now(timezone.utc):
+                raise HTTPException(status_code=410, detail="That challenge has expired.")
+
+            cur.execute(
+                """SELECT zkp_commitment FROM Consent
+                    WHERE patient_id = %s AND subject_user_id = %s AND status = 'Authorized'""",
+                (ch["patient_id"], doctor_uuid))
+            consent = cur.fetchone()
+            if not consent or not consent["zkp_commitment"]:
+                raise HTTPException(status_code=404, detail="No commitment recorded for this consent.")
+
+            ok = zkp.verify(
+                consent["zkp_commitment"],
+                {"t": body.t, "s": body.s},
+                body.challenge,
+                f"consent:{ch['patient_id']}",
+            )
+
+            # Consumed either way. A challenge that survives a failed attempt
+            # lets an attacker grind against one nonce.
+            cur.execute(
+                "UPDATE ZkpChallenges SET consumed_at = CURRENT_TIMESTAMP, verified = %s WHERE id = %s",
+                (ok, ch["id"]))
+            log_admin_action(conn, doctor_uuid, session.get("public_user_id"),
+                             "ZKP_PROOF_VERIFIED" if ok else "ZKP_PROOF_FAILED",
+                             str(ch["patient_id"]), None)
+            aisec.record_security_event(
+                cur, actor_id=doctor_uuid, actor_public_id=session.get("public_user_id"),
+                actor_role="Doctor",
+                event_type="ZKP_PROOF" if ok else "ZKP_PROOF_FAILED",
+                subject_patient_id=str(ch["patient_id"]), resource="consent_proof")
+            conn.commit()
+
+    return {
+        "verified": ok,
+        "proves": "knowledge of the consent token issued when this patient approved access",
+        "reveals": "nothing about the token itself",
+        "post_quantum_secure": False,
+        "caveat": "Schnorr rests on discrete logarithm, which Shor's algorithm breaks. "
+                  "Unlike ML-KEM-768 and ML-DSA-65 elsewhere in this system, this "
+                  "component is not quantum-resistant.",
+    }

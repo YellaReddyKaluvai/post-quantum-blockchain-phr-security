@@ -248,16 +248,15 @@ is listed honestly rather than quietly dropped.
 
 | # | Workflow | Where it stops |
 |---|---|---|
-| 1 | **Zero-knowledge proofs** | Not implemented at all — no circuit, prover or verifier |
-| 2 | **Multi-hospital federation** | FedAvg is real; the three peer nodes are simulated |
-| 3 | **IPFS publishing** | A CIDv0 is computed; nothing is pinned to the network |
-| 4 | **Doctor-facing imaging UI** | The endpoints exist and are authorization-scoped; no screen yet |
+| 1 | **Multi-hospital federation** | FedAvg is real; the three peer nodes are simulated |
+| 2 | **IPFS publishing** | A CIDv0 is computed; nothing is pinned to the network |
+| 3 | **Post-quantum ZKP** | The zero-knowledge proof is Schnorr — genuine, but classically secure only. See below. |
 
 ### Not implemented
 
 | Area | Status |
 |---|---|
-| **Zero-Knowledge Proofs** | **Not present.** No circuit, no prover, no verifier. Nothing in the system should be described as ZK — hashing a value and comparing digests is not a zero-knowledge proof. |
+| **Post-quantum ZKP** | The Schnorr proof below is real but rests on discrete logarithm, which Shor's algorithm breaks. A quantum-resistant proof system (hash-based STARKs, lattice-based proofs) is not implemented. |
 | **Multi-hospital federation** | The FedAvg aggregation is real, but the peer nodes are **simulated** — this is a single-hospital deployment. See the AI security section. |
 | **IPFS publishing** | A CIDv0 is computed locally, but nothing is pinned to the IPFS network — see the Content Addressing row below. |
 | `MedicalRecords` table | Dead schema — 0 references, 0 rows. Marked deprecated in `init.sql` and left in place rather than dropped unilaterally; safe to remove once the team agrees. |
@@ -367,6 +366,55 @@ cd backend && python3 generate_dataset.py --reset
 entered through the UI are matched by nothing in that scope and are left
 untouched. `--smoke` generates a 14-user sample; `--no-s3` skips cloud upload.
 The random seed is fixed, so a re-run reproduces the same dataset.
+
+---
+
+## 🔐 Zero-Knowledge Consent Proof
+
+When a patient approves an access request, the system issues the doctor a secret
+**consent token**. To exercise that access the doctor proves they know the token
+— without ever sending it.
+
+```
+patient approves  →  token x issued once   ·   commitment y = g^x stored
+                            │
+doctor proves     →  t = g^r     r fresh, never reused
+                     c = H(g, y, t, challenge, context)
+                     s = r + c·x
+                            │
+server verifies   →  g^s  ==  t · y^c        token never transmitted
+```
+
+Schnorr's identification protocol made non-interactive with Fiat–Shamir — the
+canonical zero-knowledge proof of knowledge of a discrete logarithm.
+
+**What it buys.** After issuance the secret never crosses the wire again, and a
+full database compromise yields only commitments, which are public by
+construction. An attacker who reads every row still cannot produce a valid proof.
+
+**Verified by test:** an honest prover is accepted; the wrong token, a replayed
+challenge, a proof reused against a different patient, a tampered response, and a
+value outside the prime-order subgroup are all refused. The token appears nowhere
+in the transmitted proof.
+
+> ### ⚠️ This one component is not post-quantum secure
+>
+> Schnorr rests on the hardness of discrete logarithm, which **Shor's algorithm
+> breaks**. Everything else here — ML-KEM-768, ML-DSA-65 — was chosen precisely
+> to resist that attack; this module is the exception, and saying so is the
+> point. A quantum adversary who recovered `x` from `y` could forge consent
+> proofs, though they still could not decrypt any record: confidentiality does
+> not depend on this module.
+>
+> It is included because a working, textbook-correct ZKP is worth more than an
+> empty interface. Post-quantum zero-knowledge exists, but implementing one
+> correctly is research-grade work and a broken one would be far worse than none.
+
+The proof runs **alongside** the ordinary consent check, never instead of it. A
+proof failing does not open a record, and a proof succeeding does not open one
+either — authorization is still decided by relationship and consent state. What
+the proof adds is evidence that the party presenting it is the one the patient
+actually approved.
 
 ---
 

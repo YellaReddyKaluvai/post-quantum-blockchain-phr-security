@@ -642,3 +642,24 @@ CREATE TABLE IF NOT EXISTS FederatedGlobalModel (
     aggregation VARCHAR(20) NOT NULL DEFAULT 'FedAvg',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ─── Zero-knowledge consent proofs (spec §17) ────────────────────────────────
+-- Only the commitment is public. The token itself is AES-encrypted at rest,
+-- exactly as ML-KEM private keys are, and is handed to the doctor once.
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS zkp_commitment TEXT;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS zkp_token_encrypted TEXT;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS zkp_token_collected_at TIMESTAMPTZ;
+
+-- Challenges are single-use: a proof bound to a nonce that can be presented
+-- twice is just a bearer token wearing a costume.
+CREATE TABLE IF NOT EXISTS ZkpChallenges (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    challenge VARCHAR(64) UNIQUE NOT NULL,
+    subject_user_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    consumed_at TIMESTAMPTZ,
+    verified BOOLEAN,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP + INTERVAL '5 minutes'
+);
+CREATE INDEX IF NOT EXISTS idx_zkp_challenge ON ZkpChallenges(challenge);

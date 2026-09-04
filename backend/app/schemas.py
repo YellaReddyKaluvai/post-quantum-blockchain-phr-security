@@ -773,3 +773,10 @@ class AccessRequestRecord(BaseModel):
     requested_at: Optional[datetime] = None
     decided_at: Optional[datetime] = None
     decision_note: Optional[str] = None
+
+
+class ZkpProofRequest(BaseModel):
+    """A Schnorr proof: the commitment t and the response s, both hex."""
+    challenge: str = Field(..., min_length=8, max_length=64)
+    t: str = Field(..., min_length=1, max_length=1024)
+    s: str = Field(..., min_length=1, max_length=1024)
