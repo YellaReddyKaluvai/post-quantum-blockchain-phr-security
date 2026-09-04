@@ -23,6 +23,7 @@ The design rule throughout: *the system never claims a protection it did not act
 - **Cryptographic Key Center**: Live counts of issued ML-KEM / ML-DSA keypairs and active cryptographic identities.
 - **Infrastructure Health**: Live blockchain and cloud-storage status — chain connectivity and block height, the **on-chain vs locally-simulated** anchor split, and how many reports actually have a cloud copy. Built to surface problems rather than imply everything is fine.
 - **Emergency Access Review**: Every break-glass declaration with its verbatim clinical reason, both parties, expiry and on-chain transaction hash. Active declarations are surfaced first.
+- **AI Security**: Behavioural anomaly detection over record access — alerts to work, risk scores with the attribution that produced them, incident records, and the federated IDS panel with its honesty disclosure beside the node count.
 - **Audit Log**: Every administrative action, report access and download, with search and pagination.
 - **Email Notifications**: Live SMTP dispatch for registration approvals and rejections, with delivery status tracked per message.
 
@@ -35,6 +36,9 @@ The design rule throughout: *the system never claims a protection it did not act
 - **Report Review & Verification**: Decrypt finalised reports, and re-check each one's signature and on-chain digest.
 - **Appointment Manager**: Confirm, complete or cancel patient appointments.
 - **Record Consultation**: Capture the visit itself — symptoms, assessment and advice — which the patient then reads in their portal.
+- **Access Requests**: Ask a patient you are not already treating for permission to read their record, with a clinical reason they will read before deciding. Track every request through pending, approved and declined.
+- **Imaging**: Studies for patients you treat or who have granted you access, decrypted one at a time with their provenance shown.
+- **Medication Adherence**: On the patient chart — whether the prescription is actually being taken, with refusals and missed doses called out rather than averaged away.
 - **Emergency Access**: Break-glass override when a patient has withdrawn consent. Requires a substantive clinical reason, is time-boxed, and states its consequences before the form — the patient is notified at once and the declaration is anchored on-chain.
 
 ### 3. 🧪 Laboratory Technician Dashboard (LIMS) (`/dashboard/lab-technician`)
@@ -50,6 +54,9 @@ The design rule throughout: *the system never claims a protection it did not act
 - **My Documents**: Discharge summaries, referral letters and certificates written by your doctors — decrypted on demand, with the signing algorithm, digest and on-chain anchor shown so authenticity is checkable rather than asserted.
 - **My Vitals**: Nurse-recorded observations, with out-of-range readings flagged using the same thresholds clinical staff see.
 - **Appointment Booking**: Request an appointment with any approved doctor; the doctor is notified and confirms or declines.
+- **Access Requests**: Doctors asking permission to read your record, with their stated reason. Nothing is shared until you decide.
+- **My Scans**: X-ray, MRI, CT and ultrasound studies, decrypted on request with the signing algorithm and chain anchor shown.
+- **Medication History**: Every dose nursing staff recorded — given, refused, held or missed.
 - **Record Access**: Every clinician who can read the record and how that relationship arose, with one-click withdrawal. Revoking genuinely blocks reads rather than merely noting a preference; an active emergency override is shown plainly.
 - **Security & Privacy Center**: PQC protection status, active session logs, and login IP tracking.
 - **Notification Feed**: Report readiness, appointment updates, and vitals alerts.
@@ -153,7 +160,29 @@ Nurse records a medication round → ✗ no one can read the history (see below)
 Vitals are shaped by one shared function for all three views, so a reading
 cannot appear differently depending on who is looking.
 
-### 5. Patient → appointment → Doctor
+### 5. Doctor asks, patient decides
+
+```
+Doctor with NO treating relationship
+      → requests access, clinical reason required
+      → ACCESS_REQUEST notification to the patient
+      → patient approves or declines
+            ├─ approve → consent token issued (once) + commitment stored
+            │            decision anchored on-chain
+            └─ decline → reads stay refused
+      → backend enforces: 403 / 403 / 403 / 200 across the four states
+```
+
+A doctor already treating the patient reads on that relationship — making an
+oncologist file a form before opening the chart of someone they are actively
+treating is the kind of obstruction clinicians route around. A doctor with no
+relationship has no implicit access at all.
+
+The doctor can later prove they hold the consent token **without sending it**
+(Schnorr NIZK). That proof neither opens nor closes a record; it evidences that
+the party presenting it is the one the patient approved.
+
+### 6. Patient → appointment → Doctor
 
 ```
 Patient books (past dates and unknown doctors refused at the schema)
@@ -162,7 +191,7 @@ Patient books (past dates and unknown doctors refused at the schema)
       → ✗ patient is not notified of the outcome (see below)
 ```
 
-### 6. Consent and break-glass
+### 7. Consent and break-glass
 
 ```
 Patient revokes a doctor's access
@@ -181,16 +210,29 @@ Break-glass is deliberately **not** gated on approval — waiting for a second
 party in an emergency defeats the purpose. The control is accountability, not
 prevention.
 
-### 7. Everything is audited
+### 8. Everything is audited
 
 ```
 Every admin action, record access and download
-      → AdminAuditLogs (55+ entries across 10 action types)
+      → AdminAuditLogs
 Every login attempt
       → AuthLogs
-Every finalised document and break-glass declaration
+Every finalised document, consent decision and break-glass declaration
       → DocumentAnchors + on-chain transaction
 ```
+
+### 9. Every action feeds the AI security layer
+
+```
+action already permitted by auth + RBAC + consent
+      → SecurityEvent emitted   (behavioural metadata only, never content)
+      → scored against a baseline of the actor's OWN role
+      → risk + per-feature explanation
+      → LOW monitor · MEDIUM verify · HIGH escalate → incident record
+```
+
+The layer runs **after** the access decision and never feeds back into it. It
+can raise an alarm about a read; it cannot authorise or prevent one.
 
 ---
 
@@ -216,9 +258,12 @@ listed as not built.
 | Clinical record encryption | ✅ | Diagnoses and prescriptions encrypted at column level; grepping the database for a diagnosis returns nothing |
 | Consent management | ✅ | Revoking a doctor genuinely blocks reads — the same report returns 200 before and 404 after |
 | Doctor access requests | ✅ | Doctor requests with a stated purpose → patient approves or declines → the backend enforces it. Verified: no request 403, pending 403, rejected 403, approved 200 |
-| AI security layer | ✅ | Anomaly detection, XAI, alerts, incidents. Federated aggregation real; peer nodes simulated |
+| AI security layer | ✅ | Anomaly detection, XAI, alerts, incidents. Peers can register and submit signed parameters for real |
+| Zero-knowledge consent proof | ✅ | Schnorr NIZK — genuine, though **not** post-quantum. See its own section |
+| IPFS publishing | ✅ | Really pinned to a running kubo node; joins the recovery chain behind the database and S3 |
+| Medication adherence | ✅ | Refusals and misses reach the prescriber and the patient, not only a percentage |
 | Emergency break-glass access | ✅ | Time-boxed override, patient notified immediately, anchored on-chain, reviewable by an admin |
-| Automated tests | ✅ | 106 tests, mutation-checked |
+| Automated tests | ✅ | 203 tests, mutation-checked; weighted toward refusals |
 
 ### Imaging: encrypted but unreachable
 
@@ -250,6 +295,7 @@ is listed honestly rather than quietly dropped.
 |---|---|---|
 | 1 | **Post-quantum ZKP** | The zero-knowledge proof is Schnorr — genuine, but classically secure only. See below. |
 | 2 | **Public IPFS replication** | Content is really pinned, but on one node. That is not replication across the public network. |
+| 3 | **Peer registration UI** | `/api/admin/federated/peers` works; there is no admin screen for it yet, so peers are registered by API call. |
 
 ### Not implemented
 
@@ -628,28 +674,40 @@ BLOCKCHAIN_NETWORK_NAME="anvil-local"
 BLOCKCHAIN_CONTRACT_ADDRESS="0x5FbDB2315678afecb367f032d93F642f64180aa3"
 ```
 
-### 3. Run Backend API Server
+### 3. Start the IPFS node (optional)
+
+Publishing is only attempted when `IPFS_API_URL` is set. Leave it blank and the
+system runs normally — reports are still filed, just not pinned.
+
+```bash
+export IPFS_PATH=~/devtools/ipfs-repo
+~/devtools/kubo/ipfs daemon --enable-gc
+```
+
+Then set `IPFS_API_URL=http://127.0.0.1:5001` in `backend/.env`.
+
+### 4. Run Backend API Server
 ```bash
 cd backend
 python -m pip install -r requirements.txt  # Or install dependencies
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### 4. Run Frontend Web Application
+### 5. Run Frontend Web Application
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
 
-### 5. Running the Tests
+### 6. Running the Tests
 
 ```bash
 cd backend
 python3 -m pytest
 ```
 
-106 tests, no database or running server required — they exercise pure functions
+203 tests, no database or running server required — they exercise pure functions
 so they fail for exactly one reason.
 
 What they cover, and why these specific assertions: every test asserts a
@@ -669,7 +727,7 @@ signature verifier that always returned true, an upload that recorded a key it
 never wrote, and a dropped vitals validator — made 7, 1 and 2 tests fail
 respectively.
 
-### 6. Blockchain Audit Trail
+### 7. Blockchain Audit Trail
 
 Document digests are anchored on-chain via `contracts/PHR.sol`. Every developer
 runs their own local chain — no accounts, no funds, no internet required.
@@ -734,3 +792,24 @@ Sign in with the **User ID**, not the email address.
 
 Create these with the seed scripts in `backend/` (`seed_admin.py`, then the
 role seeders). The admin password comes from `ADMIN_PASSWORD` in `.env`.
+
+### The 500 generated accounts
+
+After running the dataset generator every synthetic account shares one password:
+
+| Role | Example | Password |
+| --- | --- | --- |
+| **Patient** | `PAT-2026-000035` | `Demo@1234` |
+| **Doctor** | `DOC-2026-000011` | `Demo@1234` |
+| **Nurse** | `NUR-2026-000006` | `Demo@1234` |
+| **Lab Technician** | `LAB-2026-000008` | `Demo@1234` |
+| **Administrator** | `ADM-2026-000004` | `Demo@1234` |
+
+The full list — every user ID, name, role and password — is written to
+`backend/dataset_credentials.csv` as the generator runs. That file is gitignored
+and regenerated by re-running the script; see the Demonstration Dataset section
+for why.
+
+`PAT-2026-000035` is the one to open first: it carries the most data, and its
+Medical Records show decrypted diagnosis text that is unreadable ciphertext in
+the database.
