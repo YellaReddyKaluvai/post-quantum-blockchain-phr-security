@@ -215,6 +215,8 @@ listed as not built.
 | Doctor-authored documents | ✅ | Encrypted, signed and anchored — and readable by the patient they concern, completing the spec's "patient receives authorized access" |
 | Clinical record encryption | ✅ | Diagnoses and prescriptions encrypted at column level; grepping the database for a diagnosis returns nothing |
 | Consent management | ✅ | Revoking a doctor genuinely blocks reads — the same report returns 200 before and 404 after |
+| Doctor access requests | ✅ | Doctor requests with a stated purpose → patient approves or declines → the backend enforces it. Verified: no request 403, pending 403, rejected 403, approved 200 |
+| AI security layer | ✅ | Anomaly detection, XAI, alerts, incidents. Federated aggregation real; peer nodes simulated |
 | Emergency break-glass access | ✅ | Time-boxed override, patient notified immediately, anchored on-chain, reviewable by an admin |
 | Automated tests | ✅ | 106 tests, mutation-checked |
 
@@ -248,15 +250,15 @@ are missing functionality; 3–5 are missing messages.
 
 | Area | Status |
 |---|---|
-| **Explainable AI (XAI)** | **Not present.** No model, no inference, no SHAP/LIME, no ML dependencies. Never part of this build or its specification. |
-| **Federated Learning** | **Not present.** No training, no aggregation, no Flower/PySyft. Never part of this build or its specification. |
+| **Zero-Knowledge Proofs** | **Not present.** No circuit, no prover, no verifier. An interface exists nowhere yet; nothing in the system should be described as ZK. |
+| **Multi-hospital federation** | The FedAvg aggregation is real, but the peer nodes are **simulated** — this is a single-hospital deployment. See the AI security section. |
 | **IPFS publishing** | A CIDv0 is computed locally, but nothing is pinned to the IPFS network — see the Content Addressing row below. |
 | `MedicalRecords` table | Dead schema — 0 references, 0 rows. Marked deprecated in `init.sql` and left in place rather than dropped unilaterally; safe to remove once the team agrees. |
 
-> On AI/ML: the two items above are named explicitly because their absence is
-> easy to assume away. This system performs **cryptography and access control**,
-> not prediction. Adding either would mean new dependencies, a training corpus,
-> and a decision about what clinical question a model should answer.
+> On AI: the security layer performs **behavioural anomaly detection**, not
+> clinical prediction. It never reads medical content and never makes a
+> diagnostic judgement. Note also that the "ML" in ML-KEM and ML-DSA means
+> *Module-Lattice*, not machine learning — the two are unrelated.
 
 ### Known data caveats
 - Two lab reports predate the encryption pipeline and hold no ciphertext, so they cannot be given a cloud copy or be decrypted. They are counted honestly in `/api/admin/storage/status`.
@@ -358,6 +360,98 @@ cd backend && python3 generate_dataset.py --reset
 entered through the UI are matched by nothing in that scope and are left
 untouched. `--smoke` generates a 14-user sample; `--no-s3` skips cloud upload.
 The random seed is fixed, so a re-run reproduces the same dataset.
+
+---
+
+## 🤖 AI Security Layer
+
+Behavioural threat detection over the healthcare workflow. It analyses **how**
+records are touched — never what they contain.
+
+### Where it sits
+
+```
+Authentication → RBAC → Consent → ACCESS DECISION
+                                        │
+                                        ▼
+                            (action proceeds or is refused)
+                                        │
+                                        ▼
+                              Security event emitted
+                                        │
+                          Local anomaly detection (peer baseline)
+                                        │
+                              Risk score + explanation
+                                        │
+                    LOW ──── MEDIUM ──────── HIGH
+                     │         │               │
+                  MONITOR   VERIFY         ESCALATE
+                                               │
+                                     Alert → Incident → Compliance
+```
+
+**The layer never grants or revokes access.** Authentication, RBAC and consent
+have already decided that. A statistical model must not be the thing standing
+between a clinician and a patient's record; this scores behaviour, explains the
+score, and hands a human something to judge.
+
+### How detection works
+
+Six behavioural features per actor — records opened, distinct patients,
+off-hours share, failed sign-ins, emergency declarations, busiest hour —
+compared against a baseline of **their own role**, so ordinary differences
+between a nurse and a doctor are not mistaken for anomalies.
+
+Deviation uses **median absolute deviation**, not standard deviation. A handful
+of extreme actors inflate a standard deviation enough to hide inside it, which
+is precisely the actor being hunted. Scoring is **one-sided**: a clinician doing
+*less* than their peers is not a security concern.
+
+The score comes from the **three strongest indicators** rather than the average
+across all six. That was a corrected calibration: normalising over every feature
+meant an actor had to be anomalous on nearly every dimension to reach HIGH, so a
+doctor sweeping 140 charts at 03:00 with 11 failed sign-ins scored merely
+"review". Real misuse is extreme on a subset.
+
+### Explainable AI
+
+The per-feature deviations are the score **and** the explanation — the same
+arithmetic, not a second model reconstructing a decision after the fact:
+
+```
+DOC-2026-000011   score 85.42   HIGH
+
+  distinct patients accessed        140   vs peer median 1
+  failed sign-in attempts            11   vs peer median 1
+  busiest single hour               140   vs peer median 9.5
+  records opened                    141   vs peer median 3
+
+  → ESCALATE   incident INC-2026-00001 opened
+```
+
+### Federated learning — what is real, what is not
+
+| Component | Status |
+|---|---|
+| FedAvg aggregation, weighted by sample count | **Real** |
+| Local baseline fitted from this hospital's activity | **Real** |
+| Only parameters (medians, scales) cross the boundary | **Real** |
+| Peer institutions | **Simulated** — 3 of 4 nodes |
+
+This is a single-hospital deployment, so there are no peers to federate with.
+Every simulated row is flagged `is_simulated`, and the endpoint states this in
+its own response body. **Not a live multi-hospital federation.**
+
+What federation buys is precise: no record, event or identifier ever leaves the
+institution — only the few numbers describing what normal looks like.
+
+### Verified
+
+20 actors across 5 peer groups; a real insider pattern scored **85.42 HIGH**
+while 19 benign actors stayed LOW; alert raised with `ESCALATE`; incident
+`INC-2026-00001` opened; FedAvg round completed over 4 nodes. 343 events
+backfilled from real audit and auth history so the detector had genuine
+activity on its first run. 15 tests.
 
 ---
 
