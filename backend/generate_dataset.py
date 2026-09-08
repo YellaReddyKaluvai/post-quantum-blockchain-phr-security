@@ -176,10 +176,14 @@ def full_name(gender: str) -> str:
     return f"{random.choice(pool)} {random.choice(LAST)}"
 
 
-def make_user(role: str, gender: str, pw_hash: str) -> dict:
-    """Build one user with genuine post-quantum key material."""
-    kem_pub, kem_priv = generate_mlkem_keypair()
-    dsa_pub, dsa_priv = generate_mldsa_keypair()
+def make_profile(role: str, gender: str, pw_hash: str) -> dict:
+    """Everything about a user that comes from the seeded generator.
+
+    Deliberately free of key generation so it can run single-threaded. Threads
+    drawing from the shared `random` module race, and the order of draws is
+    what the seed controls — running this in a pool produced different names on
+    every run while still printing that the seed made it reproducible.
+    """
     name = full_name(gender)
     age = random.randint(21, 84) if role == "Patient" else random.randint(28, 62)
     dob = date.today() - timedelta(days=age * 365 + random.randint(0, 364))
@@ -189,10 +193,19 @@ def make_user(role: str, gender: str, pw_hash: str) -> dict:
         "date_of_birth_encrypted": encrypt_data(dob.isoformat()),
         "blood_group_encrypted": encrypt_data(random.choice(BLOOD_GROUPS)) if role == "Patient" else None,
         "specialization": random.choice(SPECIALIZATIONS) if role == "Doctor" else None,
-        "mlkem_public_key": kem_pub, "mlkem_private_key_encrypted": kem_priv,
-        "mldsa_public_key": dsa_pub, "mldsa_private_key_encrypted": dsa_priv,
         "_dob": dob, "_age": age,
     }
+
+
+def attach_keypairs(user: dict) -> dict:
+    """Add real ML-KEM and ML-DSA key material. Safe to run in parallel."""
+    kem_pub, kem_priv = generate_mlkem_keypair()
+    dsa_pub, dsa_priv = generate_mldsa_keypair()
+    user["mlkem_public_key"] = kem_pub
+    user["mlkem_private_key_encrypted"] = kem_priv
+    user["mldsa_public_key"] = dsa_pub
+    user["mldsa_private_key_encrypted"] = dsa_priv
+    return user
 
 
 def next_seq(cur, prefix: str, year: int, count: int) -> int:
@@ -284,11 +297,15 @@ def create_users(conn, credentials: list) -> dict:
             t0 = time.perf_counter()
             # Each user's keypairs are generated independently; liboqs releases
             # the GIL, so threads give a real speed-up here.
+            # Profiles first, in one thread, so the seed decides every name.
+            users = [make_profile(role, random.choice(["Male", "Female"]),
+                                  random.choice(pw_hash_pool))
+                     for _ in range(count)]
+            # Then key generation in parallel — liboqs releases the GIL, and
+            # keys come from OS entropy rather than the seeded generator, so
+            # parallelising them costs no reproducibility.
             with ThreadPoolExecutor(max_workers=8) as ex:
-                users = list(ex.map(
-                    lambda _: make_user(role, random.choice(["Male", "Female"]),
-                                        random.choice(pw_hash_pool)),
-                    range(count)))
+                users = list(ex.map(attach_keypairs, users))
 
             first = next_seq(cur, PREFIX[role], year, count)
             rows = []
@@ -433,7 +450,7 @@ def create_clinical(conn, made: dict) -> dict:
     return counts, requests_for_reports
 
 
-def build_one_report(job: dict, seq: int) -> dict:
+def build_one_report(job: dict) -> dict:
     """Run the complete security pipeline for a single report.
 
     Deliberately identical in substance to what the lab-technician endpoint
@@ -446,8 +463,9 @@ def build_one_report(job: dict, seq: int) -> dict:
     code = job["panel_code"]
     panel = get_panel(code)
     sex = "M" if pt["gender"] == "Male" else "F"
-    abnormal = random.random() < 0.42
-    values = panel_values(code, abnormal, sex)
+    abnormal = job["_abnormal"]
+    values = job["_values"]
+    seq = job["_seq"]
 
     year = date.today().year
     report_no = f"RPT-{year}-{seq:06d}"
@@ -489,8 +507,18 @@ def create_reports(conn, jobs: list, upload_s3: bool) -> dict:
 
     print(f"  running the security pipeline over {len(jobs)} reports…", flush=True)
     t0 = time.perf_counter()
+    # Draw the result values single-threaded first, for the same reason as the
+    # user profiles: panel_values() reads the seeded generator, and racing
+    # threads would make the readings differ between otherwise identical runs.
+    for i, job in enumerate(jobs):
+        sex = "M" if job["patient"]["gender"] == "Male" else "F"
+        job["_abnormal"] = random.random() < 0.42
+        job["_values"] = panel_values(job["panel_code"], job["_abnormal"], sex)
+        job["_seq"] = i + 1
+
+    # The crypto itself carries no seeded randomness, so it parallelises freely.
     with ThreadPoolExecutor(max_workers=8) as ex:
-        built = list(ex.map(lambda p: build_one_report(p[1], p[0] + 1), enumerate(jobs)))
+        built = list(ex.map(build_one_report, jobs))
     print(f"    crypto complete ({time.perf_counter()-t0:5.1f}s)", flush=True)
 
     s3_keys: dict[str, str] = {}
@@ -578,6 +606,9 @@ def reset_synthetic(conn) -> int:
                 cur.execute(f"DELETE FROM {table} WHERE {col} = ANY(%s)", (ids,))
             except Exception:
                 conn.rollback()          # table or column absent in this schema
+        # Users reference each other through approved_by, so a plain delete
+        # trips a self-referencing foreign key. Clear the link first.
+        cur.execute("UPDATE Users SET approved_by = NULL WHERE approved_by = ANY(%s)", (ids,))
         cur.execute("DELETE FROM Users WHERE id = ANY(%s)", (ids,))
         conn.commit()
     return len(ids)
