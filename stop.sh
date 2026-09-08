@@ -3,7 +3,7 @@
 # stopping it is rarely what you want between sessions.
 source ~/devtools/env.sh 2>/dev/null
 echo ""
-for pat in "next dev" "uvicorn app.main" "ipfs daemon" "anvil"; do
+for pat in "ngrok http" "cloudflared tunnel" "next dev" "uvicorn app.main" "ipfs daemon" "anvil"; do
   pkill -f "$pat" 2>/dev/null && printf "  stopped  %s\n" "$pat" || printf "  not running  %s\n" "$pat"
 done
 echo ""
