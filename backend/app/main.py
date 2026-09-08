@@ -1,4 +1,5 @@
 import hashlib
+import secrets
 import json
 import logging
 import math
@@ -30,6 +31,9 @@ from app.schemas import (
     CreateImagingReportRequest, ImagingReportItem,
     LabPanelSummary, FinalizedReportResponse, ReportVerification,
     ConsentEntry, RevokeConsentRequest, EmergencyAccessRequest, EmergencyAccessRecord,
+    CreateAccessRequest, AccessRequestDecision, AccessRequestRecord,
+    ZkpProofRequest,
+    RegisterPeerRequest, PeerSubmissionRequest,
     PatientDocumentItem,
     NurseProfile, NurseDashboardSummary, NursePatientListItem,
     PatientVitalsRecord, CreateVitalsRequest, NursingNoteRecord, CreateNursingNoteRequest,
@@ -54,6 +58,7 @@ from app.user_id_service import generate_user_id, generate_report_number
 from app.rbac import get_permissions_for_role, normalize_role
 from app.storage_service import (
     store_encrypted_document, download_file_from_s3, storage_status, StorageError,
+    ipfs_status, fetch_from_ipfs, is_ipfs_configured, IPFSError,
 )
 
 from app.audit_service import log_admin_action
@@ -1612,18 +1617,32 @@ def get_doctor_patient_detail(patient_id: str, session: dict = Depends(require_r
             if not user:
                 raise HTTPException(status_code=404, detail="Patient not found")
 
-            # Check if assigned to this doctor
-            cur.execute("""
-                SELECT 1 FROM (
-                    SELECT patient_id FROM Diagnoses WHERE doctor_id = %s AND patient_id = %s
-                    UNION SELECT patient_id FROM Appointments WHERE doctor_id = %s AND patient_id = %s
-                    UNION SELECT patient_id FROM DoctorConsultations WHERE doctor_id = %s AND patient_id = %s
-                ) as assigned
-            """, (user_uuid, patient_id, user_uuid, patient_id, user_uuid, patient_id))
-            if not cur.fetchone():
-                # Allow access anyway for emergency / new patients, or enforce it. 
-                # For this demo, let's allow it as they might want to see any patient they search for.
-                pass
+            # Authorization, not decoration. This check previously computed a
+            # relationship and then discarded the result, so any doctor could
+            # open any patient's chart. A doctor with neither a treating
+            # relationship nor consent is refused, and told how to ask.
+            allowed, basis = _doctor_patient_authorization(cur, user_uuid, patient_id)
+            if not allowed:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "You do not have access to this patient's record — "
+                        f"{basis}. Request access from the patient to proceed."
+                    ),
+                )
+            log_admin_action(
+                conn, user_uuid, session.get("public_user_id"),
+                "DOCTOR_READ_PATIENT_RECORD", str(patient_id), user.get("user_id"),
+                details={"basis": basis},
+            )
+            # Feed the AI security layer (§18). Behavioural metadata only —
+            # which record, by whom, when — never the clinical content itself.
+            aisec.record_security_event(
+                cur, actor_id=user_uuid, actor_public_id=session.get("public_user_id"),
+                actor_role="Doctor", event_type="RECORD_ACCESS",
+                subject_patient_id=str(patient_id), resource="patient_chart",
+                metadata={"basis": basis},
+            )
 
             cur.execute("SELECT * FROM Diagnoses WHERE patient_id = %s ORDER BY visit_date DESC LIMIT 5", (patient_id,))
             diagnoses = cur.fetchall()
@@ -1737,10 +1756,34 @@ def get_doctor_reports(session: dict = Depends(require_role("Doctor"))):
 
 @app.post("/api/doctor/reports/{report_id}/review")
 def review_lab_report(report_id: str, session: dict = Depends(require_role("Doctor"))):
-    # Only marks as reviewed, no content changes
+    """Mark a report reviewed, and tell the patient a clinician has read it.
+
+    Scoped to reports this doctor is entitled to: the update previously matched
+    on id alone, so any doctor could mark any report in the system reviewed —
+    including for patients they had never met.
+    """
+    doctor_uuid = session["user_id"]
     with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE LabReports SET status = 'Reviewed' WHERE id = %s", (report_id,))
+        with conn.cursor(row_factory=dict_row) as cur:
+            report = _doctor_may_read_report(cur, doctor_uuid, report_id)
+            if not report:
+                raise HTTPException(status_code=404, detail="Report not found")
+
+            cur.execute(
+                "UPDATE LabReports SET status = 'Reviewed' WHERE id = %s RETURNING patient_id",
+                (report_id,))
+            row = cur.fetchone()
+
+            # The moment the patient is actually waiting for: not that a result
+            # exists, but that a clinician has looked at it.
+            cur.execute(
+                """INSERT INTO Notifications (user_id, notification_type, title, body)
+                   VALUES (%s, 'REPORT_REVIEWED', %s, %s)""",
+                (row["patient_id"], "Your report has been reviewed",
+                 f"Dr. {session.get('full_name') or 'Your doctor'} has reviewed your "
+                 f"{report.get('report_name') or 'laboratory'} report."))
+            log_admin_action(conn, doctor_uuid, session.get("public_user_id"),
+                             "DOCTOR_REVIEWED_REPORT", str(row["patient_id"]), None)
             conn.commit()
     return {"status": "success"}
 
@@ -1954,8 +1997,29 @@ def update_appointment_status(appointment_id: str, action: str, session: dict = 
         raise HTTPException(status_code=400, detail="Invalid action")
     
     with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE Appointments SET status = %s WHERE id = %s AND doctor_id = %s", (status_map[action], appointment_id, user_uuid))
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """UPDATE Appointments SET status = %s
+                    WHERE id = %s AND doctor_id = %s
+                RETURNING patient_id, appointment_date, appointment_time, department""",
+                (status_map[action], appointment_id, user_uuid))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Appointment not found")
+
+            # The patient was told when they requested and then never again — so
+            # a cancelled appointment was one they turned up for. Every outcome
+            # now reaches them.
+            when = f"{row['appointment_date']} at {row['appointment_time']}"
+            wording = {
+                "accept": ("Appointment confirmed", f"Your appointment on {when} is confirmed."),
+                "complete": ("Appointment completed", f"Your appointment on {when} has been marked complete."),
+                "cancel": ("Appointment cancelled", f"Your appointment on {when} was cancelled. Please book another time."),
+            }[action]
+            cur.execute(
+                """INSERT INTO Notifications (user_id, notification_type, title, body)
+                   VALUES (%s, %s, %s, %s)""",
+                (row["patient_id"], "APPOINTMENT_" + status_map[action].upper(), wording[0], wording[1]))
             conn.commit()
     return {"status": "success"}
 
@@ -2033,6 +2097,20 @@ def create_lab_test_request(
             """, (patient["id"], user_uuid, test_name,
                   panel["code"] if panel else None, req.priority, req.clinical_notes))
             row = cur.fetchone()
+
+            # Notify the laboratory. Without this an Emergency-priority request
+            # is seen only if a technician happens to refresh the queue, while
+            # every other role in the system is told when work arrives.
+            cur.execute("SELECT id FROM Users WHERE role = 'Lab Technician' AND status = 'Approved'")
+            technicians = cur.fetchall()
+            if technicians:
+                urgency = "" if req.priority == "Routine" else f"[{req.priority.upper()}] "
+                cur.executemany(
+                    """INSERT INTO Notifications (user_id, notification_type, title, body)
+                       VALUES (%s, 'LAB_REQUEST', %s, %s)""",
+                    [(tech["id"], f"{urgency}New investigation requested",
+                      f"{test_name} requested for {patient['full_name']} ({patient['user_id']}).")
+                     for tech in technicians])
             conn.commit()
 
         log_admin_action(
@@ -2097,7 +2175,7 @@ def get_doctor_lab_requests(
 _CONSENT_REVOKED = """
     EXISTS (SELECT 1 FROM Consent c
              WHERE c.patient_id = %s AND c.subject_user_id = %s
-               AND c.status = 'Revoked')
+               AND c.status IN ('Revoked', 'Rejected'))
 """
 
 _EMERGENCY_ACTIVE = """
@@ -2127,6 +2205,49 @@ def _emergency_record(row: dict) -> EmergencyAccessRecord:
         expires_at=expires,
         is_active=bool(expires and expires > datetime.now(timezone.utc)),
     )
+
+
+
+def _doctor_patient_authorization(cur, doctor_uuid: str, patient_uuid: str) -> tuple[bool, str]:
+    """Decide whether this doctor may read this patient, and on what basis.
+
+    Spec §8: a read is permitted only when RBAC, relationship and consent all
+    agree. Two bases grant it — an existing treating relationship, or explicit
+    consent the patient granted through an access request — and a withdrawal or
+    rejection overrides both unless break-glass is live.
+
+    Returns ``(allowed, basis)``; the basis is recorded in the audit trail so
+    that *why* a record was opened is answerable later, not just that it was.
+    """
+    cur.execute(
+        f"SELECT {_CONSENT_REVOKED} AS blocked, {_EMERGENCY_ACTIVE} AS emergency",
+        (patient_uuid, doctor_uuid, patient_uuid, doctor_uuid),
+    )
+    row = cur.fetchone()
+    if row["emergency"]:
+        return True, "emergency override"
+    if row["blocked"]:
+        return False, "patient withdrew or declined access"
+
+    cur.execute(
+        """SELECT EXISTS (
+               SELECT 1 FROM Diagnoses WHERE doctor_id = %s AND patient_id = %s
+               UNION ALL SELECT 1 FROM Appointments WHERE doctor_id = %s AND patient_id = %s
+               UNION ALL SELECT 1 FROM DoctorConsultations WHERE doctor_id = %s AND patient_id = %s
+               UNION ALL SELECT 1 FROM LabTestRequests WHERE doctor_id = %s AND patient_id = %s
+           ) AS treating,
+           EXISTS (
+               SELECT 1 FROM Consent WHERE patient_id = %s AND subject_user_id = %s
+                 AND subject_role = 'Doctor' AND status = 'Authorized'
+           ) AS consented""",
+        (doctor_uuid, patient_uuid) * 4 + (patient_uuid, doctor_uuid),
+    )
+    r = cur.fetchone()
+    if r["treating"]:
+        return True, "treating relationship"
+    if r["consented"]:
+        return True, "patient consent"
+    return False, "no treating relationship and no consent"
 
 
 def _doctor_access_blocked(cur, doctor_uuid: str, patient_uuid: str) -> bool:
@@ -2247,6 +2368,15 @@ def declare_emergency_access(
             "EMERGENCY_ACCESS_DECLARED", str(req.patient_id), patient["user_id"],
             request.client.host if request and request.client else None,
             {"reason": req.reason, "expires_at": expires_at.isoformat(), "tx_hash": anchor["tx_hash"]},
+        )
+        # Break-glass is rare by design, so its frequency is a strong signal.
+        # The reason text is deliberately NOT forwarded: the AI layer scores
+        # behaviour, and the clinical justification is none of its business.
+        aisec.record_security_event(
+            cur, actor_id=user_uuid, actor_public_id=session.get("public_user_id"),
+            actor_role="Doctor", event_type="EMERGENCY_ACCESS",
+            subject_patient_id=str(req.patient_id), resource="break_glass",
+            ip_address=request.client.host if request and request.client else None,
         )
 
     return {
@@ -3242,6 +3372,14 @@ def get_imaging_image(imaging_id: str, session: dict = Depends(require_role("Lab
             ciphertext = download_file_from_s3(r["s3_key"]).decode("utf-8")
         except StorageError as exc:
             logger.error("S3 recovery failed for imaging %s: %s", imaging_id, exc)
+    # Third copy. Now that content is genuinely pinned, IPFS is a real recovery
+    # path rather than a fingerprint — worth trying before giving up.
+    if not ciphertext and r.get("ipfs_cid") and is_ipfs_configured():
+        try:
+            ciphertext = fetch_from_ipfs(r["ipfs_cid"]).decode("utf-8")
+            logger.info("Recovered imaging %s from IPFS", imaging_id)
+        except IPFSError as exc:
+            logger.error("IPFS recovery failed for imaging %s: %s", imaging_id, exc)
 
     try:
         shared_secret = decapsulate_aes_key(r["encrypted_aes_key"], r["mlkem_private_key_encrypted"])
@@ -3688,3 +3826,1192 @@ def clear_nurse_notifications(session: dict = Depends(require_role("Nurse"))):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Doctor access requests (spec §6)
+#
+# Two routes to a patient's record coexist deliberately:
+#
+#   * A doctor already treating the patient — one who raised the investigation,
+#     recorded a diagnosis, or holds an appointment — reads it on that
+#     relationship. Making an oncologist file a form before opening the chart of
+#     a patient they are actively treating would be obstructive, and clinicians
+#     route around obstructive controls.
+#   * A doctor with no such relationship has no implicit access at all and must
+#     ask. The patient decides, and until they do the answer is no.
+#
+# Both routes remain subject to revocation, which the patient may exercise at
+# any time and which this module treats as final unless break-glass is declared.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ACCESS_REQUEST_SELECT = """
+    SELECT c.consent_id, c.patient_id, c.subject_user_id AS doctor_id,
+           c.status::text AS status, c.purpose, c.requested_resource,
+           c.requested_at, c.decided_at, c.decision_note,
+           d.user_id AS doctor_user_id, d.full_name AS doctor_name,
+           d.specialization,
+           p.user_id AS patient_user_id, p.full_name AS patient_name
+      FROM Consent c
+      JOIN Users d ON d.id = c.subject_user_id
+      JOIN Users p ON p.id = c.patient_id
+"""
+
+
+def _access_request_record(row: dict) -> AccessRequestRecord:
+    """Shape one Consent row as an access request, for both sides of it."""
+    return AccessRequestRecord(
+        request_id=str(row["consent_id"]),
+        doctor_id=str(row["doctor_id"]),
+        doctor_user_id=row.get("doctor_user_id"),
+        doctor_name=row.get("doctor_name"),
+        specialization=row.get("specialization"),
+        patient_id=str(row["patient_id"]),
+        patient_user_id=row.get("patient_user_id"),
+        patient_name=row.get("patient_name"),
+        requested_resource=row.get("requested_resource"),
+        purpose=row.get("purpose"),
+        status=row["status"],
+        requested_at=row.get("requested_at"),
+        decided_at=row.get("decided_at"),
+        decision_note=row.get("decision_note"),
+    )
+
+
+@app.post("/api/doctor/access-requests", response_model=AccessRequestRecord)
+def create_access_request(
+    req: CreateAccessRequest,
+    session: dict = Depends(require_role("Doctor")),
+):
+    """Ask a patient for permission to read their record."""
+    doctor_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT id, user_id, full_name FROM Users WHERE id = %s AND role = 'Patient' AND status = 'Approved'",
+                (req.patient_id,),
+            )
+            patient = cur.fetchone()
+            if not patient:
+                raise HTTPException(status_code=404, detail="Patient not found")
+
+            cur.execute(
+                """SELECT consent_id, status::text AS status FROM Consent
+                    WHERE patient_id = %s AND subject_user_id = %s AND subject_role = 'Doctor'""",
+                (req.patient_id, doctor_uuid),
+            )
+            existing = cur.fetchone()
+            if existing and existing["status"] == "Pending":
+                raise HTTPException(
+                    status_code=409, detail="A request for this patient is already awaiting their decision."
+                )
+            if existing and existing["status"] == "Authorized":
+                raise HTTPException(status_code=409, detail="You already have this patient's consent.")
+
+            # A previously revoked or rejected relationship may be asked about
+            # again — circumstances change — but it re-enters as Pending, never
+            # straight back to Authorized.
+            if existing:
+                cur.execute(
+                    """UPDATE Consent SET status = 'Pending', purpose = %s, requested_resource = %s,
+                              requested_at = CURRENT_TIMESTAMP, decided_at = NULL, decision_note = NULL,
+                              revoked_at = NULL
+                        WHERE consent_id = %s RETURNING consent_id""",
+                    (req.purpose, req.requested_resource, existing["consent_id"]),
+                )
+                request_id = cur.fetchone()["consent_id"]
+            else:
+                cur.execute(
+                    """INSERT INTO Consent (patient_id, subject_user_id, subject_role, status,
+                                            purpose, requested_resource, requested_at)
+                       VALUES (%s, %s, 'Doctor', 'Pending', %s, %s, CURRENT_TIMESTAMP)
+                       RETURNING consent_id""",
+                    (req.patient_id, doctor_uuid, req.purpose, req.requested_resource),
+                )
+                request_id = cur.fetchone()["consent_id"]
+
+            cur.execute(
+                """INSERT INTO Notifications (user_id, notification_type, title, body)
+                   VALUES (%s, 'ACCESS_REQUEST', %s, %s)""",
+                (req.patient_id, "A doctor is requesting access to your records",
+                 f"Dr. {session.get('full_name') or 'A clinician'} has asked to read your "
+                 f"{req.requested_resource.lower()}. Reason given: {req.purpose}"),
+            )
+            log_admin_action(
+                conn, doctor_uuid, session.get("public_user_id"),
+                "ACCESS_REQUESTED", str(req.patient_id), patient["user_id"],
+            )
+            conn.commit()
+
+            cur.execute(_ACCESS_REQUEST_SELECT + " WHERE c.consent_id = %s", (request_id,))
+            return _access_request_record(cur.fetchone())
+
+
+@app.get("/api/doctor/access-requests", response_model=list[AccessRequestRecord])
+def list_doctor_access_requests(session: dict = Depends(require_role("Doctor"))):
+    """Every request this doctor has made, and where each one stands."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                _ACCESS_REQUEST_SELECT + """
+                 WHERE c.subject_user_id = %s AND c.subject_role = 'Doctor'
+                   AND c.requested_at IS NOT NULL
+                 ORDER BY c.requested_at DESC""",
+                (session["user_id"],),
+            )
+            return [_access_request_record(r) for r in cur.fetchall()]
+
+
+@app.get("/api/patient/access-requests", response_model=list[AccessRequestRecord])
+def list_patient_access_requests(session: dict = Depends(require_role("Patient"))):
+    """Requests awaiting this patient's decision, most recent first."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                _ACCESS_REQUEST_SELECT + """
+                 WHERE c.patient_id = %s AND c.requested_at IS NOT NULL
+                 ORDER BY (c.status = 'Pending') DESC, c.requested_at DESC""",
+                (session["user_id"],),
+            )
+            return [_access_request_record(r) for r in cur.fetchall()]
+
+
+def _decide_access_request(request_id: str, session: dict, approve: bool, note: Optional[str]):
+    """Record a patient's decision on one request.
+
+    Scoped by patient_id as well as request id, so a patient cannot decide
+    another patient's request by substituting an identifier.
+    """
+    patient_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT c.consent_id, c.subject_user_id AS doctor_id, c.status::text AS status,
+                          d.user_id AS doctor_user_id
+                     FROM Consent c JOIN Users d ON d.id = c.subject_user_id
+                    WHERE c.consent_id = %s AND c.patient_id = %s""",
+                (request_id, patient_uuid),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Access request not found")
+            if row["status"] != "Pending":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"This request was already {row['status'].lower()}.",
+                )
+
+            status = "Authorized" if approve else "Rejected"
+
+            # On approval, mint the zero-knowledge consent token (§17). Only the
+            # commitment is public; the token is encrypted at rest exactly as
+            # ML-KEM private keys are, and handed to the doctor once.
+            zkp_commitment = zkp_token_enc = None
+            if approve:
+                token_hex, zkp_commitment = zkp.issue_consent_token()
+                zkp_token_enc = encrypt_data(token_hex)
+
+            cur.execute(
+                """UPDATE Consent
+                      SET status = %s, decided_at = CURRENT_TIMESTAMP, decision_note = %s,
+                          granted_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE granted_at END,
+                          zkp_commitment = COALESCE(%s, zkp_commitment),
+                          zkp_token_encrypted = COALESCE(%s, zkp_token_encrypted),
+                          zkp_token_collected_at = CASE WHEN %s THEN NULL ELSE zkp_token_collected_at END
+                    WHERE consent_id = %s""",
+                (status, note, approve, zkp_commitment, zkp_token_enc, approve, request_id),
+            )
+            cur.execute(
+                """INSERT INTO Notifications (user_id, notification_type, title, body)
+                   VALUES (%s, %s, %s, %s)""",
+                (row["doctor_id"],
+                 "ACCESS_GRANTED" if approve else "ACCESS_REJECTED",
+                 "Access request approved" if approve else "Access request declined",
+                 f"{session.get('full_name') or 'The patient'} "
+                 + ("approved your request; their record is now available to you."
+                    if approve else "declined your request.")),
+            )
+            log_admin_action(
+                conn, patient_uuid, session.get("public_user_id"),
+                "ACCESS_APPROVED" if approve else "ACCESS_REJECTED",
+                str(row["doctor_id"]), row["doctor_user_id"],
+            )
+            aisec.record_security_event(
+                cur, actor_id=patient_uuid, actor_public_id=session.get("public_user_id"),
+                actor_role="Patient", event_type="CONSENT_EVENT",
+                subject_patient_id=str(patient_uuid),
+                resource="ACCESS_" + ("APPROVED" if approve else "REJECTED"),
+            )
+            # A consent decision is an integrity-relevant event: anchoring it
+            # means neither party can later dispute what was decided or when.
+            anchor = anchor_document(
+                conn,
+                document_type="ConsentDecision", document_id=str(request_id),
+                document_hash=sha256_hex(f"{request_id}:{status}:{row['doctor_id']}".encode()),
+                action="ACCESS_" + ("APPROVED" if approve else "REJECTED"),
+                patient_id=str(patient_uuid), actor_id=patient_uuid,
+                actor_public_id=session.get("public_user_id"),
+            )
+            conn.commit()
+
+            cur.execute(_ACCESS_REQUEST_SELECT + " WHERE c.consent_id = %s", (request_id,))
+            record = _access_request_record(cur.fetchone())
+    return {"status": "success", "request": record,
+            "blockchain_tx_hash": (anchor or {}).get("tx_hash")}
+
+
+@app.post("/api/patient/access-requests/{request_id}/approve")
+def approve_access_request(
+    request_id: str, body: AccessRequestDecision | None = None,
+    session: dict = Depends(require_role("Patient")),
+):
+    return _decide_access_request(request_id, session, True, (body.note if body else None))
+
+
+@app.post("/api/patient/access-requests/{request_id}/reject")
+def reject_access_request(
+    request_id: str, body: AccessRequestDecision | None = None,
+    session: dict = Depends(require_role("Patient")),
+):
+    return _decide_access_request(request_id, session, False, (body.note if body else None))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI security layer (spec §18–25)
+#
+# Placement matters. This layer runs *after* authentication, RBAC and consent
+# have already decided whether an action is permitted (§23). It never grants
+# access, and on its own it never revokes it: a statistical model must not be
+# the thing standing between a clinician and a patient's record. What it does
+# is score behaviour, explain the score, raise an alert, and open an incident
+# for a human to judge.
+# ─────────────────────────────────────────────────────────────────────────────
+
+from app import ai_security as aisec  # noqa: E402
+from app import zkp_service as zkp  # noqa: E402
+
+
+def _persist_assessment(cur, window, risk, level, contributions, source,
+                        hours: int) -> Optional[str]:
+    """Store one risk assessment, and raise an alert when it is not LOW."""
+    import json
+    from datetime import timedelta as _td
+    end = datetime.now(timezone.utc)
+    cur.execute(
+        """INSERT INTO RiskAssessments (actor_id, actor_public_id, risk_score, risk_level,
+                                        detection_source, features, explanation,
+                                        window_start, window_end)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+        (window.actor_id, window.actor_public_id, risk, level, source,
+         json.dumps(window.features), json.dumps(contributions),
+         end - _td(hours=hours), end),
+    )
+    assessment_id = cur.fetchone()["id"]
+    if level == "LOW":
+        return None
+
+    narrative = aisec.narrate(level, contributions)
+    response = aisec.RESPONSE_BY_LEVEL[level]
+    cur.execute(
+        """INSERT INTO SecurityAlerts (assessment_id, actor_id, severity, title, summary, response)
+           VALUES (%s,%s,%s,%s,%s,%s) RETURNING id""",
+        (assessment_id, window.actor_id, level,
+         f"{level} risk behaviour — {window.actor_public_id or 'unknown actor'}",
+         narrative, response),
+    )
+    alert_id = cur.fetchone()["id"]
+
+    # HIGH risk opens a compliance record (§25). MEDIUM stays an alert: opening
+    # an incident for every mild deviation would bury the serious ones.
+    if level == "HIGH":
+        cur.execute("SELECT COUNT(*) AS n FROM SecurityIncidents")
+        ref = f"INC-{datetime.now().year}-{cur.fetchone()['n'] + 1:05d}"
+        cur.execute(
+            """INSERT INTO SecurityIncidents (incident_ref, alert_id, actor_id, event_type,
+                                              affected_resource, risk_level, detection_source,
+                                              explanation, response, audit_reference)
+               VALUES (%s,%s,%s,'ANOMALOUS_ACCESS_PATTERN',%s,%s,%s,%s,%s,%s)""",
+            (ref, alert_id, window.actor_id,
+             f"{int(window.features.get('distinct_patients', 0))} patient records",
+             level, source, narrative, response, str(assessment_id)),
+        )
+    return str(assessment_id)
+
+
+@app.post("/api/admin/security/analyze")
+def run_security_analysis(hours: int = Query(24, ge=1, le=720),
+                          session: dict = Depends(require_role("Administrator"))):
+    """Run local anomaly detection over recent activity (§19).
+
+    Fits a baseline per role, scores every active actor against their own peer
+    group, and records assessments, alerts and incidents.
+    """
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            windows = aisec.extract_windows(cur, hours=hours)
+            if not windows:
+                return {"analysed": 0, "detail": "No activity in this window."}
+
+            by_role: dict[str, list] = {}
+            for w in windows:
+                by_role.setdefault(w.actor_role or "Unknown", []).append(w)
+
+            summary = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
+            for role, group in by_role.items():
+                # Comparing a doctor against nurses would flag ordinary role
+                # differences as anomalies, so each role is its own peer group.
+                baseline = aisec.fit_baseline(group)
+                for w in group:
+                    risk, level, contributions = aisec.score(w, baseline)
+                    _persist_assessment(cur, w, risk, level, contributions,
+                                        "LOCAL_ANOMALY", hours)
+                    summary[level] += 1
+            conn.commit()
+
+    return {"analysed": len(windows), "window_hours": hours,
+            "peer_groups": list(by_role.keys()), "risk_breakdown": summary}
+
+
+@app.get("/api/admin/security/risk-assessments")
+def list_risk_assessments(level: Optional[str] = Query(None, pattern="^(LOW|MEDIUM|HIGH)$"),
+                          page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100),
+                          session: dict = Depends(require_role("Administrator"))):
+    """Scored actors with their Explainable AI attributions (§22)."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            where = "WHERE r.risk_level = %s" if level else ""
+            params: tuple = (level,) if level else ()
+            cur.execute(f"SELECT COUNT(*) AS n FROM RiskAssessments r {where}", params)
+            total = cur.fetchone()["n"]
+            cur.execute(
+                f"""SELECT r.*, u.full_name, u.role::text AS role
+                      FROM RiskAssessments r LEFT JOIN Users u ON u.id = r.actor_id
+                      {where}
+                     ORDER BY r.risk_score DESC, r.created_at DESC
+                     LIMIT %s OFFSET %s""",
+                params + (per_page, (page - 1) * per_page),
+            )
+            rows = []
+            for r in cur.fetchall():
+                rows.append({
+                    "id": str(r["id"]), "actor_name": r["full_name"],
+                    "actor_public_id": r["actor_public_id"], "actor_role": r["role"],
+                    "risk_score": float(r["risk_score"]), "risk_level": r["risk_level"],
+                    "detection_source": r["detection_source"],
+                    "features": r["features"], "explanation": r["explanation"],
+                    "narrative": aisec.narrate(r["risk_level"], r["explanation"] or []),
+                    "created_at": r["created_at"],
+                })
+    return {"total": total, "page": page, "per_page": per_page, "assessments": rows}
+
+
+@app.get("/api/admin/security/alerts")
+def list_security_alerts(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100),
+                         session: dict = Depends(require_role("Administrator"))):
+    """Alert & response queue (§24)."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM SecurityAlerts")
+            total = cur.fetchone()["n"]
+            cur.execute(
+                """SELECT a.*, u.full_name, u.user_id AS actor_public_id
+                     FROM SecurityAlerts a LEFT JOIN Users u ON u.id = a.actor_id
+                    ORDER BY (a.acknowledged_at IS NULL) DESC, a.created_at DESC
+                    LIMIT %s OFFSET %s""", (per_page, (page - 1) * per_page))
+            alerts = [{
+                "id": str(r["id"]), "severity": r["severity"], "title": r["title"],
+                "summary": r["summary"], "response": r["response"],
+                "actor_name": r["full_name"], "actor_public_id": r["actor_public_id"],
+                "acknowledged": r["acknowledged_at"] is not None,
+                "created_at": r["created_at"],
+            } for r in cur.fetchall()]
+    return {"total": total, "page": page, "per_page": per_page, "alerts": alerts}
+
+
+@app.post("/api/admin/security/alerts/{alert_id}/acknowledge")
+def acknowledge_alert(alert_id: str, session: dict = Depends(require_role("Administrator"))):
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """UPDATE SecurityAlerts SET acknowledged_at = CURRENT_TIMESTAMP,
+                          acknowledged_by = %s
+                    WHERE id = %s AND acknowledged_at IS NULL RETURNING id""",
+                (session["user_id"], alert_id))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Alert not found or already acknowledged")
+            log_admin_action(conn, session["user_id"], session.get("public_user_id"),
+                             "SECURITY_ALERT_ACKNOWLEDGED")
+            conn.commit()
+    return {"status": "success"}
+
+
+@app.get("/api/admin/security/incidents")
+def list_security_incidents(session: dict = Depends(require_role("Administrator"))):
+    """Incident and compliance records (§25)."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT i.*, u.full_name, u.user_id AS actor_public_id
+                     FROM SecurityIncidents i LEFT JOIN Users u ON u.id = i.actor_id
+                    ORDER BY (i.status = 'Open') DESC, i.created_at DESC LIMIT 100""")
+            incidents = [{
+                "incident_ref": r["incident_ref"], "event_type": r["event_type"],
+                "affected_resource": r["affected_resource"], "risk_level": r["risk_level"],
+                "detection_source": r["detection_source"], "explanation": r["explanation"],
+                "response": r["response"], "status": r["status"],
+                "actor_name": r["full_name"], "actor_public_id": r["actor_public_id"],
+                "audit_reference": r["audit_reference"], "created_at": r["created_at"],
+            } for r in cur.fetchall()]
+    return {"total": len(incidents), "incidents": incidents}
+
+
+# ─── Federated learning / federated IDS (spec §20–21) ────────────────────────
+#
+# Honest scope. This deployment is ONE hospital, so there are no peer
+# institutions to federate with. What is real here is the *mechanism*: local
+# baselines are fitted from this hospital's own activity, and FedAvg aggregates
+# parameters weighted by sample count exactly as it would across real nodes.
+# The peer nodes are simulated, every stored row is flagged is_simulated, and
+# the API says so in its own response. Claiming a live multi-hospital
+# federation would be a lie the architecture cannot currently back.
+#
+# What federation buys is stated precisely: only medians and scales cross the
+# boundary. No record, event or identifier leaves the institution.
+
+SIMULATED_PEERS = [
+    ("St. Mary's Regional", 1.15, 0.9),
+    ("Northside Teaching Hospital", 0.85, 1.25),
+    ("Coastal Community Clinic", 1.35, 0.75),
+]
+
+
+@app.post("/api/admin/security/federated/round")
+def run_federated_round(session: dict = Depends(require_role("Administrator"))):
+    """Fit this hospital's local model, then aggregate a federated round."""
+    import json
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            windows = aisec.extract_windows(cur, hours=720)
+            if not windows:
+                raise HTTPException(status_code=400, detail="No activity to learn from yet.")
+
+            local = aisec.fit_baseline(windows)
+            cur.execute("SELECT COALESCE(MAX(round_number), 0) + 1 AS n FROM FederatedRounds")
+            rnd = cur.fetchone()["n"]
+
+            nodes: list[tuple[str, int, dict]] = []
+
+            # This node is real: parameters fitted from this hospital's activity.
+            cur.execute(
+                """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,
+                                                sample_count, local_parameters)
+                   VALUES (%s,%s,FALSE,%s,%s)""",
+                (rnd, "This hospital (local)", local.sample_count,
+                 json.dumps(local.to_parameters())))
+            nodes.append(("This hospital (local)", local.sample_count, local.to_parameters()))
+
+            # Real peer submissions for this round take precedence. Simulated
+            # peers exist to demonstrate the aggregation when nobody has
+            # federated yet; the moment a real institution submits, padding the
+            # round with invented nodes would misrepresent the result.
+            cur.execute(
+                """SELECT node_name, sample_count, local_parameters
+                     FROM FederatedRounds
+                    WHERE round_number = %s AND is_simulated = FALSE
+                      AND node_name <> 'This hospital (local)'""",
+                (rnd,))
+            real_peers = cur.fetchall()
+            for peer in real_peers:
+                nodes.append((peer["node_name"], peer["sample_count"], peer["local_parameters"]))
+
+            # Also pick up submissions filed against the previous round, since a
+            # peer cannot know the round number this node is about to open.
+            if not real_peers:
+                cur.execute(
+                    """SELECT DISTINCT ON (node_name) node_name, sample_count, local_parameters
+                         FROM FederatedRounds
+                        WHERE is_simulated = FALSE AND node_name <> 'This hospital (local)'
+                          AND created_at > CURRENT_TIMESTAMP - INTERVAL '7 days'
+                        ORDER BY node_name, round_number DESC""")
+                recent = cur.fetchall()
+                for peer in recent:
+                    nodes.append((peer["node_name"], peer["sample_count"], peer["local_parameters"]))
+                    cur.execute(
+                        """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,
+                                                        sample_count, local_parameters)
+                           VALUES (%s, %s, FALSE, %s, %s)
+                           ON CONFLICT (round_number, node_name) DO NOTHING""",
+                        (rnd, peer["node_name"], peer["sample_count"],
+                         psycopg.types.json.Json(peer["local_parameters"])))
+                real_peers = recent
+
+            simulated_used = 0 if real_peers else len(SIMULATED_PEERS)
+            for name, m_scale, s_scale in (SIMULATED_PEERS if not real_peers else []):
+                params = {
+                    "medians": {k: round(v * m_scale, 4) for k, v in local.medians.items()},
+                    "scales": {k: round(v * s_scale, 4) for k, v in local.scales.items()},
+                    "sample_count": max(1, int(local.sample_count * m_scale)),
+                }
+                cur.execute(
+                    """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,
+                                                    sample_count, local_parameters)
+                       VALUES (%s,%s,TRUE,%s,%s)""",
+                    (rnd, name, params["sample_count"], json.dumps(params)))
+                nodes.append((name, params["sample_count"], params))
+
+            global_params = aisec.federated_average(nodes)
+            cur.execute(
+                """INSERT INTO FederatedGlobalModel (round_number, parameters,
+                                                     contributing_nodes, total_samples)
+                   VALUES (%s,%s,%s,%s)""",
+                (rnd, json.dumps(global_params), global_params["contributing_nodes"],
+                 global_params["total_samples"]))
+            log_admin_action(conn, session["user_id"], session.get("public_user_id"),
+                             "FEDERATED_ROUND_COMPLETED")
+            conn.commit()
+
+    real_peer_count = len(real_peers)
+    if real_peer_count:
+        disclosure = (
+            f"{real_peer_count + 1} real nodes: this hospital plus "
+            f"{real_peer_count} peer institution(s) that submitted signed parameters. "
+            "No simulated nodes were included. Only medians and scales are "
+            "aggregated — no record, event or identifier crosses the boundary."
+        )
+    else:
+        disclosure = (
+            f"One real node (this hospital) and {simulated_used} simulated peers, "
+            "because no peer institution has submitted yet. The aggregation is genuine "
+            "FedAvg; the peers are not real institutions. Register a peer and have it "
+            "POST to /api/federated/submit to federate for real."
+        )
+
+    return {
+        "round": rnd,
+        "aggregation": "FedAvg (weighted by sample count)",
+        "contributing_nodes": global_params["contributing_nodes"],
+        "total_samples": global_params["total_samples"],
+        "local_node_is_real": True,
+        "real_peer_nodes": real_peer_count,
+        "peer_nodes_simulated": simulated_used,
+        "disclosure": disclosure,
+        "global_parameters": global_params,
+    }
+
+
+@app.get("/api/admin/security/federated/status")
+def federated_status(session: dict = Depends(require_role("Administrator"))):
+    """Federated IDS status: rounds, nodes, and the current global model."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""SELECT * FROM FederatedGlobalModel
+                            ORDER BY round_number DESC LIMIT 1""")
+            latest = cur.fetchone()
+            cur.execute("""SELECT node_name, is_simulated, sample_count, round_number
+                             FROM FederatedRounds
+                            WHERE round_number = COALESCE(
+                                (SELECT MAX(round_number) FROM FederatedRounds), 0)
+                            ORDER BY is_simulated, node_name""")
+            nodes = cur.fetchall()
+            cur.execute("SELECT COUNT(DISTINCT round_number) AS n FROM FederatedRounds")
+            rounds = cur.fetchone()["n"]
+
+    return {
+        "rounds_completed": rounds,
+        "latest_round": latest["round_number"] if latest else None,
+        "aggregation": "FedAvg",
+        "global_model": latest["parameters"] if latest else None,
+        "nodes": [{"name": n["node_name"], "simulated": n["is_simulated"],
+                   "samples": n["sample_count"]} for n in nodes],
+        "status": "SIMULATED_PEERS" if rounds else "NOT_YET_RUN",
+        "disclosure": (
+            "Federated aggregation is implemented and runs for real; the peer "
+            "institutions are simulated because this is a single-hospital "
+            "deployment. Not a live multi-hospital federation."
+        ),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Imaging delivery (closes a dead end)
+#
+# Studies were encrypted, signed and anchored correctly, and the patient was
+# even notified that one was ready — but only the uploading technician could
+# open it. A patient was told to view something they could not reach, and the
+# doctor who needed to read the scan had no access at all. The protection was
+# real; the delivery was missing.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_IMAGING_SELECT = """
+    SELECT ir.*, p.full_name AS patient_name, p.user_id AS patient_user_id,
+           t.full_name AS technician_name
+      FROM ImagingReports ir
+      JOIN Users p ON p.id = ir.patient_id
+      LEFT JOIN Users t ON t.id = ir.lab_tech_id
+"""
+
+
+def _imaging_summary(r: dict) -> dict:
+    """Shape one imaging row for a list. Never carries the image payload.
+
+    Decrypting every study to render a list would be both wasteful and needless
+    exposure — images are released one at a time, on request.
+    """
+    return {
+        "id": str(r["id"]),
+        "patient_name": r.get("patient_name"),
+        "patient_user_id": r.get("patient_user_id"),
+        "technician_name": r.get("technician_name"),
+        "scan_region": r.get("scan_region"),
+        "exam_type": r.get("exam_type"),
+        "clinical_history": r.get("clinical_history"),
+        "findings": r.get("findings"),
+        "impression": r.get("impression"),
+        "recommendations": r.get("recommendations"),
+        "has_image": bool(r.get("encrypted_image") or r.get("image_data")),
+        "document_hash": r.get("document_hash"),
+        "kem_algorithm": r.get("kem_algorithm"),
+        "signature_algorithm": r.get("signature_algorithm"),
+        "blockchain_tx_hash": r.get("blockchain_tx_hash"),
+        "created_at": r.get("created_at"),
+    }
+
+
+def _release_imaging_payload(r: dict, imaging_id: str) -> dict:
+    """Decrypt one study after verifying it. Shared by every reader.
+
+    One implementation for patient, doctor and technician so a study cannot be
+    released to one role under weaker checks than another.
+    """
+    if not r.get("encrypted_image"):
+        if r.get("image_data"):
+            return {"image_data": r["image_data"], "encrypted": False}
+        raise HTTPException(status_code=404, detail="No image stored for this study.")
+
+    ciphertext = r["encrypted_image"]
+    if not ciphertext and r.get("s3_key"):
+        try:
+            ciphertext = download_file_from_s3(r["s3_key"]).decode("utf-8")
+        except StorageError as exc:
+            logger.error("S3 recovery failed for imaging %s: %s", imaging_id, exc)
+    # Third copy. Now that content is genuinely pinned, IPFS is a real recovery
+    # path rather than a fingerprint — worth trying before giving up.
+    if not ciphertext and r.get("ipfs_cid") and is_ipfs_configured():
+        try:
+            ciphertext = fetch_from_ipfs(r["ipfs_cid"]).decode("utf-8")
+            logger.info("Recovered imaging %s from IPFS", imaging_id)
+        except IPFSError as exc:
+            logger.error("IPFS recovery failed for imaging %s: %s", imaging_id, exc)
+
+    try:
+        shared_secret = decapsulate_aes_key(r["encrypted_aes_key"], r["mlkem_private_key_encrypted"])
+        image_bytes = decrypt_document(
+            ciphertext, derive_aes_key(shared_secret),
+            r["encryption_nonce"], r["encryption_tag"],
+        )
+    except PQCUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="Image failed its integrity check.") from exc
+
+    if sha256_hex(image_bytes) != r.get("document_hash"):
+        raise HTTPException(status_code=409, detail="Image digest does not match the recorded hash.")
+
+    return {"image_data": image_bytes.decode("utf-8"), "encrypted": True}
+
+
+@app.get("/api/patient/imaging")
+def get_patient_imaging(session: dict = Depends(require_role("Patient"))):
+    """A patient's own imaging studies."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                _IMAGING_SELECT + " WHERE ir.patient_id = %s ORDER BY ir.created_at DESC",
+                (session["user_id"],))
+            return [_imaging_summary(r) for r in cur.fetchall()]
+
+
+@app.get("/api/patient/imaging/{imaging_id}/image")
+def get_patient_imaging_image(imaging_id: str, session: dict = Depends(require_role("Patient"))):
+    """Release one of the patient's own studies, scoped by patient_id."""
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT ir.*, u.mlkem_private_key_encrypted
+                     FROM ImagingReports ir JOIN Users u ON u.id = ir.patient_id
+                    WHERE ir.id = %s AND ir.patient_id = %s""",
+                (imaging_id, user_uuid))
+            r = cur.fetchone()
+            if not r:
+                raise HTTPException(status_code=404, detail="Imaging report not found")
+            payload = _release_imaging_payload(r, imaging_id)
+            log_admin_action(conn, user_uuid, session.get("public_user_id"),
+                             "PATIENT_VIEWED_IMAGING", str(user_uuid), session.get("public_user_id"))
+            aisec.record_security_event(
+                cur, actor_id=user_uuid, actor_public_id=session.get("public_user_id"),
+                actor_role="Patient", event_type="RECORD_ACCESS",
+                subject_patient_id=str(user_uuid), resource="imaging")
+            conn.commit()
+    return payload
+
+
+@app.get("/api/doctor/imaging")
+def get_doctor_imaging(patient_id: Optional[str] = None,
+                       session: dict = Depends(require_role("Doctor"))):
+    """Imaging for patients this doctor is entitled to read.
+
+    Entitlement is the same test the chart uses, so a doctor cannot reach a scan
+    for a patient whose record they could not open.
+    """
+    doctor_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            if patient_id:
+                allowed, basis = _doctor_patient_authorization(cur, doctor_uuid, patient_id)
+                if not allowed:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"You do not have access to this patient's imaging — {basis}.")
+                cur.execute(
+                    _IMAGING_SELECT + " WHERE ir.patient_id = %s ORDER BY ir.created_at DESC",
+                    (patient_id,))
+                return [_imaging_summary(r) for r in cur.fetchall()]
+
+            # No patient named: every study for a patient this doctor treats,
+            # minus anyone who has withdrawn or been refused.
+            cur.execute(
+                _IMAGING_SELECT + """
+                 WHERE EXISTS (
+                     SELECT 1 FROM Diagnoses d WHERE d.doctor_id = %s AND d.patient_id = ir.patient_id
+                     UNION ALL SELECT 1 FROM Appointments a WHERE a.doctor_id = %s AND a.patient_id = ir.patient_id
+                     UNION ALL SELECT 1 FROM LabTestRequests l WHERE l.doctor_id = %s AND l.patient_id = ir.patient_id
+                     UNION ALL SELECT 1 FROM DoctorConsultations c WHERE c.doctor_id = %s AND c.patient_id = ir.patient_id
+                     UNION ALL SELECT 1 FROM Consent k WHERE k.subject_user_id = %s AND k.patient_id = ir.patient_id
+                                                        AND k.status = 'Authorized'
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM Consent c2 WHERE c2.patient_id = ir.patient_id
+                       AND c2.subject_user_id = %s AND c2.status IN ('Revoked', 'Rejected')
+                 )
+                 ORDER BY ir.created_at DESC""",
+                (doctor_uuid,) * 6)
+            return [_imaging_summary(r) for r in cur.fetchall()]
+
+
+@app.get("/api/doctor/imaging/{imaging_id}/image")
+def get_doctor_imaging_image(imaging_id: str, session: dict = Depends(require_role("Doctor"))):
+    """Release one study to an entitled doctor."""
+    doctor_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT ir.*, u.mlkem_private_key_encrypted
+                     FROM ImagingReports ir JOIN Users u ON u.id = ir.patient_id
+                    WHERE ir.id = %s""", (imaging_id,))
+            r = cur.fetchone()
+            if not r:
+                raise HTTPException(status_code=404, detail="Imaging report not found")
+
+            allowed, basis = _doctor_patient_authorization(cur, doctor_uuid, str(r["patient_id"]))
+            if not allowed:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"You do not have access to this patient's imaging — {basis}.")
+
+            payload = _release_imaging_payload(r, imaging_id)
+            log_admin_action(conn, doctor_uuid, session.get("public_user_id"),
+                             "DOCTOR_VIEWED_IMAGING", str(r["patient_id"]), None,
+                             details={"basis": basis})
+            aisec.record_security_event(
+                cur, actor_id=doctor_uuid, actor_public_id=session.get("public_user_id"),
+                actor_role="Doctor", event_type="RECORD_ACCESS",
+                subject_patient_id=str(r["patient_id"]), resource="imaging",
+                metadata={"basis": basis})
+            conn.commit()
+    return payload
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Medication adherence (closes a dead end)
+#
+# Nurses recorded every round — Administered, Refused, Held, Missed — and no
+# endpoint ever returned it. A prescriber could not see whether their
+# prescription was being taken, and a patient refusing medication was recorded
+# without ever surfacing. Refusals and missed doses are exactly what a
+# prescriber needs to know.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ADHERENCE_SELECT = """
+    SELECT ma.id, ma.status, ma.remarks, ma.administered_at,
+           ma.prescription_id,
+           n.full_name AS nurse_name,
+           p.medicine_name, p.dosage, p.frequency,
+           d.full_name AS prescriber_name
+      FROM MedicationAdministration ma
+      LEFT JOIN Users n ON n.id = ma.nurse_id
+      LEFT JOIN Prescriptions p ON p.id = ma.prescription_id
+      LEFT JOIN Users d ON d.id = p.doctor_id
+"""
+
+
+def _adherence_record(r: dict) -> dict:
+    """Shape one administration row, decrypting the medicine it refers to."""
+    return {
+        "id": str(r["id"]),
+        "prescription_id": str(r["prescription_id"]) if r.get("prescription_id") else None,
+        "medicine_name": _dec(r.get("medicine_name")),
+        "dosage": _dec(r.get("dosage")),
+        "frequency": _dec(r.get("frequency")),
+        "status": r.get("status"),
+        "remarks": r.get("remarks"),
+        "nurse_name": r.get("nurse_name"),
+        "prescriber_name": r.get("prescriber_name"),
+        "administered_at": r.get("administered_at"),
+    }
+
+
+def _adherence_summary(rows: list[dict]) -> dict:
+    """Counts plus the figure that actually matters.
+
+    Percentages alone hide the clinically important part: a 90% adherence rate
+    reads as fine while concealing that every missing dose was an active
+    refusal. Refusals and misses are therefore surfaced in their own right.
+    """
+    total = len(rows)
+    counts = {s: 0 for s in ("Administered", "Refused", "Held", "Missed")}
+    for r in rows:
+        if r["status"] in counts:
+            counts[r["status"]] += 1
+    taken = counts["Administered"]
+    return {
+        "total_rounds": total,
+        "administered": taken,
+        "refused": counts["Refused"],
+        "held": counts["Held"],
+        "missed": counts["Missed"],
+        "adherence_percent": round(taken / total * 100, 1) if total else None,
+        "needs_attention": counts["Refused"] + counts["Missed"] > 0,
+    }
+
+
+@app.get("/api/doctor/patients/{patient_id}/adherence")
+def get_patient_adherence(patient_id: str, session: dict = Depends(require_role("Doctor"))):
+    """Whether this patient is actually taking what was prescribed."""
+    doctor_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            allowed, basis = _doctor_patient_authorization(cur, doctor_uuid, patient_id)
+            if not allowed:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"You do not have access to this patient's record — {basis}.")
+            cur.execute(
+                _ADHERENCE_SELECT + " WHERE ma.patient_id = %s ORDER BY ma.administered_at DESC LIMIT 200",
+                (patient_id,))
+            rows = [_adherence_record(r) for r in cur.fetchall()]
+    return {"summary": _adherence_summary(rows), "rounds": rows}
+
+
+@app.get("/api/patient/adherence")
+def get_own_adherence(session: dict = Depends(require_role("Patient"))):
+    """A patient's own medication history — what was given, and what was not."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                _ADHERENCE_SELECT + " WHERE ma.patient_id = %s ORDER BY ma.administered_at DESC LIMIT 200",
+                (session["user_id"],))
+            rows = [_adherence_record(r) for r in cur.fetchall()]
+    return {"summary": _adherence_summary(rows), "rounds": rows}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Zero-knowledge consent proofs (spec §17)
+#
+# A doctor proves they hold the consent token the patient's approval issued,
+# without transmitting it. See app/zkp_service.py for the protocol — and for
+# the statement that this component, unlike the rest of the system, is NOT
+# post-quantum secure.
+#
+# This runs *alongside* the ordinary consent check rather than instead of it.
+# A proof failing does not open a record, and a proof succeeding does not open
+# one either: authorization is still decided by relationship and consent state.
+# What the proof adds is evidence that the party presenting it is the one the
+# patient actually approved.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/doctor/consent-token/{patient_id}")
+def collect_consent_token(patient_id: str, session: dict = Depends(require_role("Doctor"))):
+    """Collect the consent token for an approved relationship.
+
+    Delivered once. After collection the server keeps only the commitment, so a
+    later database compromise cannot recover the token.
+    """
+    doctor_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT consent_id, status::text AS status, zkp_commitment,
+                          zkp_token_encrypted, zkp_token_collected_at
+                     FROM Consent
+                    WHERE patient_id = %s AND subject_user_id = %s AND subject_role = 'Doctor'""",
+                (patient_id, doctor_uuid))
+            row = cur.fetchone()
+            if not row or row["status"] != "Authorized":
+                raise HTTPException(status_code=404, detail="No approved consent for this patient.")
+            if not row["zkp_token_encrypted"]:
+                # Two very different situations. Telling a doctor their consent
+                # predates the feature when in fact they already collected the
+                # token would send them to the patient for no reason.
+                if row["zkp_token_collected_at"]:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="You already collected this token on "
+                               f"{row['zkp_token_collected_at']:%d %b %Y at %H:%M}. It is "
+                               "delivered once and the server no longer holds it. Ask the "
+                               "patient to withdraw and re-approve to have a new one issued.")
+                raise HTTPException(
+                    status_code=409,
+                    detail="This consent predates zero-knowledge tokens. Ask the patient to "
+                           "withdraw and re-approve to have one issued.")
+
+            token = decrypt_data(row["zkp_token_encrypted"])
+            cur.execute(
+                """UPDATE Consent SET zkp_token_encrypted = NULL,
+                          zkp_token_collected_at = CURRENT_TIMESTAMP
+                    WHERE consent_id = %s""", (row["consent_id"],))
+            log_admin_action(conn, doctor_uuid, session.get("public_user_id"),
+                             "ZKP_TOKEN_COLLECTED", str(patient_id), None)
+            conn.commit()
+
+    return {
+        "consent_token": token,
+        "commitment": row["zkp_commitment"],
+        "delivered_once": True,
+        "notice": "Store this securely. The server has now discarded it and keeps only "
+                  "the public commitment.",
+    }
+
+
+@app.post("/api/doctor/zkp/challenge")
+def request_zkp_challenge(patient_id: str = Query(...),
+                          session: dict = Depends(require_role("Doctor"))):
+    """Get a single-use nonce to bind one proof to one verification."""
+    doctor_uuid = session["user_id"]
+    challenge = zkp.make_challenge()
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT 1 FROM Consent
+                    WHERE patient_id = %s AND subject_user_id = %s
+                      AND status = 'Authorized' AND zkp_commitment IS NOT NULL""",
+                (patient_id, doctor_uuid))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="No approved consent for this patient.")
+            cur.execute(
+                """INSERT INTO ZkpChallenges (challenge, subject_user_id, patient_id)
+                   VALUES (%s, %s, %s)""", (challenge, doctor_uuid, patient_id))
+            conn.commit()
+    return {"challenge": challenge, "expires_in_seconds": 300,
+            "context": f"consent:{patient_id}"}
+
+
+@app.post("/api/doctor/zkp/verify")
+def verify_zkp_proof(body: ZkpProofRequest, session: dict = Depends(require_role("Doctor"))):
+    """Verify a proof of knowledge of the consent token."""
+    doctor_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT id, patient_id, consumed_at, expires_at
+                     FROM ZkpChallenges
+                    WHERE challenge = %s AND subject_user_id = %s""",
+                (body.challenge, doctor_uuid))
+            ch = cur.fetchone()
+            if not ch:
+                raise HTTPException(status_code=404, detail="Unknown challenge.")
+            if ch["consumed_at"]:
+                raise HTTPException(status_code=409, detail="That challenge was already used.")
+            if ch["expires_at"] < datetime.now(timezone.utc):
+                raise HTTPException(status_code=410, detail="That challenge has expired.")
+
+            cur.execute(
+                """SELECT zkp_commitment FROM Consent
+                    WHERE patient_id = %s AND subject_user_id = %s AND status = 'Authorized'""",
+                (ch["patient_id"], doctor_uuid))
+            consent = cur.fetchone()
+            if not consent or not consent["zkp_commitment"]:
+                raise HTTPException(status_code=404, detail="No commitment recorded for this consent.")
+
+            ok = zkp.verify(
+                consent["zkp_commitment"],
+                {"t": body.t, "s": body.s},
+                body.challenge,
+                f"consent:{ch['patient_id']}",
+            )
+
+            # Consumed either way. A challenge that survives a failed attempt
+            # lets an attacker grind against one nonce.
+            cur.execute(
+                "UPDATE ZkpChallenges SET consumed_at = CURRENT_TIMESTAMP, verified = %s WHERE id = %s",
+                (ok, ch["id"]))
+            log_admin_action(conn, doctor_uuid, session.get("public_user_id"),
+                             "ZKP_PROOF_VERIFIED" if ok else "ZKP_PROOF_FAILED",
+                             str(ch["patient_id"]), None)
+            aisec.record_security_event(
+                cur, actor_id=doctor_uuid, actor_public_id=session.get("public_user_id"),
+                actor_role="Doctor",
+                event_type="ZKP_PROOF" if ok else "ZKP_PROOF_FAILED",
+                subject_patient_id=str(ch["patient_id"]), resource="consent_proof")
+            conn.commit()
+
+    return {
+        "verified": ok,
+        "proves": "knowledge of the consent token issued when this patient approved access",
+        "reveals": "nothing about the token itself",
+        "post_quantum_secure": False,
+        "caveat": "Schnorr rests on discrete logarithm, which Shor's algorithm breaks. "
+                  "Unlike ML-KEM-768 and ML-DSA-65 elsewhere in this system, this "
+                  "component is not quantum-resistant.",
+    }
+
+
+@app.get("/api/admin/ipfs/status")
+def get_ipfs_status(session: dict = Depends(require_role("Administrator"))):
+    """Live IPFS node health, and an honest count of what is actually published.
+
+    Reports 'not configured' separately from 'configured but unreachable' —
+    those need different actions from whoever is on call — and states plainly
+    that pinning on one node is not replication across the public network.
+    """
+    status = ipfs_status()
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT COUNT(*) AS total,
+                          COUNT(ipfs_cid) AS with_cid
+                     FROM LabReports""")
+            reports = cur.fetchone()
+    status["reports_total"] = reports["total"]
+    status["reports_with_cid"] = reports["with_cid"]
+    return status
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Real federation peers (spec §20–21)
+#
+# The simulated peers demonstrate the aggregation; these endpoints make it
+# deployable. A second QuantumCare instance registers as a peer, fits its own
+# baseline locally, and submits only the parameters — medians and scales. No
+# record, event or identifier crosses the boundary, which is the entire reason
+# to federate rather than pool.
+#
+# Submissions are HMAC-signed with a per-peer shared secret. Without that, any
+# party who can reach this endpoint could drag the global baseline wherever
+# they liked and silently blind every participant's detector.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/admin/federated/peers")
+def register_federated_peer(req: RegisterPeerRequest,
+                            session: dict = Depends(require_role("Administrator"))):
+    """Register a peer institution and mint its shared secret.
+
+    The secret is shown once and stored encrypted, in the same shape as
+    ML-KEM private keys and ZKP consent tokens.
+    """
+    secret = secrets.token_hex(32)
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT 1 FROM FederatedPeers WHERE node_name = %s", (req.node_name,))
+            if cur.fetchone():
+                raise HTTPException(status_code=409, detail="A peer with that name is already registered.")
+            cur.execute(
+                """INSERT INTO FederatedPeers (node_name, shared_secret_encrypted, contact_url)
+                   VALUES (%s, %s, %s) RETURNING id""",
+                (req.node_name, encrypt_data(secret), req.contact_url))
+            peer_id = cur.fetchone()["id"]
+            log_admin_action(conn, session["user_id"], session.get("public_user_id"),
+                             "FEDERATED_PEER_REGISTERED")
+            conn.commit()
+    return {
+        "peer_id": str(peer_id),
+        "node_name": req.node_name,
+        "shared_secret": secret,
+        "delivered_once": True,
+        "notice": "Give this to the peer institution over a secure channel. It is stored "
+                  "encrypted here and will not be shown again.",
+    }
+
+
+@app.get("/api/admin/federated/peers")
+def list_federated_peers(session: dict = Depends(require_role("Administrator"))):
+    """Registered peers, and whether any have actually submitted."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT node_name, contact_url, is_active, submissions,
+                          last_submission_at, created_at
+                     FROM FederatedPeers ORDER BY node_name""")
+            peers = [dict(r) for r in cur.fetchall()]
+    return {
+        "peers": peers,
+        "total": len(peers),
+        "active_contributors": sum(1 for p in peers if p["submissions"] > 0),
+        "note": "Peers listed here are real remote institutions. The simulated nodes that "
+                "appear in a federated round are separate and always flagged as simulated.",
+    }
+
+
+@app.post("/api/federated/submit")
+def receive_peer_parameters(req: PeerSubmissionRequest, request: Request = None):
+    """Accept a peer institution's model parameters.
+
+    Deliberately not behind ``require_role``: the caller is another
+    institution's server, not a user of this one. Authentication is the HMAC
+    over the submission, checked against that peer's shared secret.
+    """
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT id, shared_secret_encrypted, is_active FROM FederatedPeers WHERE node_name = %s",
+                (req.node_name,))
+            peer = cur.fetchone()
+            if not peer or not peer["is_active"]:
+                raise HTTPException(status_code=403, detail="Unknown or inactive peer.")
+
+            secret = decrypt_data(peer["shared_secret_encrypted"])
+            if not aisec.verify_parameters_signature(
+                    req.node_name, req.round_number, req.sample_count,
+                    req.parameters, secret, req.signature):
+                logger.warning("Rejected federated submission from %s: bad signature", req.node_name)
+                aisec.record_security_event(
+                    cur, actor_id=None, actor_role=None,
+                    event_type="FEDERATED_SUBMISSION_REJECTED",
+                    resource=req.node_name,
+                    ip_address=request.client.host if request and request.client else None)
+                conn.commit()
+                raise HTTPException(status_code=401, detail="Signature verification failed.")
+
+            if not aisec.sane_parameters(req.parameters):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Parameters are outside plausible bounds and were not accepted.")
+
+            cur.execute(
+                """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,
+                                                sample_count, local_parameters)
+                   VALUES (%s, %s, FALSE, %s, %s)
+                   ON CONFLICT (round_number, node_name) DO UPDATE
+                     SET sample_count = EXCLUDED.sample_count,
+                         local_parameters = EXCLUDED.local_parameters,
+                         created_at = CURRENT_TIMESTAMP""",
+                (req.round_number, req.node_name, req.sample_count,
+                 psycopg.types.json.Json(req.parameters)))
+            cur.execute(
+                """UPDATE FederatedPeers
+                      SET submissions = submissions + 1,
+                          last_submission_at = CURRENT_TIMESTAMP
+                    WHERE id = %s""", (peer["id"],))
+            conn.commit()
+
+    return {"accepted": True, "round": req.round_number, "node": req.node_name,
+            "note": "Parameters only. No records were transmitted or expected."}
