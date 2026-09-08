@@ -8,7 +8,30 @@ import Link from "next/link";
 import {
   getDoctorPatientDetail, createDiagnosis, createPrescription,
   getDoctorLabPanels, requestLabTest, declareEmergencyAccess, createConsultation,
+  getPatientAdherence,
 } from "@/lib/session";
+
+interface AdherenceRound {
+  id: string;
+  medicine_name?: string | null;
+  dosage?: string | null;
+  status: string;
+  nurse_name?: string | null;
+  administered_at?: string | null;
+}
+
+interface AdherencePayload {
+  summary: {
+    total_rounds: number;
+    administered: number;
+    refused: number;
+    held: number;
+    missed: number;
+    adherence_percent: number | null;
+    needs_attention: boolean;
+  };
+  rounds: AdherenceRound[];
+}
 
 interface LabPanel {
   code: string;
@@ -121,6 +144,9 @@ const emptyPrescriptionForm = {
 export default function PatientDetails() {
   const params = useParams();
   const [patient, setPatient] = useState<PatientDetailResponse | null>(null);
+  // Adherence sits behind its own authorization-scoped endpoint. A prescriber
+  // needs to know whether the drug is actually being taken.
+  const [adherence, setAdherence] = useState<AdherencePayload | null>(null);
 
   const [loading, setLoading] = useState(true);
 
@@ -176,6 +202,12 @@ export default function PatientDetails() {
     try {
       const data = await getDoctorPatientDetail(params.id as string);
       setPatient(data);
+      // One panel failing must not blank the whole chart.
+      try {
+        setAdherence(await getPatientAdherence(params.id as string));
+      } catch (adherenceError) {
+        console.error("Adherence unavailable:", adherenceError);
+      }
     } catch (error) {
       console.error("Error fetching patient detail:", error);
     } finally {
@@ -364,6 +396,76 @@ export default function PatientDetails() {
             <X className="w-4 h-4" />
           </button>
         </div>
+      )}
+
+      {/* Medication adherence. Recorded by nursing staff on every round and
+          previously returned by nothing, so a prescriber could not see whether
+          their prescription was being taken. Refusals lead, because those are
+          the clinically actionable ones. */}
+      {adherence && adherence.summary.total_rounds > 0 && (
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.04 }}
+          className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+          <div className="flex items-center gap-3 mb-5 border-b border-slate-100 pb-4 flex-wrap">
+            <CheckCircle className="w-5 h-5 text-emerald-500" />
+            <h2 className="text-lg font-bold text-slate-800">Medication Adherence</h2>
+            {adherence.summary.adherence_percent !== null && (
+              <span className="text-sm font-bold text-slate-700 tabular-nums">
+                {adherence.summary.adherence_percent}%
+              </span>
+            )}
+            {adherence.summary.needs_attention && (
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 uppercase tracking-wide">
+                Needs attention
+              </span>
+            )}
+            <span className="ml-auto text-xs text-slate-400">
+              {adherence.summary.total_rounds} rounds recorded
+            </span>
+          </div>
+
+          <div className="grid grid-cols-4 gap-2 mb-4">
+            {[
+              { label: "Given", value: adherence.summary.administered, tint: "text-emerald-700 bg-emerald-50" },
+              { label: "Refused", value: adherence.summary.refused, tint: "text-rose-700 bg-rose-50" },
+              { label: "Held", value: adherence.summary.held, tint: "text-amber-700 bg-amber-50" },
+              { label: "Missed", value: adherence.summary.missed, tint: "text-slate-700 bg-slate-100" },
+            ].map((s) => (
+              <div key={s.label} className="p-2.5 rounded-xl border border-slate-100">
+                <p className="text-xl font-bold text-slate-800 tabular-nums">{s.value}</p>
+                <p className={`text-[10px] font-bold px-1.5 py-0.5 rounded inline-block ${s.tint}`}>{s.label}</p>
+              </div>
+            ))}
+          </div>
+
+          {adherence.rounds.filter((r) => r.status !== "Administered").length > 0 && (
+            <div>
+              <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wide mb-2">
+                Doses not given
+              </p>
+              <div className="space-y-1.5">
+                {adherence.rounds
+                  .filter((r) => r.status !== "Administered")
+                  .slice(0, 6)
+                  .map((r) => (
+                    <div key={r.id} className="flex items-center gap-3 text-sm p-2 rounded-lg bg-slate-50">
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full flex-shrink-0 ${
+                        r.status === "Refused" ? "bg-rose-100 text-rose-700"
+                        : r.status === "Held" ? "bg-amber-100 text-amber-700"
+                        : "bg-slate-200 text-slate-700"
+                      }`}>
+                        {r.status}
+                      </span>
+                      <span className="font-semibold text-slate-800 truncate">{r.medicine_name}</span>
+                      <span className="text-slate-500 truncate">{r.dosage}</span>
+                      <span className="ml-auto text-xs text-slate-400 whitespace-nowrap">
+                        {r.administered_at ? new Date(r.administered_at).toLocaleDateString() : ""}
+                      </span>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+        </motion.div>
       )}
 
       {/* Nursing observations — recorded by nurses, read here by the treating doctor */}

@@ -4,25 +4,7 @@ import React, { useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
-import {
-  LayoutDashboard,
-  User,
-  FileHeart,
-  FileText,
-  TestTubes,
-  Pill,
-  Stethoscope,
-  Calendar,
-  Bell,
-  ShieldCheck,
-  LogOut,
-  Menu,
-  X,
-  ChevronLeft,
-  Heart,
-  Activity,
-  ShieldOff
-} from "lucide-react";
+import { Activity, Bell, Calendar, ChevronLeft, ClipboardCheck, FileHeart, FileText, Film, Heart, LayoutDashboard, LogOut, Menu, Pill, ShieldCheck, ShieldOff, ShieldQuestion, Stethoscope, TestTubes, User, X } from "lucide-react";
 import { logout } from "@/lib/session";
 import { useAuth } from "@/context/AuthContext";
 
@@ -34,9 +16,12 @@ const navItems = [
   { label: "My Documents", icon: FileText, href: "/dashboard/patient/documents" },
   { label: "My Vitals", icon: Activity, href: "/dashboard/patient/vitals" },
   { label: "Prescriptions", icon: Pill, href: "/dashboard/patient/prescriptions" },
+  { label: "Medication History", icon: ClipboardCheck, href: "/dashboard/patient/medication-history" },
+  { label: "My Scans", icon: Film, href: "/dashboard/patient/scans" },
   { label: "Consultations", icon: Stethoscope, href: "/dashboard/patient/consultations" },
   { label: "Appointments", icon: Calendar, href: "/dashboard/patient/appointments" },
   { label: "Notifications", icon: Bell, href: "/dashboard/patient/notifications" },
+  { label: "Access Requests", icon: ShieldQuestion, href: "/dashboard/patient/access-requests" },
   { label: "Record Access", icon: ShieldOff, href: "/dashboard/patient/consent" },
   { label: "Security Center", icon: ShieldCheck, href: "/dashboard/patient/security" },
 ];

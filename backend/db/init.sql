@@ -534,3 +534,146 @@ CREATE INDEX IF NOT EXISTS idx_nursingnotes_nurse ON NursingNotes(nurse_id);
 CREATE INDEX IF NOT EXISTS idx_medadmin_patient ON MedicationAdministration(patient_id);
 CREATE INDEX IF NOT EXISTS idx_medadmin_prescription ON MedicationAdministration(prescription_id);
 CREATE INDEX IF NOT EXISTS idx_medadmin_nurse ON MedicationAdministration(nurse_id);
+
+-- ─── Doctor-initiated access requests (spec §6) ──────────────────────────────
+-- Extends Consent rather than adding a parallel table: a request and a consent
+-- are the same relationship at different stages, and splitting them would give
+-- two sources of truth for "may this doctor read this patient".
+DO $$ BEGIN
+    ALTER TYPE consent_status ADD VALUE IF NOT EXISTS 'Pending';
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN
+    ALTER TYPE consent_status ADD VALUE IF NOT EXISTS 'Rejected';
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Purpose TEXT;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Requested_Resource VARCHAR(120);
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Requested_At TIMESTAMPTZ;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Decided_At TIMESTAMPTZ;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Decision_Note TEXT;
+CREATE INDEX IF NOT EXISTS idx_consent_patient_status ON Consent(Patient_ID, Status);
+
+-- ─── AI security layer (spec §18–25) ─────────────────────────────────────────
+-- Behavioural metadata only. No clinical content reaches these tables: the
+-- layer analyses *how* records are touched, never what they contain (§18).
+
+CREATE TABLE IF NOT EXISTS SecurityEvents (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    actor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    actor_public_id VARCHAR(20),
+    actor_role user_role,
+    event_type VARCHAR(60) NOT NULL,      -- RECORD_ACCESS, LOGIN_FAILED, EMERGENCY_ACCESS…
+    subject_patient_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    resource VARCHAR(120),
+    ip_address INET,
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS idx_secevent_actor_time ON SecurityEvents(actor_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_secevent_type ON SecurityEvents(event_type, occurred_at DESC);
+
+CREATE TABLE IF NOT EXISTS RiskAssessments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    actor_id UUID REFERENCES Users(id) ON DELETE CASCADE,
+    actor_public_id VARCHAR(20),
+    risk_score NUMERIC(5,2) NOT NULL,
+    risk_level VARCHAR(10) NOT NULL,      -- LOW | MEDIUM | HIGH
+    detection_source VARCHAR(40) NOT NULL,-- LOCAL_ANOMALY | FEDERATED_IDS
+    features JSONB NOT NULL DEFAULT '{}'::jsonb,
+    explanation JSONB NOT NULL DEFAULT '[]'::jsonb,   -- XAI attributions (§22)
+    window_start TIMESTAMPTZ,
+    window_end TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_risk_level ON RiskAssessments(risk_level, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS SecurityAlerts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    assessment_id UUID REFERENCES RiskAssessments(id) ON DELETE CASCADE,
+    actor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    severity VARCHAR(10) NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    summary TEXT NOT NULL,
+    response VARCHAR(40) NOT NULL,        -- MONITOR | WARN | VERIFY | RESTRICT | ESCALATE
+    acknowledged_at TIMESTAMPTZ,
+    acknowledged_by UUID REFERENCES Users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS SecurityIncidents (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    incident_ref VARCHAR(24) UNIQUE NOT NULL,
+    alert_id UUID REFERENCES SecurityAlerts(id) ON DELETE SET NULL,
+    actor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    event_type VARCHAR(60) NOT NULL,
+    affected_resource VARCHAR(160),
+    risk_level VARCHAR(10) NOT NULL,
+    detection_source VARCHAR(40) NOT NULL,
+    explanation TEXT,
+    response TEXT,
+    resolution TEXT,
+    status VARCHAR(20) NOT NULL DEFAULT 'Open',   -- Open | Investigating | Closed
+    audit_reference VARCHAR(80),
+    blockchain_tx_hash VARCHAR(120),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    closed_at TIMESTAMPTZ
+);
+
+-- Federated learning: one row per participating node per round. Holds model
+-- PARAMETERS only (per-feature baselines), never records — that separation is
+-- the entire point of federating (§20).
+CREATE TABLE IF NOT EXISTS FederatedRounds (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    round_number INTEGER NOT NULL,
+    node_name VARCHAR(80) NOT NULL,
+    is_simulated BOOLEAN NOT NULL DEFAULT TRUE,
+    sample_count INTEGER NOT NULL,
+    local_parameters JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(round_number, node_name)
+);
+
+CREATE TABLE IF NOT EXISTS FederatedGlobalModel (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    round_number INTEGER NOT NULL UNIQUE,
+    parameters JSONB NOT NULL,
+    contributing_nodes INTEGER NOT NULL,
+    total_samples INTEGER NOT NULL,
+    aggregation VARCHAR(20) NOT NULL DEFAULT 'FedAvg',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─── Zero-knowledge consent proofs (spec §17) ────────────────────────────────
+-- Only the commitment is public. The token itself is AES-encrypted at rest,
+-- exactly as ML-KEM private keys are, and is handed to the doctor once.
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS zkp_commitment TEXT;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS zkp_token_encrypted TEXT;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS zkp_token_collected_at TIMESTAMPTZ;
+
+-- Challenges are single-use: a proof bound to a nonce that can be presented
+-- twice is just a bearer token wearing a costume.
+CREATE TABLE IF NOT EXISTS ZkpChallenges (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    challenge VARCHAR(64) UNIQUE NOT NULL,
+    subject_user_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    consumed_at TIMESTAMPTZ,
+    verified BOOLEAN,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP + INTERVAL '5 minutes'
+);
+CREATE INDEX IF NOT EXISTS idx_zkp_challenge ON ZkpChallenges(challenge);
+
+-- ─── Federated peers (spec §20–21) ───────────────────────────────────────────
+-- A registered peer is a real remote institution that submits model parameters.
+-- Simulated peers stay flagged in FederatedRounds; these are separate and real.
+CREATE TABLE IF NOT EXISTS FederatedPeers (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    node_name VARCHAR(120) UNIQUE NOT NULL,
+    shared_secret_encrypted TEXT NOT NULL,   -- HMAC key, AES-encrypted at rest
+    contact_url TEXT,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    last_submission_at TIMESTAMPTZ,
+    submissions INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

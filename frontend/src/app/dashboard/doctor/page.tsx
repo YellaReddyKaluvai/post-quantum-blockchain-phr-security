@@ -9,6 +9,25 @@ import {
 import { getDoctorDashboardSummary, searchDoctorPatients, createDiagnosis, createPrescription } from "@/lib/session";
 import PatientSearchSelect from "@/components/PatientSearchSelect";
 
+// Mirrors DoctorDashboardSummary in backend/app/schemas.py. Typing this
+// properly is the fix: the page read `data.stats.assigned_patients` against an
+// API that returns `total_assigned_patients` at the top level, and a loose
+// Record<string, unknown> let both mistakes compile. Every card showed zero,
+// which reads as empty data rather than as the bug it was.
+interface DoctorActivity {
+  title?: string;
+  body?: string;
+  created_at?: string;
+}
+
+interface DoctorDashboardData {
+  total_assigned_patients: number;
+  todays_appointments: number;
+  pending_reports: number;
+  recent_diagnoses: number;
+  recent_activities: DoctorActivity[];
+}
+
 interface PatientResult {
   id: string;
   user_id: string;
@@ -21,7 +40,7 @@ type ModalType = "diagnosis" | "prescription" | null;
 
 export default function DoctorDashboard() {
   const [loading, setLoading] = useState(true);
-  const [data, setData] = useState<Record<string, unknown> | null>(null);
+  const [data, setData] = useState<DoctorDashboardData | null>(null);
   const [activeModal, setActiveModal] = useState<ModalType>(null);
   const [selectedPatient, setSelectedPatient] = useState<PatientResult | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -129,13 +148,12 @@ export default function DoctorDashboard() {
     );
   }
 
-  const stats = (data?.stats || {}) as Record<string, number>;
 
   const statCards = [
-    { label: "Assigned Patients", value: stats.assigned_patients || 0, icon: Users, color: "text-blue-500", bg: "bg-blue-50" },
-    { label: "Today's Appointments", value: stats.todays_appointments || 0, icon: Calendar, color: "text-indigo-500", bg: "bg-indigo-50" },
-    { label: "Pending Reports", value: stats.pending_reports || 0, icon: FileText, color: "text-amber-500", bg: "bg-amber-50" },
-    { label: "Recent Diagnoses", value: stats.recent_diagnoses || 0, icon: HeartPulse, color: "text-emerald-500", bg: "bg-emerald-50" },
+    { label: "Assigned Patients", value: data?.total_assigned_patients ?? 0, icon: Users, color: "text-blue-500", bg: "bg-blue-50" },
+    { label: "Today's Appointments", value: data?.todays_appointments ?? 0, icon: Calendar, color: "text-indigo-500", bg: "bg-indigo-50" },
+    { label: "Pending Reports", value: data?.pending_reports ?? 0, icon: FileText, color: "text-amber-500", bg: "bg-amber-50" },
+    { label: "Recent Diagnoses", value: data?.recent_diagnoses ?? 0, icon: HeartPulse, color: "text-emerald-500", bg: "bg-emerald-50" },
   ];
 
 
@@ -214,14 +232,14 @@ export default function DoctorDashboard() {
           <h2 className="text-lg font-bold text-slate-800">Recent Activities</h2>
         </div>
         <div className="space-y-4">
-          {((data?.recent_activities as Record<string, unknown>[])?.length > 0) ? (
-            ((data?.recent_activities || []) as Record<string, unknown>[]).map((act: Record<string, unknown>, i: number) => (
+          {(data?.recent_activities?.length ?? 0) > 0 ? (
+            (data?.recent_activities ?? []).map((act: DoctorActivity, i: number) => (
 
               <div key={i} className="flex items-start gap-4 pb-4 border-b border-slate-50 last:border-0">
                 <div className="w-2 h-2 mt-2 rounded-full bg-cyan-400" />
                 <div>
-                  <p className="text-sm font-medium text-slate-800">{act.description as string || act.title as string || act.body as string}</p>
-                  <p className="text-xs text-slate-500">{act.timestamp ? new Date(act.timestamp as string).toLocaleString() : act.created_at ? new Date(act.created_at as string).toLocaleString() : ""}</p>
+                  <p className="text-sm font-medium text-slate-800">{act.title || act.body || ""}</p>
+                  <p className="text-xs text-slate-500">{act.created_at ? new Date(act.created_at).toLocaleString() : ""}</p>
                 </div>
               </div>
             ))

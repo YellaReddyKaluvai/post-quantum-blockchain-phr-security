@@ -1,120 +1,102 @@
-# Enterprise IAM Architecture for Enhanced PHR Security
+# 8. Identity, Access & Consent
 
-## 1. Identity Model
-- Authentication source: Firebase Authentication.
-- Login methods: Google Sign-In and Email/Password.
-- Backend trust boundary: FastAPI verifies the Firebase ID token, issues a short-lived backend JWT, and binds a server-side session.
-- Persistent identity: each Firebase UID maps to one stable application user record.
+Six checks stand between a user and a record. Frontend route protection is not
+one of them — it is convenience, and every rule below is enforced server-side.
 
-## 2. Role Model
-Supported roles:
-- Patient
-- Doctor
-- Laboratory Staff
-- Administrator
-- AI Security Analyst
+## Authentication
 
-Future roles:
-- Insurance Provider
-- Pharmacist
-- Hospital Receptionist
-- Researcher
+| Control | Implementation |
+|---|---|
+| Password storage | Argon2id, memory-hard, per-user salt |
+| Session token | JWT, 30-minute expiry |
+| Session record | `Sessions` table — countable and revocable |
+| Audit | Every attempt to `AuthLogs`, success and failure |
 
-## 3. RBAC Matrix
+There is **no Firebase, no Google Sign-In, and no third-party identity
+provider**. Authentication is self-contained.
+
+## Authorization — the six gates
+
 ```mermaid
-flowchart LR
-    U[User] --> A[Authenticate with Firebase]
-    A --> B[Backend verifies Firebase token]
-    B --> C[Load user profile]
-    C --> D[Resolve role]
-    D --> E[Resolve permissions]
-    E --> F[Create session + issue JWT]
-    F --> G[Route to role dashboard]
+flowchart TB
+    A[1. Authenticated?] -->|no| X1[401]
+    A -->|yes| B[2. Correct role?]
+    B -->|no| X2[403]
+    B -->|yes| C[3. Owns the resource?]
+    C -->|no| X3[404]
+    C -->|yes| D[4. Treating relationship<br/>or granted consent?]
+    D -->|no| X4[403]
+    D -->|yes| E[5. Not revoked or rejected?]
+    E -->|revoked| F{6. Live break-glass?}
+    F -->|no| X5[403]
+    F -->|yes| G[Released — and anchored]
+    E -->|clear| G
 ```
 
-## 4. Database Schema
-Core tables:
-- Roles
-- Permissions
-- RolePermissions
-- Users
-- UserKeys
-- Sessions
-- AuditLogs
-- MedicalRecords
-- Consent
-- EmergencyAccess
-- Notifications
+## Roles
 
-## 5. Key Management
+| Role | May read | May write |
+|---|---|---|
+| **Patient** | Own records only | Appointments, consent decisions |
+| **Doctor** | Patients they treat, or who consented | Diagnoses, prescriptions, consultations, lab requests |
+| **Nurse** | Assigned patients | Vitals, nursing notes, medication rounds |
+| **Lab Technician** | Requests assigned to them | Lab reports, imaging |
+| **Administrator** | Users, audit, security | Approvals, account status |
+
+Administrative visibility and medical-record access are separate concepts: an
+administrator manages accounts and reads audit trails, and is not thereby
+entitled to clinical content.
+
+## Consent lifecycle
+
 ```mermaid
-sequenceDiagram
-    participant Client
-    participant Firebase
-    participant FastAPI
-    participant KeyStore
-
-    Client->>Firebase: Authenticate
-    Firebase-->>Client: ID token
-    Client->>FastAPI: Exchange ID token
-    FastAPI->>KeyStore: Retrieve existing PQC key pair
-    alt Key pair absent
-        FastAPI->>KeyStore: Generate ML-KEM key pair
-    end
-    FastAPI-->>Client: Backend JWT + role + permissions
+stateDiagram-v2
+    [*] --> Pending: doctor requests, states purpose
+    Pending --> Authorized: patient approves
+    Pending --> Rejected: patient declines
+    Authorized --> Revoked: patient withdraws
+    Rejected --> Pending: doctor asks again
+    Revoked --> Pending: doctor asks again
+    Authorized --> [*]
+    note right of Rejected
+        Rejected and Revoked both block reads.
+        Re-asking always re-enters as Pending —
+        never straight back to Authorized.
+    end note
 ```
 
-## 6. Authorization Flow
-Every request is evaluated against:
-- Authentication
-- Role
-- Permission
-- Ownership
-- Consent
-- Session validity
-- Risk score
+Two routes to a record coexist deliberately. A doctor **already treating** the
+patient reads on that relationship; making an oncologist file a form before
+opening the chart of someone they are actively treating is the kind of
+obstruction clinicians route around. A doctor with **no** relationship has no
+implicit access and must ask.
 
-Routes returning unauthorized access should fail closed with `403 Forbidden`.
+The purpose field requires a real sentence. The patient reads it to decide, and
+consent given on no information is not informed consent — so `"urgent"` is
+refused before it reaches the database.
 
-## 7. Blockchain Audit Logging
-Events written to blockchain:
-- Login
-- Logout
-- Consent granted
-- Consent revoked
-- Medical record upload
-- Medical record download
-- Emergency access
-- Key rotation
-- Permission change
-- Role assignment
+## Zero-knowledge consent proofs
 
-## 8. Frontend Route Map
-- `/login`
-- `/signup`
-- `/dashboard/patient`
-- `/dashboard/doctor`
-- `/dashboard/laboratory`
-- `/dashboard/admin`
-- `/dashboard/security`
-- `/forbidden`
+A doctor can prove to a third party that a patient consented **without
+revealing** the patient identifier, the doctor identifier, or the consent
+record. Implemented as a Schnorr-style non-interactive proof over a
+challenge–response, with challenges single-use to prevent replay.
 
-## 9. Backend API Surface
-- `POST /api/auth/firebase/session`
-- `GET /api/auth/me`
-- `POST /api/auth/logout`
-- `GET /api/roles`
-- `GET /api/dashboard/{role}`
-- `POST /api/records/upload`
-- `POST /api/consent/grant`
-- `POST /api/consent/revoke`
-- `POST /api/keys/rotate`
-- `POST /api/audit/log`
+## Emergency access
 
-## 10. Deployment Notes
-- Next.js frontend runs on the web tier.
-- FastAPI runs on the API tier.
-- PostgreSQL stores RBAC, session, consent, audit, and key metadata.
-- Firebase stores authentication identities.
-- Firestore or MinIO can be used for secondary storage or document blobs.
-- Hyperledger Fabric stores immutable audit proofs and security events.
+Time-boxed to at most 24 hours, requires a substantive clinical reason,
+notifies the patient immediately, is written to the audit log and anchored
+on-chain, and appears in the administrator's review queue. An override that
+never expired would be a bypass, not an override.
+
+## Verified
+
+| Check | Result |
+|---|---|
+| Cross-role probes across all endpoints | 224 / 224 refused |
+| Unrelated doctor reads a chart | `403` |
+| Access request pending | `403` |
+| Access request rejected | `403` |
+| Access request approved | `200` |
+| Another patient decides a request | `404` |
+| Throwaway purpose (`"urgent"`) | `422` |

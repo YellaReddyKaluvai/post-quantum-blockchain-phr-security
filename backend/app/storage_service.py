@@ -25,6 +25,10 @@ and record a NULL key — never a key that was not actually written.
 """
 
 import hashlib
+import urllib.parse
+import urllib.request
+import os
+import json
 import logging
 import threading
 from typing import Optional, Tuple
@@ -111,10 +115,14 @@ def generate_ipfs_cid_v0(content_bytes: bytes) -> str:
     computed exactly as IPFS would compute it. It identifies the ciphertext and
     needs no network call, so it is always available even when S3 is not.
 
-    It does NOT mean the content is on the IPFS network. Nothing here pins to
-    IPFS, so a public gateway URL built from this CID will not resolve. The CID
-    is a deterministic fingerprint, useful for deduplication and integrity, and
-    it should be presented as exactly that.
+    This addresses the *raw bytes*. A real ``ipfs add`` wraps content in a
+    UnixFS node and hashes that instead, so the two values legitimately differ —
+    they address different objects, and neither is wrong.
+
+    On its own this proves nothing about availability: computing a CID is not
+    publishing. ``pin_to_ipfs`` does the publishing when a node is configured,
+    and the two are kept separate so a fingerprint can still be recorded when no
+    node is reachable.
     """
     sha256_hash = hashlib.sha256(content_bytes).digest()
     multihash_bytes = b"\x12\x20" + sha256_hash  # 0x12 = sha2-256, 0x20 = 32 bytes
@@ -199,6 +207,126 @@ def s3_object_exists(s3_key: str) -> bool:
         return False
 
 
+
+# ─── IPFS publishing ─────────────────────────────────────────────────────────
+#
+# Computing a CID and pinning content are different things, and conflating them
+# is how this module previously claimed more than it did. The CID above is
+# arithmetic over the bytes; the functions below talk to a real node, and every
+# one of them reports honestly when there is no node to talk to.
+
+class IPFSError(RuntimeError):
+    """An IPFS operation failed. Never raised for 'no node configured'."""
+
+
+def ipfs_api_url() -> Optional[str]:
+    """The configured node's API root, or None when IPFS is not in use."""
+    return os.getenv("IPFS_API_URL") or None
+
+
+def is_ipfs_configured() -> bool:
+    return bool(ipfs_api_url())
+
+
+def pin_to_ipfs(encrypted_bytes: bytes, file_name: str) -> Optional[str]:
+    """Publish ciphertext to the configured IPFS node and pin it.
+
+    Returns the CID the node itself computed, or None when no node is
+    configured — an absent node is a deployment choice, not an error, and must
+    not stop a clinician filing a report.
+
+    Only ciphertext is ever passed here. IPFS content is addressed by hash and
+    served to anyone who asks for that hash, so putting a plaintext record on it
+    would be a disclosure, not a storage decision.
+    """
+    api = ipfs_api_url()
+    if not api:
+        return None
+
+    boundary = "----QuantumCareIPFS" + hashlib.sha256(file_name.encode()).hexdigest()[:16]
+    body = b"".join([
+        f"--{boundary}\r\n".encode(),
+        f'Content-Disposition: form-data; name="file"; filename="{file_name}"\r\n'.encode(),
+        b"Content-Type: application/octet-stream\r\n\r\n",
+        encrypted_bytes,
+        f"\r\n--{boundary}--\r\n".encode(),
+    ])
+    request = urllib.request.Request(
+        f"{api.rstrip('/')}/api/v0/add?cid-version=0&pin=true",
+        data=body, method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8").strip().splitlines()[-1])
+    except Exception as exc:  # noqa: BLE001 - any transport failure is the same to callers
+        raise IPFSError(f"IPFS add failed for {file_name}: {exc}") from exc
+
+    cid = payload.get("Hash")
+    if not cid:
+        raise IPFSError(f"IPFS returned no CID for {file_name}: {payload}")
+    logger.info("Pinned %d bytes to IPFS as %s", len(encrypted_bytes), cid)
+    return cid
+
+
+def fetch_from_ipfs(cid: str) -> bytes:
+    """Retrieve pinned content by CID. Raises if it cannot be had."""
+    api = ipfs_api_url()
+    if not api:
+        raise IPFSError("No IPFS node is configured.")
+    request = urllib.request.Request(
+        f"{api.rstrip('/')}/api/v0/cat?arg={urllib.parse.quote(cid)}", method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.read()
+    except Exception as exc:  # noqa: BLE001
+        raise IPFSError(f"IPFS cat failed for {cid}: {exc}") from exc
+
+
+def ipfs_status() -> dict:
+    """Live node health, for the admin dashboard.
+
+    Reports 'not configured' distinctly from 'configured but unreachable',
+    because those call for different actions from whoever is on call.
+    """
+    api = ipfs_api_url()
+    status = {"configured": bool(api), "api_url": api, "connected": False,
+              "peer_id": None, "pinned_objects": None, "error": None,
+              "scope": None}
+    if not api:
+        status["error"] = "No IPFS node configured (set IPFS_API_URL to enable publishing)."
+        return status
+
+    try:
+        with urllib.request.urlopen(
+                urllib.request.Request(f"{api.rstrip('/')}/api/v0/id", method="POST"),
+                timeout=10) as response:
+            info = json.loads(response.read())
+        status["connected"] = True
+        status["peer_id"] = info.get("ID")
+    except Exception as exc:  # noqa: BLE001
+        status["error"] = f"IPFS node unreachable: {exc}"
+        return status
+
+    try:
+        with urllib.request.urlopen(
+                urllib.request.Request(f"{api.rstrip('/')}/api/v0/pin/ls?type=recursive",
+                                       method="POST"), timeout=15) as response:
+            keys = json.loads(response.read()).get("Keys", {})
+        status["pinned_objects"] = len(keys)
+    except Exception:  # noqa: BLE001 - a pin count is nice to have, not essential
+        pass
+
+    # Said plainly so nobody mistakes a local node for global availability.
+    status["scope"] = (
+        "Content is pinned on this node. It is genuine IPFS — real CIDs, real "
+        "block storage, real retrieval — but it is reachable only while this "
+        "node runs and is dialable. That is not the same as being replicated "
+        "across the public network."
+    )
+    return status
+
+
 def store_encrypted_document(
     encrypted_bytes: bytes, document_name: str
 ) -> Tuple[str, Optional[str]]:
@@ -215,6 +343,23 @@ def store_encrypted_document(
     content_cid = generate_ipfs_cid_v0(encrypted_bytes)
 
     file_name = f"{content_cid}_{document_name.replace(' ', '_')}.enc"
+
+    # Publish to IPFS when a node is configured. A failure here is logged and
+    # survived: the database copy is authoritative and a clinician must not be
+    # blocked from filing a report because a storage node is down.
+    try:
+        node_cid = pin_to_ipfs(encrypted_bytes, file_name)
+        if node_cid:
+            # The node's CID differs from the computed one, and that is correct
+            # rather than a fault. generate_ipfs_cid_v0 hashes the raw bytes;
+            # `ipfs add` wraps them in a UnixFS node first and hashes that. Both
+            # are valid CIDv0 values addressing different objects. Once content
+            # is genuinely published the node's CID is the one that resolves, so
+            # it is the one recorded.
+            content_cid = node_cid
+    except IPFSError as exc:
+        logger.error("IPFS publish failed for %s: %s", document_name, exc)
+
     try:
         s3_key, _ = upload_to_aws_s3(encrypted_bytes, file_name)
     except StorageError as exc:
