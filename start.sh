@@ -50,17 +50,33 @@ echo "  QuantumCare — starting services"
 echo "════════════════════════════════════════════════"
 
 # 1. PostgreSQL — everything else needs it, so it goes first.
-if up 5433; then
-  say "PostgreSQL (5433)" "already running"
-else
-  pg_ctl -D ~/devtools/pgdata -o "-p 5433" -l ~/devtools/pgdata/server.log start >/dev/null 2>&1
+#
+# Read the port from .env rather than assuming: a Homebrew or Postgres.app
+# install uses 5432, while the portable build used in development is on 5433.
+# The script previously hardcoded 5433 and reported FAILED on any machine with
+# a perfectly healthy database somewhere else.
+DB_PORT_CFG=$(grep -oE "^DB_PORT=[0-9]+" backend/.env 2>/dev/null | cut -d= -f2)
+DB_PORT_CFG=${DB_PORT_CFG:-5433}
+
+if up "$DB_PORT_CFG"; then
+  say "PostgreSQL ($DB_PORT_CFG)" "already running"
+elif [ -d ~/devtools/pgdata ]; then
+  # The portable build this project ships with. Only started when it is present.
+  pg_ctl -D ~/devtools/pgdata -o "-p $DB_PORT_CFG" -l ~/devtools/pgdata/server.log start >/dev/null 2>&1
   sleep 3
-  up 5433 && say "PostgreSQL (5433)" "started" || say "PostgreSQL (5433)" "FAILED — see ~/devtools/pgdata/server.log"
+  up "$DB_PORT_CFG" && say "PostgreSQL ($DB_PORT_CFG)" "started" \
+    || say "PostgreSQL ($DB_PORT_CFG)" "FAILED — see ~/devtools/pgdata/server.log"
+else
+  say "PostgreSQL ($DB_PORT_CFG)" "NOT RUNNING — start it, e.g. brew services start postgresql@14"
 fi
 
 # 2. Local EVM chain.
 if up 8545; then
   say "EVM chain (8545)" "already running"
+elif ! command -v anvil >/dev/null 2>&1; then
+  # Not installed is a supported configuration: anchors are then labelled
+  # local-simulated, which the admin dashboard reports honestly.
+  say "EVM chain (8545)" "not installed — anchoring will be simulated"
 else
   nohup anvil --silent > /tmp/anvil.log 2>&1 &
   sleep 4
@@ -70,7 +86,7 @@ fi
 # The contract lives in anvil's memory, so a chain restart wipes it. Without
 # this, anchoring silently falls back to "local-simulated" — which looks like
 # a working chain until someone checks.
-if up 8545; then
+if up 8545 && command -v forge >/dev/null 2>&1; then
   CODE=$(cast code 0x5FbDB2315678afecb367f032d93F642f64180aa3 --rpc-url http://127.0.0.1:8545 2>/dev/null)
   if [ "$CODE" = "0x" ] || [ -z "$CODE" ]; then
     # Anvil funds accounts from a fixed, publicly documented test mnemonic.
@@ -95,8 +111,11 @@ fi
 # 3. IPFS node.
 if up 5001; then
   say "IPFS node (5001)" "already running"
+elif [ ! -x ~/devtools/kubo/ipfs ] && ! command -v ipfs >/dev/null 2>&1; then
+  say "IPFS node (5001)" "not installed — publishing disabled"
 else
-  IPFS_PATH=~/devtools/ipfs-repo nohup ~/devtools/kubo/ipfs daemon --enable-gc > /tmp/ipfs.log 2>&1 &
+  IPFS_BIN=$(command -v ipfs || echo ~/devtools/kubo/ipfs)
+  IPFS_PATH=~/devtools/ipfs-repo nohup "$IPFS_BIN" daemon --enable-gc > /tmp/ipfs.log 2>&1 &
   sleep 8
   up 5001 && say "IPFS node (5001)" "started" || say "IPFS node (5001)" "FAILED — see /tmp/ipfs.log"
 fi
