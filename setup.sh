@@ -115,8 +115,19 @@ echo "  Setup complete."
 echo ""
 ROWS=$(psql -h 127.0.0.1 -p "$PORT" -U postgres -d pqc_hospital -t -A \
        -c "SELECT COUNT(*) FROM Users;" 2>/dev/null || echo 0)
-if [ "${ROWS:-0}" -gt 5 ] 2>/dev/null; then
+if [ "${ROWS:-0}" -gt 100 ] 2>/dev/null; then
   echo "  The database already holds $ROWS users — nothing more to load."
+elif [ "${ROWS:-0}" -gt 0 ] 2>/dev/null; then
+  # A handful of rows is a half-finished attempt, not a dataset. Say so, and
+  # say why it matters: encrypted columns are unreadable under a different
+  # ENCRYPTION_KEY, so leftover rows from an earlier setup are worse than none.
+  echo "  The database holds only $ROWS users — likely left from an earlier"
+  echo "  attempt. Rows encrypted under a previous key cannot be read with"
+  echo "  the current one, so it is cleaner to start fresh:"
+  echo ""
+  echo "    dropdb -h 127.0.0.1 -p $PORT -U postgres pqc_hospital"
+  echo "    createdb -h 127.0.0.1 -p $PORT -U postgres pqc_hospital"
+  echo "    ./setup.sh"
 else
   echo "  The database is empty. To fill it with 500 demo"
   echo "  users and ~8,400 clinical records:"
