@@ -5,19 +5,17 @@ import { motion } from "framer-motion";
 import { ShieldCheck, User, Clock, Activity, Key, Shield, Laptop } from "lucide-react";
 import { getPatientSecurity } from "@/lib/session";
 
-interface SecurityAccountInfo {
-  user_id?: string;
-  status?: string;
-}
-
-interface SecurityInfo {
-  last_login?: string;
-  active_sessions?: number;
-}
-
+// Mirrors PatientSecurityInfo in backend/app/schemas.py, which returns these
+// flat. The nested account_info / security_info shape declared here was never
+// sent by the API, so every value fell through to its placeholder.
 interface SecurityPageData {
-  account_info?: SecurityAccountInfo;
-  security_info?: SecurityInfo;
+  user_id?: string | null;
+  account_status: string;
+  last_login?: string | null;
+  last_login_ip?: string | null;
+  active_sessions: number;
+  pqc_protection_enabled: boolean;
+  account_created?: string | null;
 }
 
 export default function SecurityCenterPage() {
@@ -111,7 +109,7 @@ export default function SecurityCenterPage() {
                 <Key className="w-5 h-5 text-slate-400" />
                 <span className="text-sm font-semibold text-slate-700">User ID</span>
               </div>
-              <span className="text-sm font-mono font-bold text-slate-800">{securityData?.account_info?.user_id || "N/A"}</span>
+              <span className="text-sm font-mono font-bold text-slate-800">{securityData?.user_id || "N/A"}</span>
             </div>
             
             <div className="flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100">
@@ -120,9 +118,9 @@ export default function SecurityCenterPage() {
                 <span className="text-sm font-semibold text-slate-700">Status</span>
               </div>
               <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${
-                securityData?.account_info?.status === "Active" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"
+                securityData?.account_status === "Approved" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"
               }`}>
-                {securityData?.account_info?.status || "Unknown"}
+                {securityData?.account_status || "Unknown"}
               </span>
             </div>
           </div>
@@ -148,7 +146,7 @@ export default function SecurityCenterPage() {
                 <span className="text-sm font-semibold text-slate-700">Last Login</span>
               </div>
               <span className="text-sm font-medium text-slate-600">
-                {securityData?.security_info?.last_login ? new Date(securityData.security_info.last_login).toLocaleString() : "N/A"}
+                {securityData?.last_login ? new Date(securityData.last_login).toLocaleString() : "N/A"}
               </span>
             </div>
             
@@ -158,7 +156,7 @@ export default function SecurityCenterPage() {
                 <span className="text-sm font-semibold text-slate-700">Active Sessions</span>
               </div>
               <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-cyan-100 text-cyan-700 text-xs font-bold">
-                {securityData?.security_info?.active_sessions || 1}
+                {securityData?.active_sessions ?? 0}
               </span>
             </div>
           </div>
