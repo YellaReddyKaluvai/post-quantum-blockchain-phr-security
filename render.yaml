@@ -1,0 +1,86 @@
+# Render blueprint — https://render.com/docs/blueprint-spec
+#
+# Creates three services: a PostgreSQL database, the FastAPI backend, and the
+# Next.js frontend. Connect this repository as a Blueprint and Render reads
+# this file.
+#
+# What is deliberately absent: the EVM chain and the IPFS node. Neither is a
+# hosted service, so in this deployment anchors are recorded as
+# "local-simulated" and content addresses are computed without being published.
+# The application is built to run in that state and to report it plainly rather
+# than imply protection it did not apply.
+
+databases:
+  - name: quantumcare-db
+    databaseName: pqc_hospital
+    user: quantumcare
+    plan: free
+
+services:
+  # ── Backend ───────────────────────────────────────────────────────────────
+  # Docker, because liboqs has no wheel and must be compiled. The first build
+  # takes 10-15 minutes for that reason; later builds reuse the cached layer.
+  - type: web
+    name: quantumcare-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    healthCheckPath: /docs
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: quantumcare-db
+          property: connectionString
+      # Generated once by Render and kept thereafter. Note that changing
+      # ENCRYPTION_KEY later makes every encrypted column unreadable, so it
+      # must not be regenerated after data exists.
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ENCRYPTION_KEY
+        generateValue: true
+      - key: ACCESS_TOKEN_MINUTES
+        value: "30"
+      - key: REFRESH_TOKEN_DAYS
+        value: "7"
+      # No chain reachable from here, so anchoring is disabled outright rather
+      # than left to fail on every write.
+      - key: BLOCKCHAIN_ENABLED
+        value: "false"
+      - key: IPFS_API_URL
+        value: ""
+      - key: AWS_ACCESS_KEY_ID
+        sync: false          # set in the dashboard if S3 is wanted
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_S3_BUCKET
+        sync: false
+      - key: AWS_REGION
+        value: eu-north-1
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+
+  # ── Frontend ──────────────────────────────────────────────────────────────
+  - type: web
+    name: quantumcare-web
+    runtime: docker
+    dockerfilePath: ./frontend/Dockerfile
+    dockerContext: ./frontend
+    plan: free
+    envVars:
+      # The browser calls this origin and Next.js proxies /api onward, so the
+      # backend is never contacted directly and needs no CORS configuration.
+      - key: BACKEND_ORIGIN
+        fromService:
+          type: web
+          name: quantumcare-api
+          property: hostport
+      # Relative, so the browser calls whichever host served the page.
+      - key: NEXT_PUBLIC_BACKEND_URL
+        value: ""
