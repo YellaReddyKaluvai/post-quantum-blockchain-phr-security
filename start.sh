@@ -42,6 +42,19 @@ cd "$(dirname "$0")"
 source ~/devtools/env.sh 2>/dev/null
 
 up() { nc -z 127.0.0.1 "$1" 2>/dev/null; }
+
+# Wait for a port, up to $2 seconds. Fixed sleeps were reporting services as
+# FAILED on slower machines when they were seconds from being ready — IPFS in
+# particular logged "Daemon is ready" moments after the script had given up.
+wait_up() {
+  local port="$1" limit="${2:-30}" waited=0
+  while [ "$waited" -lt "$limit" ]; do
+    up "$port" && return 0
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 1
+}
 say() { printf "  %-22s %s\n" "$1" "$2"; }
 
 echo ""
@@ -63,8 +76,7 @@ if up "$DB_PORT_CFG"; then
 elif [ -d ~/devtools/pgdata ]; then
   # The portable build this project ships with. Only started when it is present.
   pg_ctl -D ~/devtools/pgdata -o "-p $DB_PORT_CFG" -l ~/devtools/pgdata/server.log start >/dev/null 2>&1
-  sleep 3
-  up "$DB_PORT_CFG" && say "PostgreSQL ($DB_PORT_CFG)" "started" \
+  wait_up "$DB_PORT_CFG" 20 && say "PostgreSQL ($DB_PORT_CFG)" "started" \
     || say "PostgreSQL ($DB_PORT_CFG)" "FAILED — see ~/devtools/pgdata/server.log"
 else
   say "PostgreSQL ($DB_PORT_CFG)" "NOT RUNNING — start it, e.g. brew services start postgresql@14"
@@ -79,8 +91,7 @@ elif ! command -v anvil >/dev/null 2>&1; then
   say "EVM chain (8545)" "not installed — anchoring will be simulated"
 else
   nohup anvil --silent > /tmp/anvil.log 2>&1 &
-  sleep 4
-  up 8545 && say "EVM chain (8545)" "started" || say "EVM chain (8545)" "FAILED — see /tmp/anvil.log"
+  wait_up 8545 25 && say "EVM chain (8545)" "started" || say "EVM chain (8545)" "FAILED — see /tmp/anvil.log"
 fi
 
 # The contract lives in anvil's memory, so a chain restart wipes it. Without
@@ -125,8 +136,7 @@ else
   # Initialise on first use rather than failing with instructions.
   "$IPFS_BIN" repo stat >/dev/null 2>&1 || "$IPFS_BIN" init --profile server >/dev/null 2>&1
   nohup "$IPFS_BIN" daemon --enable-gc > /tmp/ipfs.log 2>&1 &
-  sleep 8
-  up 5001 && say "IPFS node (5001)" "started" || say "IPFS node (5001)" "FAILED — see /tmp/ipfs.log"
+  wait_up 5001 45 && say "IPFS node (5001)" "started" || say "IPFS node (5001)" "FAILED — see /tmp/ipfs.log"
 fi
 
 # 4. Backend API.
@@ -136,8 +146,7 @@ else
   ( cd backend && source venv/bin/activate \
     && DYLD_LIBRARY_PATH="$HOME/_oqs/lib:${DYLD_LIBRARY_PATH:-}" \
        nohup python3 -m uvicorn app.main:app --host "$BIND_HOST" --port 8000 > /tmp/backend.log 2>&1 & )
-  sleep 8
-  up 8000 && say "Backend API (8000)" "started" || say "Backend API (8000)" "FAILED — see /tmp/backend.log"
+  wait_up 8000 45 && say "Backend API (8000)" "started" || say "Backend API (8000)" "FAILED — see /tmp/backend.log"
 fi
 
 # 5. Frontend.
@@ -156,8 +165,7 @@ else
   else
     nohup npm run dev > /tmp/frontend.log 2>&1 &
   fi
-  sleep 12
-  up 3000 && say "Frontend (3000)" "started" || say "Frontend (3000)" "FAILED — see /tmp/frontend.log"
+  wait_up 3000 60 && say "Frontend (3000)" "started" || say "Frontend (3000)" "FAILED — see /tmp/frontend.log"
 fi
 
 echo ""
