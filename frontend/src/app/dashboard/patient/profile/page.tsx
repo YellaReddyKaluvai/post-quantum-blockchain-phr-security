@@ -5,24 +5,23 @@ import { motion } from "framer-motion";
 import { User, Shield, Mail, Calendar, Activity } from "lucide-react";
 import { getPatientProfile } from "@/lib/session";
 
-interface PatientProfilePersonalInfo {
-  name?: string;
-  email?: string;
-  gender?: string;
-  dob?: string;
-  blood_group?: string;
-}
-
-interface PatientProfileAccountInfo {
-  user_id?: string;
-  registration_date?: string;
-  role?: string;
-  status?: string;
-}
-
+// Mirrors PatientProfile in backend/app/schemas.py, which returns these fields
+// flat. The page previously declared a nested personal_info / account_info
+// shape that the API has never sent, so every field resolved to undefined and
+// the whole profile rendered as N/A — which reads as missing data rather than
+// as the mismatch it was.
 interface PatientProfileData {
-  personal_info?: PatientProfilePersonalInfo;
-  account_info?: PatientProfileAccountInfo;
+  id: string;
+  user_id?: string | null;
+  full_name: string;
+  email: string;
+  role: string;
+  gender: string;
+  date_of_birth?: string | null;
+  blood_group?: string | null;
+  status: string;
+  created_at?: string | null;
+  approved_at?: string | null;
 }
 
 export default function PatientProfilePage() {
@@ -92,31 +91,31 @@ export default function PatientProfilePage() {
           <div className="p-6 space-y-4">
             <div className="grid grid-cols-3 gap-4">
               <div className="col-span-1 text-sm text-slate-500 font-medium">Full Name</div>
-              <div className="col-span-2 text-sm font-semibold text-slate-800">{profile?.personal_info?.name || "N/A"}</div>
+              <div className="col-span-2 text-sm font-semibold text-slate-800">{profile?.full_name || "N/A"}</div>
             </div>
             <div className="grid grid-cols-3 gap-4">
               <div className="col-span-1 text-sm text-slate-500 font-medium">Email</div>
               <div className="col-span-2 text-sm font-semibold text-slate-800 flex items-center gap-2">
                 <Mail className="w-4 h-4 text-slate-400" />
-                {profile?.personal_info?.email || "N/A"}
+                {profile?.email || "N/A"}
               </div>
             </div>
             <div className="grid grid-cols-3 gap-4">
               <div className="col-span-1 text-sm text-slate-500 font-medium">Gender</div>
-              <div className="col-span-2 text-sm font-semibold text-slate-800">{profile?.personal_info?.gender || "N/A"}</div>
+              <div className="col-span-2 text-sm font-semibold text-slate-800">{profile?.gender || "N/A"}</div>
             </div>
             <div className="grid grid-cols-3 gap-4">
               <div className="col-span-1 text-sm text-slate-500 font-medium">Date of Birth</div>
               <div className="col-span-2 text-sm font-semibold text-slate-800 flex items-center gap-2">
                 <Calendar className="w-4 h-4 text-slate-400" />
-                {profile?.personal_info?.dob ? new Date(profile.personal_info.dob).toLocaleDateString() : "N/A"}
+                {profile?.date_of_birth ? new Date(profile.date_of_birth).toLocaleDateString() : "N/A"}
               </div>
             </div>
             <div className="grid grid-cols-3 gap-4">
               <div className="col-span-1 text-sm text-slate-500 font-medium">Blood Group</div>
               <div className="col-span-2 text-sm font-semibold text-red-500 flex items-center gap-2">
                 <Activity className="w-4 h-4" />
-                {profile?.personal_info?.blood_group || "N/A"}
+                {profile?.blood_group || "N/A"}
               </div>
             </div>
           </div>
@@ -134,20 +133,20 @@ export default function PatientProfilePage() {
             <div className="grid grid-cols-3 gap-4">
               <div className="col-span-1 text-sm text-slate-500 font-medium">User ID</div>
               <div className="col-span-2 text-sm font-mono font-semibold text-slate-700 bg-slate-50 p-1.5 rounded w-fit">
-                {profile?.account_info?.user_id || "N/A"}
+                {profile?.user_id || "N/A"}
               </div>
             </div>
             <div className="grid grid-cols-3 gap-4">
               <div className="col-span-1 text-sm text-slate-500 font-medium">Registration Date</div>
               <div className="col-span-2 text-sm font-semibold text-slate-800">
-                {profile?.account_info?.registration_date ? new Date(profile.account_info.registration_date).toLocaleDateString() : "N/A"}
+                {profile?.created_at ? new Date(profile.created_at).toLocaleDateString() : "N/A"}
               </div>
             </div>
             <div className="grid grid-cols-3 gap-4">
               <div className="col-span-1 text-sm text-slate-500 font-medium">Role</div>
               <div className="col-span-2">
                 <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-cyan-100 text-cyan-800">
-                  {profile?.account_info?.role || "Patient"}
+                  {profile?.role || "Patient"}
                 </span>
               </div>
             </div>
@@ -155,9 +154,9 @@ export default function PatientProfilePage() {
               <div className="col-span-1 text-sm text-slate-500 font-medium">Account Status</div>
               <div className="col-span-2">
                 <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${
-                  profile?.account_info?.status === "Active" ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"
+                  profile?.status === "Approved" ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"
                 }`}>
-                  {profile?.account_info?.status || "Unknown"}
+                  {profile?.status || "Unknown"}
                 </span>
               </div>
             </div>
