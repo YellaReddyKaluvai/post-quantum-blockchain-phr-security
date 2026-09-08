@@ -3,9 +3,41 @@
 #
 #   ./start.sh
 #
+#   ./start.sh --lan      also reachable from other devices on this network
+#   ./start.sh --tunnel   public URL, reachable from anywhere (Cloudflare)
+#
 # Safe to re-run: anything already running is left alone.
+#
+# LAN mode binds the backend and frontend to 0.0.0.0. PostgreSQL is
+# deliberately NOT exposed — the backend reaches it over the loopback
+# interface, and a database listening on the network is a far larger target
+# than an API that at least demands a token.
 
 set -u
+LAN=0
+TUNNEL=0
+[ "${1:-}" = "--lan" ] && LAN=1
+[ "${1:-}" = "--tunnel" ] && { LAN=1; TUNNEL=1; }
+
+if [ "$LAN" = "1" ]; then
+  LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null)
+  if [ -z "$LAN_IP" ]; then
+    echo "  Could not determine a LAN address — is Wi-Fi connected?"
+    exit 1
+  fi
+  BIND_HOST=0.0.0.0
+  if [ "$TUNNEL" = "1" ]; then
+    # Relative, so the browser calls whatever host it loaded the page from and
+    # Next.js proxies it onward. An absolute address baked in here would point
+    # at a machine the visitor cannot reach.
+    API_URL=""
+  else
+    API_URL="http://$LAN_IP:8000"
+  fi
+else
+  BIND_HOST=127.0.0.1
+  API_URL="http://127.0.0.1:8000"
+fi
 cd "$(dirname "$0")"
 source ~/devtools/env.sh 2>/dev/null
 
@@ -75,7 +107,7 @@ if up 8000; then
 else
   ( cd backend && source venv/bin/activate \
     && DYLD_LIBRARY_PATH="$HOME/_oqs/lib:${DYLD_LIBRARY_PATH:-}" \
-       nohup python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/backend.log 2>&1 & )
+       nohup python3 -m uvicorn app.main:app --host "$BIND_HOST" --port 8000 > /tmp/backend.log 2>&1 & )
   sleep 8
   up 8000 && say "Backend API (8000)" "started" || say "Backend API (8000)" "FAILED — see /tmp/backend.log"
 fi
@@ -84,15 +116,77 @@ fi
 if up 3000; then
   say "Frontend (3000)" "already running"
 else
-  nohup npm run dev > /tmp/frontend.log 2>&1 &
+  # NEXT_PUBLIC_* is compiled into the browser bundle, so this URL is resolved
+  # by the visiting device, not by this Mac. Pointing it at 127.0.0.1 would make
+  # a phone try to reach itself.
+  if [ "$LAN" = "1" ]; then
+    # Run from frontend/ directly. The root "dev" script proxies through
+    # `npm --prefix`, and a `-- --hostname` passthrough loses the flag name on
+    # the way, leaving next to read the address as a directory.
+    ( cd frontend && NEXT_PUBLIC_BACKEND_URL="$API_URL" \
+        nohup npx next dev -H 0.0.0.0 > /tmp/frontend.log 2>&1 & )
+  else
+    nohup npm run dev > /tmp/frontend.log 2>&1 &
+  fi
   sleep 12
   up 3000 && say "Frontend (3000)" "started" || say "Frontend (3000)" "FAILED — see /tmp/frontend.log"
 fi
 
 echo ""
 echo "════════════════════════════════════════════════"
-up 3000 && echo "  Open      http://localhost:3000"
-up 8000 && echo "  API docs  http://localhost:8000/docs"
+if [ "$LAN" = "1" ]; then
+  up 3000 && echo "  Open here        http://localhost:3000"
+  up 3000 && echo "  Other devices    http://$LAN_IP:3000"
+  up 8000 && echo "  API docs         http://$LAN_IP:8000/docs"
+  echo ""
+  echo "  Reachable by anyone on this network. Fine for a demo on a"
+  echo "  trusted network; stop it with ./stop.sh when you are done."
+else
+  up 3000 && echo "  Open      http://localhost:3000"
+  up 8000 && echo "  API docs  http://localhost:8000/docs"
+fi
+if [ "$TUNNEL" = "1" ] && up 3000; then
+  echo ""
+  echo "  opening public tunnel…"
+  PUBLIC=""
+
+  # ngrok first. It carries its traffic over 443, which restricted networks
+  # generally leave open; cloudflared needs port 7844, which college and
+  # corporate Wi-Fi commonly block. Preferring the one that works avoids a
+  # confusing failure five minutes before a demo.
+  if command -v ngrok >/dev/null 2>&1; then
+    nohup ngrok http 3000 --log stdout > /tmp/ngrok.log 2>&1 &
+    for _ in $(seq 1 12); do
+      sleep 2
+      PUBLIC=$(grep -oE "url=https://[a-z0-9-]+\.ngrok[a-z.-]*" /tmp/ngrok.log 2>/dev/null | tail -1 | cut -d= -f2)
+      [ -n "$PUBLIC" ] && break
+    done
+  fi
+
+  if [ -z "$PUBLIC" ] && command -v cloudflared >/dev/null 2>&1; then
+    echo "  ngrok unavailable — trying cloudflared…"
+    nohup cloudflared tunnel --url http://127.0.0.1:3000 > /tmp/tunnel.log 2>&1 &
+    for _ in $(seq 1 12); do
+      sleep 2
+      PUBLIC=$(grep -oE "https://[a-z0-9-]+\.trycloudflare\.com" /tmp/tunnel.log 2>/dev/null | head -1)
+      [ -n "$PUBLIC" ] && break
+    done
+  fi
+
+  if [ -n "$PUBLIC" ]; then
+    echo ""
+    echo "  PUBLIC URL       $PUBLIC"
+    echo ""
+    echo "  Works from any network. Anyone with the link can reach the app,"
+    echo "  the data is synthetic and the logins are shared demo accounts,"
+    echo "  so treat the link as public. Run ./stop.sh when finished."
+  else
+    echo "  No tunnel could be established."
+    echo "  This network may block tunnelling — a phone hotspot usually works."
+    echo "  Logs: /tmp/ngrok.log  /tmp/tunnel.log"
+  fi
+fi
+
 echo ""
 echo "  Login     PAT-2026-000035  /  Demo@1234"
 echo "════════════════════════════════════════════════"
