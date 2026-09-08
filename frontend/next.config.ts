@@ -12,8 +12,16 @@ const nextConfig: NextConfig = {
   // this port has to be published — the backend stays on loopback rather than
   // becoming a second thing on the public internet.
   async rewrites() {
-    const backend = process.env.BACKEND_ORIGIN ?? "http://127.0.0.1:8000";
-    return [{ source: "/api/:path*", destination: `${backend}/api/:path*` }];
+    // Hosting platforms hand this over as a bare host ("api.example.com"),
+    // while local development sets a full URL. Normalise rather than requiring
+    // whoever configures the deployment to know which form is expected —
+    // getting it wrong yields a rewrite to a relative path and every API call
+    // 404s with nothing to explain why.
+    const raw = process.env.BACKEND_ORIGIN ?? "http://127.0.0.1:8000";
+    const backend = /^https?:\/\//.test(raw)
+      ? raw
+      : `${raw.startsWith("localhost") || raw.startsWith("127.") ? "http" : "https"}://${raw}`;
+    return [{ source: "/api/:path*", destination: `${backend.replace(/\/$/, "")}/api/:path*` }];
   },
 };
 
