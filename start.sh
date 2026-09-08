@@ -115,7 +115,16 @@ elif [ ! -x ~/devtools/kubo/ipfs ] && ! command -v ipfs >/dev/null 2>&1; then
   say "IPFS node (5001)" "not installed — publishing disabled"
 else
   IPFS_BIN=$(command -v ipfs || echo ~/devtools/kubo/ipfs)
-  IPFS_PATH=~/devtools/ipfs-repo nohup "$IPFS_BIN" daemon --enable-gc > /tmp/ipfs.log 2>&1 &
+  # Use the portable repo only when it exists. Forcing IPFS_PATH at a fixed
+  # location meant a perfectly good default repo at ~/.ipfs was ignored and the
+  # daemon exited with "no IPFS repo found" — pointing at a directory that only
+  # exists on the machine this script was written on.
+  if [ -d ~/devtools/ipfs-repo ]; then
+    export IPFS_PATH=~/devtools/ipfs-repo
+  fi
+  # Initialise on first use rather than failing with instructions.
+  "$IPFS_BIN" repo stat >/dev/null 2>&1 || "$IPFS_BIN" init --profile server >/dev/null 2>&1
+  nohup "$IPFS_BIN" daemon --enable-gc > /tmp/ipfs.log 2>&1 &
   sleep 8
   up 5001 && say "IPFS node (5001)" "started" || say "IPFS node (5001)" "FAILED — see /tmp/ipfs.log"
 fi

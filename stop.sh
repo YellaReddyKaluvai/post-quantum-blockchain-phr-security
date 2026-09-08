@@ -7,6 +7,10 @@ for pat in "ngrok http" "cloudflared tunnel" "next dev" "uvicorn app.main" "ipfs
   pkill -f "$pat" 2>/dev/null && printf "  stopped  %s\n" "$pat" || printf "  not running  %s\n" "$pat"
 done
 echo ""
-echo "  PostgreSQL left running. To stop it:"
-echo "    pg_ctl -D ~/devtools/pgdata stop"
+echo "  PostgreSQL left running."
+if [ -d ~/devtools/pgdata ]; then
+  echo "    pg_ctl -D ~/devtools/pgdata stop"
+else
+  echo "    brew services stop postgresql@14   (or whichever version you run)"
+fi
 echo ""
