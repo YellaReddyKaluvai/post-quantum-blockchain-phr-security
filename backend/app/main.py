@@ -1435,7 +1435,8 @@ def grant_patient_consent(
                 INSERT INTO Consent (patient_id, subject_user_id, subject_role, status, granted_at, revoked_at)
                 VALUES (%s, %s, 'Doctor', 'Authorized', NOW(), NULL)
                 ON CONFLICT (patient_id, subject_user_id, subject_role)
-                DO UPDATE SET status = 'Authorized', granted_at = NOW(), revoked_at = NULL
+                DO UPDATE SET status = 'Authorized', granted_at = NOW(), revoked_at = NULL,
+                              prior_refusal = FALSE
                 RETURNING consent_id
             """, (user_uuid, doctor_id))
             consent_id = cur.fetchone()["consent_id"]
@@ -2341,10 +2342,15 @@ def get_doctor_lab_requests(
 # Consent revocation must actually block access, otherwise the control is
 # decorative. These two fragments are shared by every doctor-facing read so a
 # revocation cannot be honoured in one place and ignored in another.
+# A refusal stands until the patient decides otherwise. A doctor re-asking after
+# a withdrawal puts the row back to Pending; that used to read as "not refused",
+# so a doctor with an old treating relationship regained the chart merely by
+# asking. ``prior_refusal`` keeps the block until the patient approves.
 _CONSENT_REVOKED = """
     EXISTS (SELECT 1 FROM Consent c
              WHERE c.patient_id = %s AND c.subject_user_id = %s
-               AND c.status IN ('Revoked', 'Rejected'))
+               AND (c.status IN ('Revoked', 'Rejected')
+                    OR (c.status = 'Pending' AND c.prior_refusal)))
 """
 
 _EMERGENCY_ACTIVE = """
@@ -2552,6 +2558,18 @@ def _doctor_patient_authorization(cur, doctor_uuid: str, patient_uuid: str) -> t
         return True, "emergency override"
     if row["blocked"]:
         return False, "patient withdrew or declined access"
+    # Smart-contract consent (spec §7), asked of the chain itself for every read
+    # — not only consent-based ones, and not gated on a database column saying
+    # there is something to check. A withdrawal recorded on-chain that the
+    # database no longer shows means the row was edited or deleted outside the
+    # application, and a treating relationship must not paper over it.
+    onchain = consent_ledger.chain_state(patient_uuid, doctor_uuid)
+    if onchain == consent_ledger.REVOKED:
+        secresp.consent_ledger_mismatch(
+            cur, patient_id=patient_uuid, doctor_id=doctor_uuid,
+            detail=("The patient's withdrawal is recorded on the blockchain but the consent "
+                    "row no longer shows it. Access refused pending investigation."))
+        return False, "consent record does not match the blockchain ledger"
 
     cur.execute(
         """SELECT EXISTS (
@@ -2570,18 +2588,9 @@ def _doctor_patient_authorization(cur, doctor_uuid: str, patient_uuid: str) -> t
     if r["treating"]:
         return True, "treating relationship"
     if r["consented"]:
-        # Smart-contract consent verification (spec §7). The row says
-        # Authorized; the contract must agree, or the row was changed outside
-        # the application and is not to be trusted.
-        ledger = consent_ledger.verify(cur, patient_id=patient_uuid, doctor_id=doctor_uuid,
-                                       db_authorized=True)
-        if ledger == consent_ledger.MISMATCH:
-            secresp.consent_ledger_mismatch(
-                cur, patient_id=patient_uuid, doctor_id=doctor_uuid,
-                detail=("The consent row grants access but the on-chain consent record "
-                        "does not. Access refused pending investigation."))
-            return False, "consent record does not match the blockchain ledger"
-        if ledger == consent_ledger.VERIFIED:
+        # A contradicting chain was refused above; what is left is whether the
+        # chain positively confirms the grant or simply cannot say.
+        if onchain == consent_ledger.GRANTED:
             return True, "patient consent (verified on-chain)"
         return True, "patient consent"
     return False, "no treating relationship and no consent"
@@ -3548,6 +3557,8 @@ def _verify_against_chain(report: dict) -> Optional[bool]:
         return None
 
     try:
+        if not tx_hash.startswith("0x"):          # rows written by older web3 releases
+            tx_hash = "0x" + tx_hash
         receipt = client.web3.eth.get_transaction_receipt(tx_hash)
         # The contract emits AuditLogged(userUUID, actionType, resourceHash, ts);
         # resourceHash is the document digest we anchored.
@@ -4616,7 +4627,7 @@ def create_access_request(
                 cur.execute(
                     """UPDATE Consent SET status = 'Pending', purpose = %s, requested_resource = %s,
                               requested_at = CURRENT_TIMESTAMP, decided_at = NULL, decision_note = NULL,
-                              revoked_at = NULL
+                              prior_refusal = TRUE
                         WHERE consent_id = %s RETURNING consent_id""",
                     (req.purpose, req.requested_resource, existing["consent_id"]),
                 )
@@ -4717,6 +4728,7 @@ def _decide_access_request(request_id: str, session: dict, approve: bool, note: 
                 """UPDATE Consent
                       SET status = %s, decided_at = CURRENT_TIMESTAMP, decision_note = %s,
                           granted_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE granted_at END,
+                          prior_refusal = FALSE,
                           zkp_commitment = COALESCE(%s, zkp_commitment),
                           zkp_token_encrypted = COALESCE(%s, zkp_token_encrypted),
                           zkp_token_collected_at = CASE WHEN %s THEN NULL ELSE zkp_token_collected_at END

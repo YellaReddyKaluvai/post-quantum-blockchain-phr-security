@@ -232,10 +232,10 @@ def test_a_refusal_is_committed_before_it_is_raised():
 # ═══ Smart-contract consent (§7) ═════════════════════════════════════════════
 
 class FakeChain:
-    def __init__(self, onchain=True, fail=False):
+    def __init__(self, onchain="granted", fail=False):
         self.onchain, self.fail, self.writes = onchain, fail, []
 
-    def check_consent(self, patient_ref, doctor_ref):
+    def consent_status(self, patient_ref, doctor_ref):
         if self.fail:
             raise ConnectionError("node down")
         return self.onchain
@@ -261,28 +261,95 @@ def test_on_chain_references_are_pseudonymous():
 
 
 def test_consent_without_an_on_chain_record_is_unverified(ledger):
-    cur = FakeCursor([{"onchain_tx_hash": None}])
-    assert consent_ledger.verify(cur, patient_id="p", doctor_id="d", db_authorized=True) == "unverified"
+    ledger.setattr(consent_ledger, "_client", lambda: FakeChain(onchain="none"))
+    assert consent_ledger.verify(FakeCursor(), patient_id="p", doctor_id="d",
+                                 db_authorized=True) == "unverified"
 
 
 def test_agreement_with_the_chain_verifies(ledger):
-    ledger.setattr(consent_ledger, "_client", lambda: FakeChain(onchain=True))
-    cur = FakeCursor([{"onchain_tx_hash": "0x1"}])
-    assert consent_ledger.verify(cur, patient_id="p", doctor_id="d", db_authorized=True) == "verified"
+    ledger.setattr(consent_ledger, "_client", lambda: FakeChain(onchain="granted"))
+    assert consent_ledger.verify(FakeCursor(), patient_id="p", doctor_id="d",
+                                 db_authorized=True) == "verified"
 
 
 def test_a_row_the_chain_contradicts_is_a_mismatch(ledger):
     """The row says Authorized; the contract says the patient withdrew."""
-    ledger.setattr(consent_ledger, "_client", lambda: FakeChain(onchain=False))
-    cur = FakeCursor([{"onchain_tx_hash": "0x1"}])
-    assert consent_ledger.verify(cur, patient_id="p", doctor_id="d", db_authorized=True) == "mismatch"
+    ledger.setattr(consent_ledger, "_client", lambda: FakeChain(onchain="revoked"))
+    assert consent_ledger.verify(FakeCursor(), patient_id="p", doctor_id="d",
+                                 db_authorized=True) == "mismatch"
+
+
+def test_the_check_does_not_ask_the_database_whether_to_run(ledger):
+    """A column saying "there is an on-chain record" could be cleared to skip it."""
+    ledger.setattr(consent_ledger, "_client", lambda: FakeChain(onchain="revoked"))
+    cur = FakeCursor()
+    consent_ledger.verify(cur, patient_id="p", doctor_id="d", db_authorized=True)
+    assert not cur.executed
 
 
 @pytest.mark.parametrize("client", [None, FakeChain(fail=True)])
 def test_an_unreachable_chain_is_reported_as_unverified_not_as_agreement(ledger, client):
     ledger.setattr(consent_ledger, "_client", lambda: client)
-    cur = FakeCursor([{"onchain_tx_hash": "0x1"}])
-    assert consent_ledger.verify(cur, patient_id="p", doctor_id="d", db_authorized=True) == "unverified"
+    assert consent_ledger.verify(FakeCursor(), patient_id="p", doctor_id="d",
+                                 db_authorized=True) == "unverified"
+
+
+def test_a_treating_relationship_cannot_paper_over_an_on_chain_withdrawal(ledger):
+    """The consent row was deleted or flipped; the chain still says withdrawn."""
+    from app.main import _doctor_patient_authorization
+    ledger.setattr(consent_ledger, "_client", lambda: FakeChain(onchain="revoked"))
+    # blocked check · no open incident · no recent alert · new alert id · incident number
+    cur = FakeCursor([{"blocked": False, "emergency": False}, None, None, {"id": "al1"}, {"n": 0}])
+    allowed, basis = _doctor_patient_authorization(cur, "doc-1", "patient-1")
+    assert not allowed and "blockchain" in basis
+    assert cur.statements("INSERT INTO SecurityIncidents")
+
+
+def test_consent_confirmed_on_chain_is_reported_as_verified(ledger):
+    from app.main import _doctor_patient_authorization
+    ledger.setattr(consent_ledger, "_client", lambda: FakeChain(onchain="granted"))
+    cur = FakeCursor([{"blocked": False, "emergency": False},
+                      {"treating": False, "consented": True}])
+    assert _doctor_patient_authorization(cur, "doc-1", "patient-1") == (
+        True, "patient consent (verified on-chain)")
+
+
+def test_asking_again_does_not_lift_a_withdrawal():
+    import app.main as m
+    assert "prior_refusal" in m._CONSENT_REVOKED
+    assert "prior_refusal = TRUE" in _src("create_access_request")
+    assert "revoked_at = NULL" not in _src("create_access_request")
+
+
+def test_a_reverted_transaction_is_not_reported_as_recorded():
+    from app import chain_client as cc
+
+    class Eth:
+        gas_price = 1
+
+        def get_transaction_count(self, address):
+            return 0
+
+        def send_raw_transaction(self, raw):
+            return b"h"
+
+        def wait_for_transaction_receipt(self, tx_hash, timeout):
+            return {"status": 0, "transactionHash": bytes.fromhex("ab"),
+                    "blockNumber": 1, "gasUsed": 21000}
+
+    class Account:
+        address = "0x1"
+
+        def sign_transaction(self, tx):
+            return type("Signed", (), {"raw_transaction": b"r"})()
+
+    client = object.__new__(cc.ChainClient)
+    client.web3 = type("W3", (), {"eth": Eth()})()
+    client.account = Account()
+    client.settings = type("S", (), {"BLOCKCHAIN_CHAIN_ID": 31337})()
+    call = type("Call", (), {"build_transaction": lambda self, tx: tx})()
+    with pytest.raises(RuntimeError, match="reverted"):
+        client._transact(call)
 
 
 def test_recording_without_a_chain_says_so_and_writes_nothing(ledger):

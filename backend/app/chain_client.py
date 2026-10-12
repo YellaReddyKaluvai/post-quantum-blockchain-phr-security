@@ -43,6 +43,13 @@ def load_contract_artifact() -> dict[str, Any]:
         return json.load(fh)
 
 
+def _hex(value) -> str:
+    """0x-prefixed hex. HexBytes.hex() dropped the prefix in newer releases,
+    and an unprefixed hash does not round-trip into receipt lookups."""
+    text = value.hex() if hasattr(value, "hex") else str(value)
+    return text if text.startswith("0x") else "0x" + text
+
+
 class ChainClient:
     """Minimal wrapper around the deployed PHR_Security contract."""
 
@@ -96,8 +103,12 @@ class ChainClient:
             tx_hash = self.web3.eth.send_raw_transaction(signed.raw_transaction)
 
         receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=30)
+        if receipt["status"] != 1:
+            # Mined but reverted (e.g. the contract's onlyAdmin check): nothing
+            # was recorded, and reporting the hash as a success would say it was.
+            raise RuntimeError(f"Transaction {_hex(receipt['transactionHash'])} reverted.")
         return {
-            "tx_hash": receipt["transactionHash"].hex(),
+            "tx_hash": _hex(receipt["transactionHash"]),
             "block_number": receipt["blockNumber"],
             "gas_used": receipt["gasUsed"],
             "status": receipt["status"],
@@ -125,6 +136,12 @@ class ChainClient:
     def check_consent(self, patient_ref: str, doctor_ref: str) -> bool:
         """Read the consent state the contract holds. A view call: no transaction."""
         return bool(self.contract.functions.checkConsent(patient_ref, doctor_ref).call())
+
+    def consent_status(self, patient_ref: str, doctor_ref: str) -> str:
+        """``none``, ``granted`` or ``revoked`` — a withdrawal is distinguishable
+        from the absence of any decision, which ``checkConsent``'s bool is not."""
+        code = int(self.contract.functions.consentStatus(patient_ref, doctor_ref).call())
+        return {0: "none", 1: "granted", 2: "revoked"}.get(code, "none")
 
     def declare_emergency(self, doctor_ref: str, patient_ref: str, resource_hash: str) -> dict[str, Any]:
         """Record a break-glass override (emits EmergencyAccessTriggered)."""
