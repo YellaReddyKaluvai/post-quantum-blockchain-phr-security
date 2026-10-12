@@ -6,6 +6,7 @@ import {
   ShieldCheck, ShieldOff, Stethoscope, AlertTriangle, Loader2, X, Check,
 } from "lucide-react";
 import { getPatientConsent, revokePatientConsent, grantPatientConsent } from "@/lib/session";
+import MyCareTeam from "@/components/MyCareTeam";
 
 interface ConsentEntry {
   doctor_id: string;
@@ -190,6 +191,8 @@ export default function PatientConsentPage() {
           })}
         </div>
       )}
+
+      <MyCareTeam />
 
       <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-sm text-slate-600">
         <p className="font-bold text-slate-700 mb-1">What withdrawing does</p>

@@ -14,6 +14,9 @@ interface NursePatientItem {
   blood_group?: string | null;
   last_recorded_at?: string | null;
   status?: string;
+  assigned_by_name?: string | null;
+  assignment_expires_at?: string | null;
+  assignment_reason?: string | null;
 }
 
 export default function NursePatientsPage() {
@@ -85,7 +88,14 @@ export default function NursePatientsPage() {
               <span>Blood Group: <span className="font-semibold text-slate-800">{patient.blood_group}</span></span>
             </div>
           )}
-          {!isSearchMode && patient.last_recorded_at && (
+          {patient.assignment_reason && (
+            <p className="text-xs text-slate-500">Care: {patient.assignment_reason}</p>
+          )}
+          <p className="text-xs text-slate-400">
+            {patient.assigned_by_name ? `Assigned by ${patient.assigned_by_name}` : "Ward allocation"}
+            {patient.assignment_expires_at ? ` · until ${new Date(patient.assignment_expires_at).toLocaleString()}` : ""}
+          </p>
+          {patient.last_recorded_at && (
             <p className="text-xs text-slate-400 mt-1">Last attended: {new Date(patient.last_recorded_at).toLocaleString()}</p>
           )}
         </div>
@@ -105,8 +115,8 @@ export default function NursePatientsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-slate-800">Patient Directory</h1>
-        <p className="text-sm text-slate-500">Search any patient, or open a chart you&apos;ve recently attended to.</p>
+        <h1 className="text-2xl font-bold text-slate-800">My Care Team</h1>
+        <p className="text-sm text-slate-500">Patients you are assigned to. A treating doctor or an administrator adds you to a patient&apos;s care team; access ends when the assignment does.</p>
       </div>
 
       <div className="bg-white/80 backdrop-blur-md rounded-2xl shadow-sm border border-slate-100 p-6">
@@ -115,7 +125,7 @@ export default function NursePatientsPage() {
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
             <input
               type="text"
-              placeholder="Search by patient name or ID..."
+              placeholder="Search your care team by name or ID..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-500 transition-all"
@@ -125,7 +135,7 @@ export default function NursePatientsPage() {
       </div>
 
       <h2 className="text-sm font-bold text-slate-500 uppercase tracking-wide">
-        {isSearchMode ? "Search Results" : "My Recently Attended Patients"}
+        {isSearchMode ? "Search Results" : "Assigned Patients"}
       </h2>
 
       {loading || searching ? (
@@ -138,10 +148,10 @@ export default function NursePatientsPage() {
         <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-12 text-center">
           <User className="w-16 h-16 mx-auto text-slate-300 mb-4" />
           <h3 className="text-lg font-bold text-slate-700">
-            {isSearchMode ? "No Patients Found" : "No Patients Attended Yet"}
+            {isSearchMode ? "No Patients Found" : "No Patients Assigned"}
           </h3>
           <p className="text-slate-500 mt-1">
-            {isSearchMode ? "Try a different name or ID." : "Search above to open a patient's chart and record vitals or notes."}
+            {isSearchMode ? "Only patients on your care team are searched." : "You will see patients here once a doctor or administrator adds you to their care team."}
           </p>
         </div>
       ) : (

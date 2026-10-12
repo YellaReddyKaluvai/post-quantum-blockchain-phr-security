@@ -40,6 +40,7 @@ from app.schemas import (
     ActivePrescriptionForNurse, MedicationAdministrationRecord, CreateMedicationAdministrationRequest,
     NursePatientDetail,
     StepUpRequest, IncidentUpdateRequest,
+    CareTeamAssignRequest, CareTeamMember,
 )
 from app.config import configuration_warnings, get_settings
 from app.database import get_db, init_db
@@ -2586,6 +2587,69 @@ def _doctor_patient_authorization(cur, doctor_uuid: str, patient_uuid: str) -> t
     return False, "no treating relationship and no consent"
 
 
+_CARE_TEAM_SELECT = """
+    SELECT a.id, a.patient_id, a.nurse_id, a.assigned_by, a.assigned_by_role, a.reason,
+           a.created_at, a.expires_at,
+           p.user_id AS patient_user_id, p.full_name AS patient_name,
+           n.user_id AS nurse_user_id, n.full_name AS nurse_name,
+           b.full_name AS assigned_by_name
+      FROM CareTeamAssignments a
+      JOIN Users p ON p.id = a.patient_id
+      JOIN Users n ON n.id = a.nurse_id
+      LEFT JOIN Users b ON b.id = a.assigned_by
+     WHERE a.ended_at IS NULL AND (a.expires_at IS NULL OR a.expires_at > NOW())
+"""
+
+
+def _care_team_member(r: dict) -> CareTeamMember:
+    return CareTeamMember(
+        id=str(r["id"]), patient_id=str(r["patient_id"]), patient_user_id=r.get("patient_user_id"),
+        patient_name=r.get("patient_name"), nurse_id=str(r["nurse_id"]),
+        nurse_user_id=r.get("nurse_user_id"), nurse_name=r.get("nurse_name"),
+        assigned_by_name=r.get("assigned_by_name"), assigned_by_role=r["assigned_by_role"],
+        reason=r["reason"], created_at=r["created_at"], expires_at=r.get("expires_at"))
+
+
+def _nurse_patient_authorization(cur, nurse_uuid: str, patient_uuid: str) -> tuple[bool, str, Optional[dict]]:
+    """May this nurse open this patient's chart, and on what basis?
+
+    Nursing access used to be a property of the role: any nurse could search
+    every patient and open, annotate or medicate any of them. It is now a
+    relationship (spec §4, §34) — an active care-team assignment:
+
+      by an administrator   a ward allocation; stands on its own
+      by a doctor           delegated, so it lasts only while that doctor's own
+                            access does — a patient withdrawing the doctor also
+                            withdraws the nurse that doctor brought in. A
+                            doctor's break-glass is personal and is not passed on.
+
+    Returns ``(allowed, basis, assignment)``.
+    """
+    cur.execute(_CARE_TEAM_SELECT + " AND a.patient_id = %s AND a.nurse_id = %s",
+                (patient_uuid, nurse_uuid))
+    assignment = cur.fetchone()
+    if not assignment:
+        return False, "not assigned to this patient's care team", None
+    if assignment["assigned_by_role"] == "Administrator":
+        return True, "care team (ward allocation)", assignment
+    if not assignment["assigned_by"]:
+        return False, "the assigning doctor's account no longer exists", assignment
+    allowed, basis = _doctor_patient_authorization(cur, str(assignment["assigned_by"]), patient_uuid)
+    if allowed and basis != "emergency override":
+        return True, "care team (delegated by treating doctor)", assignment
+    return False, "the doctor who assigned you no longer has access to this patient", assignment
+
+
+def _require_nurse_access(cur, session: dict, patient_id: str, resource: str) -> tuple[str, Optional[dict]]:
+    """Refuse — and record — a nurse acting outside their care team."""
+    allowed, basis, assignment = _nurse_patient_authorization(cur, session["user_id"], patient_id)
+    if not allowed:
+        _deny(cur, session, resource=resource, reason=basis, patient_id=str(patient_id),
+              detail=(f"You cannot open this patient's record — {basis}. A treating doctor "
+                      "or an administrator can add you to the patient's care team."))
+    return basis, assignment
+
+
 def _doctor_access_blocked(cur, doctor_uuid: str, patient_uuid: str) -> bool:
     """True when the patient has revoked this doctor and no break-glass is live.
 
@@ -4053,52 +4117,54 @@ def get_nurse_dashboard_summary(session: dict = Depends(require_role("Nurse"))):
     )
 
 
-@app.get("/api/nurse/patients")
-def get_nurse_patients(session: dict = Depends(require_role("Nurse"))):
-    user_uuid = session["user_id"]
-    with get_db() as conn:
-        with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("""
-                SELECT u.*,
-                    GREATEST(
-                        COALESCE((SELECT MAX(recorded_at) FROM PatientVitals WHERE patient_id = u.id AND nurse_id = %s), 'epoch'::timestamptz),
-                        COALESCE((SELECT MAX(created_at) FROM NursingNotes WHERE patient_id = u.id AND nurse_id = %s), 'epoch'::timestamptz),
-                        COALESCE((SELECT MAX(administered_at) FROM MedicationAdministration WHERE patient_id = u.id AND nurse_id = %s), 'epoch'::timestamptz)
-                    ) as last_recorded_at
-                FROM Users u
-                JOIN (
-                    SELECT patient_id FROM PatientVitals WHERE nurse_id = %s
-                    UNION SELECT patient_id FROM NursingNotes WHERE nurse_id = %s
-                    UNION SELECT patient_id FROM MedicationAdministration WHERE nurse_id = %s
-                ) as attended ON u.id = attended.patient_id
-                WHERE u.role = 'Patient'
-                ORDER BY last_recorded_at DESC
-            """, (user_uuid, user_uuid, user_uuid, user_uuid, user_uuid, user_uuid))
-            rows = cur.fetchall()
-
+def _nurse_care_team(cur, nurse_uuid: str, query: Optional[str] = None) -> list[NursePatientListItem]:
+    """The patients this nurse may currently open — their care team, nothing else."""
+    sql = """
+        SELECT u.id, u.user_id, u.full_name, u.gender, u.blood_group_encrypted, u.status,
+               a.expires_at, a.reason, b.full_name AS assigned_by_name,
+               NULLIF(GREATEST(
+                   COALESCE((SELECT MAX(recorded_at) FROM PatientVitals WHERE patient_id = u.id AND nurse_id = %s), 'epoch'::timestamptz),
+                   COALESCE((SELECT MAX(created_at) FROM NursingNotes WHERE patient_id = u.id AND nurse_id = %s), 'epoch'::timestamptz),
+                   COALESCE((SELECT MAX(administered_at) FROM MedicationAdministration WHERE patient_id = u.id AND nurse_id = %s), 'epoch'::timestamptz)
+               ), 'epoch'::timestamptz) AS last_recorded_at
+          FROM CareTeamAssignments a
+          JOIN Users u ON u.id = a.patient_id AND u.role = 'Patient'
+          LEFT JOIN Users b ON b.id = a.assigned_by
+         WHERE a.nurse_id = %s AND a.ended_at IS NULL
+           AND (a.expires_at IS NULL OR a.expires_at > NOW())"""
+    params: list = [nurse_uuid] * 4
+    if query:
+        sql += " AND (u.full_name ILIKE %s OR u.user_id ILIKE %s)"
+        params += [f"%{query}%", f"%{query}%"]
+    cur.execute(sql + " ORDER BY last_recorded_at DESC NULLS LAST, u.full_name LIMIT 100", params)
+    rows = cur.fetchall()
+    # A doctor-delegated assignment lapses with the doctor's own access, so the
+    # list shows only charts that would actually open.
     return [NursePatientListItem(
         id=str(r["id"]), user_id=r["user_id"], full_name=r["full_name"], gender=r["gender"],
         blood_group=decrypt_data(r["blood_group_encrypted"]) if r.get("blood_group_encrypted") else None,
         last_recorded_at=r["last_recorded_at"], status=r["status"],
-    ) for r in rows]
+        assigned_by_name=r["assigned_by_name"], assignment_expires_at=r["expires_at"],
+        assignment_reason=r["reason"],
+    ) for r in rows if _nurse_patient_authorization(cur, nurse_uuid, str(r["id"]))[0]]
+
+
+@app.get("/api/nurse/patients")
+def get_nurse_patients(session: dict = Depends(require_role("Nurse"))):
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            return _nurse_care_team(cur, session["user_id"])
 
 
 @app.get("/api/nurse/patients/search")
 def search_nurse_patients(q: str, session: dict = Depends(require_role("Nurse"))):
+    """Search within this nurse's care team. It used to search every patient in
+    the hospital and return their e-mail addresses."""
     if len(q) < 2:
         return []
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("""
-                SELECT id, user_id, full_name, email, gender
-                FROM Users
-                WHERE role = 'Patient' AND status = 'Approved'
-                  AND (full_name ILIKE %s OR user_id ILIKE %s OR email ILIKE %s)
-                ORDER BY full_name ASC
-                LIMIT 20
-            """, (f"%{q}%", f"%{q}%", f"%{q}%"))
-            rows = cur.fetchall()
-    return [{"id": str(r["id"]), "user_id": r["user_id"], "full_name": r["full_name"], "email": r["email"], "gender": r["gender"]} for r in rows]
+            return _nurse_care_team(cur, session["user_id"], q.strip()[:80])
 
 
 @app.get("/api/nurse/patients/{patient_id}", response_model=NursePatientDetail)
@@ -4109,6 +4175,11 @@ def get_nurse_patient_detail(patient_id: str, session: dict = Depends(require_ro
             user = cur.fetchone()
             if not user:
                 raise HTTPException(status_code=404, detail="Patient not found")
+            basis, assignment = _require_nurse_access(cur, session, str(patient_id), "patient_chart")
+            decision = _security_gate(cur, session, resource="patient_chart",
+                                      patient_id=str(patient_id))
+            _record_access(cur, session, patient_id=str(patient_id), resource="patient_chart",
+                           basis=basis, decision=decision)
 
             cur.execute("""
                 SELECT v.*, n.full_name as nurse_name FROM PatientVitals v
@@ -4139,6 +4210,9 @@ def get_nurse_patient_detail(patient_id: str, session: dict = Depends(require_ro
             id=str(user["id"]), user_id=user["user_id"], full_name=user["full_name"], gender=user["gender"],
             blood_group=decrypt_data(user["blood_group_encrypted"]) if user.get("blood_group_encrypted") else None,
             last_recorded_at=None, status=user["status"],
+            assigned_by_name=assignment.get("assigned_by_name") if assignment else None,
+            assignment_expires_at=assignment.get("expires_at") if assignment else None,
+            assignment_reason=assignment.get("reason") if assignment else None,
         ),
         vitals_history=[_vitals_record(v) for v in vitals],
         nursing_notes=[
@@ -4164,6 +4238,7 @@ def record_patient_vitals(patient_id: str, req: CreateVitalsRequest, session: di
             cur.execute("SELECT id FROM Users WHERE id = %s AND role = 'Patient'", (patient_id,))
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="Patient not found")
+            _require_nurse_access(cur, session, str(patient_id), "vitals")
 
             cur.execute("""
                 INSERT INTO PatientVitals
@@ -4211,6 +4286,7 @@ def add_nursing_note(patient_id: str, req: CreateNursingNoteRequest, session: di
             cur.execute("SELECT id FROM Users WHERE id = %s AND role = 'Patient'", (patient_id,))
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="Patient not found")
+            _require_nurse_access(cur, session, str(patient_id), "nursing_note")
 
             cur.execute("""
                 INSERT INTO NursingNotes (patient_id, nurse_id, note_type, content)
@@ -4227,6 +4303,7 @@ def administer_medication(patient_id: str, prescription_id: str, req: CreateMedi
     user_uuid = session["user_id"]
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
+            _require_nurse_access(cur, session, str(patient_id), "medication_administration")
             cur.execute("SELECT id FROM Prescriptions WHERE id = %s AND patient_id = %s", (prescription_id, patient_id))
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="Prescription not found for this patient")
@@ -4239,6 +4316,180 @@ def administer_medication(patient_id: str, prescription_id: str, req: CreateMedi
             conn.commit()
 
     return {"status": "success", "id": str(admin_id)}
+
+
+def _assign_care_team(conn, cur, session: dict, patient_id: str, req: CareTeamAssignRequest) -> CareTeamMember:
+    """Shared by the doctor and administrator forms."""
+    cur.execute(
+        """SELECT id, user_id, full_name FROM Users
+            WHERE role = 'Nurse' AND status = 'Approved' AND (id::text = %s OR user_id = %s)""",
+        (req.nurse_id, req.nurse_id))
+    nurse = cur.fetchone()
+    if not nurse:
+        raise HTTPException(status_code=404, detail="No approved nurse with that ID.")
+    cur.execute("SELECT id, user_id, full_name FROM Users WHERE id = %s AND role = 'Patient'",
+                (patient_id,))
+    patient = cur.fetchone()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=req.duration_hours)
+                  if req.duration_hours else None)
+    cur.execute(
+        """INSERT INTO CareTeamAssignments (patient_id, nurse_id, assigned_by, assigned_by_role,
+                                            reason, expires_at)
+           VALUES (%s, %s, %s, %s, %s, %s)
+           ON CONFLICT (patient_id, nurse_id) WHERE ended_at IS NULL
+           DO UPDATE SET assigned_by = EXCLUDED.assigned_by,
+                         assigned_by_role = EXCLUDED.assigned_by_role,
+                         reason = EXCLUDED.reason, expires_at = EXCLUDED.expires_at,
+                         created_at = CURRENT_TIMESTAMP
+           RETURNING id""",
+        (patient["id"], nurse["id"], session["user_id"], session["role"], req.reason, expires_at))
+    assignment_id = cur.fetchone()["id"]
+    until = expires_at.strftime("%d %b %Y %H:%M UTC") if expires_at else "further notice"
+    cur.executemany(
+        "INSERT INTO Notifications (user_id, notification_type, title, body) VALUES (%s, %s, %s, %s)",
+        [(nurse["id"], "CARE_TEAM_ASSIGNED", "Added to a patient's care team",
+          f"You can now open {patient['full_name']}'s chart ({patient['user_id']}) until {until}."),
+         (patient["id"], "CARE_TEAM_ASSIGNED", "A nurse was added to your care team",
+          f"{nurse['full_name']} can now read your chart and record vitals until {until}. "
+          f"Reason given: {req.reason}")])
+    aisec.record_security_event(
+        cur, actor_id=session["user_id"], actor_public_id=session.get("public_user_id"),
+        actor_role=session.get("role"), event_type="CARE_TEAM_ASSIGNED",
+        subject_patient_id=str(patient["id"]), resource="care_team",
+        metadata={"nurse": nurse["user_id"], "hours": req.duration_hours})
+    conn.commit()
+    log_admin_action(conn, session["user_id"], session.get("public_user_id"), "CARE_TEAM_ASSIGNED",
+                     str(patient["id"]), patient["user_id"],
+                     details={"nurse": nurse["user_id"], "reason": req.reason,
+                              "expires_at": expires_at.isoformat() if expires_at else None})
+    cur.execute(_CARE_TEAM_SELECT + " AND a.id = %s", (assignment_id,))
+    return _care_team_member(cur.fetchone())
+
+
+def _end_care_team(conn, cur, session: dict, assignment: dict) -> dict:
+    cur.execute("UPDATE CareTeamAssignments SET ended_at = CURRENT_TIMESTAMP, ended_by = %s "
+                "WHERE id = %s AND ended_at IS NULL", (session["user_id"], assignment["id"]))
+    cur.execute(
+        "INSERT INTO Notifications (user_id, notification_type, title, body) VALUES (%s, %s, %s, %s)",
+        (assignment["nurse_id"], "CARE_TEAM_ENDED", "Removed from a patient's care team",
+         f"Your access to {assignment['patient_name']}'s chart ({assignment['patient_user_id']}) has ended."))
+    conn.commit()
+    log_admin_action(conn, session["user_id"], session.get("public_user_id"), "CARE_TEAM_ENDED",
+                     str(assignment["patient_id"]), assignment["patient_user_id"],
+                     details={"nurse": assignment["nurse_user_id"]})
+    return {"status": "success", "assignment_id": str(assignment["id"])}
+
+
+@app.get("/api/doctor/nurses")
+def search_nurses(q: str = Query("", max_length=80), session: dict = Depends(require_role("Doctor"))):
+    """Approved nurses a doctor can add to a care team. Staff only — no patient data."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT id, user_id, full_name FROM Users
+                    WHERE role = 'Nurse' AND status = 'Approved'
+                      AND (%s = '' OR full_name ILIKE %s OR user_id ILIKE %s)
+                    ORDER BY full_name LIMIT 20""",
+                (q.strip(), f"%{q.strip()}%", f"%{q.strip()}%"))
+            return [{"id": str(r["id"]), "user_id": r["user_id"], "full_name": r["full_name"]}
+                    for r in cur.fetchall()]
+
+
+@app.get("/api/doctor/patients/{patient_id}/care-team", response_model=list[CareTeamMember])
+def get_patient_care_team(patient_id: str, session: dict = Depends(require_role("Doctor"))):
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            _require_write_access(cur, session, patient_id, "care team")
+            cur.execute(_CARE_TEAM_SELECT + " AND a.patient_id = %s ORDER BY a.created_at DESC",
+                        (patient_id,))
+            return [_care_team_member(r) for r in cur.fetchall()]
+
+
+@app.post("/api/doctor/patients/{patient_id}/care-team", response_model=CareTeamMember)
+def assign_patient_care_team(patient_id: str, req: CareTeamAssignRequest,
+                             session: dict = Depends(require_role("Doctor"))):
+    """Delegate chart access to a nurse. Only a doctor who is authorized for the
+    patient can do this, and the nurse's access ends with theirs."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            _require_write_access(cur, session, patient_id, "care team")
+            allowed, basis = _doctor_patient_authorization(cur, session["user_id"], patient_id)
+            if basis == "emergency override":
+                # Break-glass is personal; it is not a basis for granting others access.
+                _deny(cur, session, resource="care_team", reason="emergency access cannot be delegated",
+                      patient_id=str(patient_id),
+                      detail="Emergency access is personal and cannot be delegated to a nurse.")
+            return _assign_care_team(conn, cur, session, patient_id, req)
+
+
+@app.post("/api/doctor/patients/{patient_id}/care-team/{assignment_id}/end")
+def end_patient_care_team(patient_id: str, assignment_id: str,
+                          session: dict = Depends(require_role("Doctor"))):
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            _require_write_access(cur, session, patient_id, "care team")
+            cur.execute(_CARE_TEAM_SELECT + " AND a.id = %s AND a.patient_id = %s",
+                        (assignment_id, patient_id))
+            assignment = cur.fetchone()
+            if not assignment:
+                raise HTTPException(status_code=404, detail="Assignment not found")
+            return _end_care_team(conn, cur, session, assignment)
+
+
+@app.get("/api/admin/care-team", response_model=list[CareTeamMember])
+def list_care_teams(q: str = Query("", max_length=80),
+                    session: dict = Depends(require_role("Administrator"))):
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            term = q.strip()
+            cur.execute(
+                _CARE_TEAM_SELECT + """ AND (%s = '' OR p.full_name ILIKE %s OR p.user_id ILIKE %s
+                                              OR n.full_name ILIKE %s OR n.user_id ILIKE %s)
+                                     ORDER BY a.created_at DESC LIMIT 200""",
+                (term,) + (f"%{term}%",) * 4)
+            return [_care_team_member(r) for r in cur.fetchall()]
+
+
+@app.post("/api/admin/care-team", response_model=CareTeamMember)
+def admin_assign_care_team(req: CareTeamAssignRequest,
+                           session: dict = Depends(require_role("Administrator"))):
+    """Ward allocation: an administrator assigns a nurse to a patient."""
+    if not req.patient_id:
+        raise HTTPException(status_code=422, detail="patient_id is required.")
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT id FROM Users WHERE role = 'Patient' AND (id::text = %s OR user_id = %s)",
+                        (req.patient_id, req.patient_id))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Patient not found")
+            return _assign_care_team(conn, cur, session, str(row["id"]), req)
+
+
+@app.post("/api/admin/care-team/{assignment_id}/end")
+def admin_end_care_team(assignment_id: str, session: dict = Depends(require_role("Administrator"))):
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(_CARE_TEAM_SELECT + " AND a.id = %s", (assignment_id,))
+            assignment = cur.fetchone()
+            if not assignment:
+                raise HTTPException(status_code=404, detail="Assignment not found")
+            return _end_care_team(conn, cur, session, assignment)
+
+
+@app.get("/api/patient/care-team", response_model=list[CareTeamMember])
+def get_my_care_team(session: dict = Depends(require_role("Patient"))):
+    """Which nurses can open my chart, who added them, and until when."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(_CARE_TEAM_SELECT + " AND a.patient_id = %s ORDER BY a.created_at DESC",
+                        (session["user_id"],))
+            rows = cur.fetchall()
+            return [_care_team_member(r) for r in rows
+                    if _nurse_patient_authorization(cur, str(r["nurse_id"]), session["user_id"])[0]]
 
 
 @app.get("/api/nurse/notifications")

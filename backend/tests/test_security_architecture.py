@@ -530,3 +530,60 @@ def test_a_failed_audit_insert_cannot_abort_the_callers_transaction():
     log_admin_action(conn, "a1", "ADM-1", "TEST_ACTION", ip_address="testclient")
     assert Savepoint.rolled_back           # the failure stayed inside the savepoint
     assert conn.commits == 0
+
+
+# ═══ Nurse access is a care-team relationship, not a role property (§4, §34) ═
+
+def _assignment(role="Doctor", by="doc-1"):
+    return {"id": "a1", "assigned_by": by, "assigned_by_role": role, "reason": "Post-op obs",
+            "expires_at": None, "assigned_by_name": "Dr. A"}
+
+
+def _nurse_auth(rows):
+    from app.main import _nurse_patient_authorization
+    return _nurse_patient_authorization(FakeCursor(rows), "nurse-1", "patient-1")
+
+
+def test_a_nurse_without_an_assignment_is_refused():
+    allowed, basis, _ = _nurse_auth([None])
+    assert not allowed and "care team" in basis
+
+
+def test_a_ward_allocation_by_an_administrator_stands_on_its_own():
+    allowed, basis, _ = _nurse_auth([_assignment("Administrator", "adm-1")])
+    assert allowed and "ward" in basis
+
+
+def test_a_doctor_delegated_assignment_holds_while_the_doctor_is_authorized():
+    rows = [_assignment(), {"blocked": False, "emergency": False},
+            {"treating": True, "consented": False}]
+    allowed, basis, _ = _nurse_auth(rows)
+    assert allowed and "delegated" in basis
+
+
+def test_withdrawing_the_doctor_also_withdraws_the_nurse_they_brought_in():
+    rows = [_assignment(), {"blocked": True, "emergency": False}]
+    allowed, basis, _ = _nurse_auth(rows)
+    assert not allowed and "no longer has access" in basis
+
+
+def test_a_doctors_break_glass_is_not_passed_on_to_the_nurse():
+    rows = [_assignment(), {"blocked": True, "emergency": True}]
+    allowed, _, _ = _nurse_auth(rows)
+    assert not allowed
+
+
+@pytest.mark.parametrize("endpoint", ["get_nurse_patient_detail", "record_patient_vitals",
+                                      "add_nursing_note", "administer_medication"])
+def test_every_nurse_patient_endpoint_requires_the_care_team(endpoint):
+    assert "_require_nurse_access" in _src(endpoint)
+
+
+def test_nurse_search_is_limited_to_the_care_team_and_returns_no_emails():
+    src = _src("search_nurse_patients")
+    assert "_nurse_care_team" in src and "email" not in _src("_nurse_care_team")
+
+
+def test_assigning_a_nurse_needs_the_doctors_own_access_and_no_break_glass():
+    src = _src("assign_patient_care_team")
+    assert "_require_write_access" in src and "emergency override" in src

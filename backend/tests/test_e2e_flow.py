@@ -85,11 +85,13 @@ def people(env):
     doctor_uuid, doctor_pub = _register_and_approve(env, "Doctor", admin,
                                                     specialization="Cardiology")
     _, tech_pub = _register_and_approve(env, "Lab Technician", admin)
+    _, nurse_pub = _register_and_approve(env, "Nurse", admin)
     return {
         "admin": admin,
         "patient": _login(env["client"], patient_pub), "patient_uuid": patient_uuid,
         "doctor": _login(env["client"], doctor_pub), "doctor_uuid": doctor_uuid,
         "tech": _login(env["client"], tech_pub),
+        "nurse": _login(env["client"], nurse_pub), "nurse_pub": nurse_pub,
     }
 
 
@@ -105,6 +107,7 @@ def _events(env, event_type, actor=None):
 def test_the_core_flow(env, people):
     c, db = env["client"], env["db"]
     P, D, T, A = people["patient"], people["doctor"], people["tech"], people["admin"]
+    N = people["nurse"]
     pid, did = people["patient_uuid"], people["doctor_uuid"]
 
     # ── 1–2. Without a relationship or consent, the doctor gets nothing ──────
@@ -130,6 +133,20 @@ def test_the_core_flow(env, people):
     r = c.get(f"/api/doctor/patients/{pid}", headers=D)
     assert r.status_code == 200, r.text
     assert _events(env, "RECORD_ACCESS", did) >= 1
+
+    # ── Nursing access is a care-team relationship, delegated by the doctor ──
+    assert c.get(f"/api/nurse/patients/{pid}", headers=N).status_code == 403
+    assert c.get("/api/nurse/patients/search?q=E2E", headers=N).json() == []
+    r = c.post(f"/api/doctor/patients/{pid}/care-team", headers=D, json={
+        "nurse_id": people["nurse_pub"], "reason": "Post-procedure observations overnight",
+        "duration_hours": 24})
+    assert r.status_code == 200, r.text
+    assert c.get(f"/api/nurse/patients/{pid}", headers=N).status_code == 200
+    assert c.post(f"/api/nurse/patients/{pid}/vitals", headers=N,
+                  json={"heart_rate": 72, "spo2": 98}).status_code == 200
+    assert any(p["id"] == pid for p in c.get("/api/nurse/patients", headers=N).json())
+    team = c.get("/api/patient/care-team", headers=P).json()
+    assert [m["nurse_user_id"] for m in team] == [people["nurse_pub"]]
 
     # ── 8–9. Lab request reaches the laboratory ──────────────────────────────
     r = c.post("/api/doctor/requests", headers=D,
@@ -191,6 +208,8 @@ def test_the_core_flow(env, people):
         assert c.get(f"/api/doctor/patients/{pid}", headers=D).status_code == 403
     assert db.execute("SELECT COUNT(*) AS n FROM SecurityAlerts WHERE source = 'ACCESS_CONTROL' "
                       "AND actor_id = %s", (did,)).fetchone()["n"] >= 1
+    # …and the nurse that doctor brought in loses access with them.
+    assert c.get(f"/api/nurse/patients/{pid}", headers=N).status_code == 403
 
     # ── Emergency access: identity-verified, recorded, reviewed ──────────────
     r = c.post("/api/doctor/emergency-access", headers=D, json={
@@ -205,6 +224,8 @@ def test_the_core_flow(env, people):
     assert c.get(f"/api/doctor/patients/{pid}", headers=D).status_code == 200
     notes = c.get("/api/patient/notifications", headers=P).json()
     assert any(n["notification_type"] == "EMERGENCY_ACCESS" for n in notes)
+    # Break-glass is personal: it does not reopen the chart to the nurse.
+    assert c.get(f"/api/nurse/patients/{pid}", headers=N).status_code == 403
 
     # ── AI / security monitoring and incident handling ───────────────────────
     for event in ("LOGIN_SUCCESS", "RECORD_ACCESS", "CONSENT_EVENT", "EMERGENCY_ACCESS",
@@ -223,7 +244,7 @@ def test_the_core_flow(env, people):
     # ── Audit trail ──────────────────────────────────────────────────────────
     actions = {r["action"] for r in db.execute("SELECT DISTINCT action FROM AdminAuditLogs").fetchall()}
     assert {"ACCESS_APPROVED", "LAB_TEST_REQUESTED", "LAB_REPORT_FINALIZED",
-            "CONSENT_REVOKED", "EMERGENCY_ACCESS_DECLARED"} <= actions
+            "CONSENT_REVOKED", "EMERGENCY_ACCESS_DECLARED", "CARE_TEAM_ASSIGNED"} <= actions
 
 
 def test_failed_sign_ins_reach_the_detector_and_alert(env, people):
