@@ -8,3 +8,5 @@ __pycache__/
 *.pyc
 .pytest_cache/
 test_db.py
+.secret_key
+.ledger_key
