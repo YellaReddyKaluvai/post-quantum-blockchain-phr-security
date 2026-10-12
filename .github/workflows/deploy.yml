@@ -31,7 +31,8 @@ jobs:
 
   build-backend:
     runs-on: ubuntu-latest
-    # A disposable database for the end-to-end flow test (tests/test_e2e_flow.py).
+    # Disposable services for the end-to-end tests: a database, and two
+    # independent IPFS nodes so replication runs between real daemons.
     services:
       postgres:
         image: postgres:16
@@ -45,9 +46,20 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
+      ipfs:
+        image: ipfs/kubo:v0.29.0
+        ports:
+          - 5001:5001
+      ipfs-replica:
+        image: ipfs/kubo:v0.29.0
+        ports:
+          - 5002:5001
     defaults:
       run:
         working-directory: ./backend
+    env:
+      DB_ROOT: postgresql://postgres:postgres@127.0.0.1:5432
+      IMAGE: post-quantum-phr-backend:latest
     steps:
     - uses: actions/checkout@v4
     - name: Set up Python
@@ -59,7 +71,7 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
     - name: Build Backend Docker Image (Dry Run)
-      run: docker build . -t post-quantum-phr-backend:latest
+      run: docker build . -t $IMAGE
     # Inside the image liboqs is real, so the post-quantum tests that skip on a
     # developer machine without it run here — and the end-to-end flow runs
     # against a real Postgres: access request → consent → lab request → signed,
@@ -67,14 +79,74 @@ jobs:
     # The frontend is mounted read-only so the RBAC parity test can compare the
     # backend matrix with frontend/src/lib/iam.ts.
     - name: Test inside the image (unit + end-to-end, real liboqs and Postgres)
-      env:
-        E2E_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/pqc_hospital
       run: >-
         docker run --rm --network host
         -v ${{ github.workspace }}/frontend:/frontend:ro
-        -e DATABASE_URL=$E2E_DATABASE_URL
+        -e DATABASE_URL=$DB_ROOT/pqc_hospital
         -e RUN_E2E=1
         -e BLOCKCHAIN_ENABLED=false
         -e SECURITY_ANALYSIS_INTERVAL_MINUTES=0
-        post-quantum-phr-backend:latest
+        $IMAGE
         python -m pytest -p no:cacheprovider -rs
+
+    # ── The same flow with the integrations live ─────────────────────────────
+    - name: Install Foundry
+      uses: foundry-rs/foundry-toolchain@v1
+    - name: Compile and test the contract
+      working-directory: .
+      run: |
+        forge build
+        forge test -vv
+    - name: Start a local chain and deploy PHR.sol
+      working-directory: .
+      run: |
+        nohup anvil --silent > /tmp/anvil.log 2>&1 &
+        for i in $(seq 1 30); do cast block-number --rpc-url http://127.0.0.1:8545 >/dev/null 2>&1 && break; sleep 1; done
+        # anvil's first dev account, derived from its published test mnemonic —
+        # the same account the backend signs with by default.
+        KEY=$(cast wallet private-key --mnemonic "test test test test test test test test test test test junk")
+        forge create contracts/PHR.sol:PHR_Security --rpc-url http://127.0.0.1:8545 \
+          --private-key "$KEY" --broadcast | tee /tmp/deploy.log
+        ADDRESS=$(grep -oE 'Deployed to: 0x[0-9a-fA-F]{40}' /tmp/deploy.log | awk '{print $3}')
+        test -n "$ADDRESS"
+        echo "CONTRACT_ADDRESS=$ADDRESS" >> "$GITHUB_ENV"
+    - name: Start hospital B (a second backend, its own database) as the federation hub
+      run: |
+        docker run --rm --network host $IMAGE python -c "import psycopg; c = psycopg.connect('$DB_ROOT/postgres', autocommit=True); [c.execute('CREATE DATABASE ' + d) for d in ('pqc_integrations', 'hospital_b')]"
+        docker run -d --name hospital-b --network host \
+          -e DATABASE_URL=$DB_ROOT/hospital_b -e BLOCKCHAIN_ENABLED=false \
+          -e SECURITY_ANALYSIS_INTERVAL_MINUTES=0 \
+          $IMAGE uvicorn app.main:app --host 127.0.0.1 --port 8001
+        for i in $(seq 1 60); do curl -fs http://127.0.0.1:8001/api/health >/dev/null && break; sleep 1; done
+        curl -fsS http://127.0.0.1:8001/api/health
+    - name: Wait for both IPFS nodes
+      run: |
+        for port in 5001 5002; do
+          for i in $(seq 1 60); do curl -fs -X POST http://127.0.0.1:$port/api/v0/id >/dev/null && break; sleep 1; done
+          curl -fsS -X POST http://127.0.0.1:$port/api/v0/id | head -c 200; echo
+        done
+    # On-chain consent, anchoring and break-glass against the deployed contract;
+    # the encrypted report published to IPFS and replicated to the second node;
+    # and federated learning between this hospital and hospital B over HTTP.
+    - name: End-to-end with the chain, IPFS replication and a second hospital
+      run: >-
+        docker run --rm --network host
+        -v ${{ github.workspace }}/contracts:/contracts:ro
+        -e DATABASE_URL=$DB_ROOT/pqc_integrations
+        -e RUN_E2E=1
+        -e SECURITY_ANALYSIS_INTERVAL_MINUTES=0
+        -e BLOCKCHAIN_ENABLED=true
+        -e BLOCKCHAIN_RPC_URL=http://127.0.0.1:8545
+        -e BLOCKCHAIN_CONTRACT_ADDRESS=$CONTRACT_ADDRESS
+        -e IPFS_API_URL=http://127.0.0.1:5001
+        -e IPFS_REPLICA_NODES=http://127.0.0.1:5002
+        -e FED_HUB_URL=http://127.0.0.1:8001
+        -e FED_HUB_DATABASE_URL=$DB_ROOT/hospital_b
+        $IMAGE
+        python -m pytest -p no:cacheprovider -rs
+        tests/test_e2e_flow.py tests/test_ipfs.py tests/test_federation_live.py
+    - name: Hub and chain logs
+      if: failure()
+      run: |
+        docker logs hospital-b 2>&1 | tail -80 || true
+        tail -40 /tmp/anvil.log || true
