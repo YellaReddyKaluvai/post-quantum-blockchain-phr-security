@@ -15,16 +15,17 @@
 | **9. AI security layer** | Anomaly detection, XAI, alerts, incidents, FedAvg |
 | **10. Publishing & proofs** | Real IPFS pinning, authenticated federation peers, ZK consent proofs |
 | **11. Scale & verification** | 500-user dataset, 203 tests, full endpoint and cross-role sweeps |
+| **12. Closing the gaps** | Post-quantum (lattice) consent proof, IPFS replication to nodes and pinning services, federation-peer admin screen, dead table removed; 263 tests |
 
 ## Current state
 
 | Metric | Value |
 |---|---|
-| REST endpoints | 125 |
-| Frontend pages | 50 |
+| REST endpoints | 127 |
+| Frontend pages | 51 |
 | Database tables | 30 |
 | Backend / frontend LOC | 9,162 / 15,133 |
-| Automated tests | 203 passing |
+| Automated tests | 263 |
 | Demonstration data | 515 users · 804 signed reports · 40 chain anchors |
 
 ## Remaining
@@ -32,7 +33,7 @@
 | Item | Nature |
 |---|---|
 | Live multi-hospital federation | Needs a second institution to register as a peer — the mechanism is built and tested |
-| Public IPFS availability | Content is pinned to a local node; wider availability needs a pinning service or public peers |
+| Public IPFS availability | Replication is built; it needs a second node or a pinning-service account configured, and has not yet been exercised against either |
 | Production deployment | Runs locally under Docker; a hosted deployment needs infrastructure and a managed database |
 
 Each is an infrastructure dependency rather than missing code.

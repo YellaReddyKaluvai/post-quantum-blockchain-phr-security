@@ -2,8 +2,8 @@
 
 import React, { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Shield, ShieldAlert, Users, KeyRound, Activity, AlertTriangle, Loader2, Link2, Cloud } from "lucide-react";
-import { getSecurityStats, getBlockchainStatus, getStorageStatus } from "@/lib/session";
+import { Shield, ShieldAlert, Users, KeyRound, Activity, AlertTriangle, Loader2, Link2, Cloud, Boxes, RefreshCw } from "lucide-react";
+import { getSecurityStats, getBlockchainStatus, getStorageStatus, getIpfsStatus, syncIpfsReplication } from "@/lib/session";
 
 interface SecurityStats {
   failed_login_attempts_24h: number;
@@ -35,10 +35,39 @@ interface StorageStatus {
   reports_without_cloud_copy: number;
 }
 
+interface ReplicaTarget {
+  name: string;
+  kind: "node" | "service";
+  url: string;
+  pinned: number;
+  in_progress: number;
+  failed: number;
+}
+
+interface IpfsStatus {
+  configured: boolean;
+  connected: boolean;
+  peer_id?: string | null;
+  pinned_objects?: number | null;
+  error?: string | null;
+  scope?: string | null;
+  reports_total: number;
+  reports_with_cid: number;
+  replication: {
+    targets: ReplicaTarget[];
+    cids_published: number;
+    cids_with_a_replica: number;
+    cids_on_every_target: number;
+    min_copies: number;
+    configuration_errors: string[];
+  } | null;
+}
+
 export default function SecurityPage() {
   const [stats, setStats] = useState<SecurityStats | null>(null);
   const [chain, setChain] = useState<BlockchainStatus | null>(null);
   const [storage, setStorage] = useState<StorageStatus | null>(null);
+  const [ipfs, setIpfs] = useState<IpfsStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -54,6 +83,7 @@ export default function SecurityPage() {
       // must not prevent the rest of the page rendering.
       try { setChain(await getBlockchainStatus()); } catch { setChain(null); }
       try { setStorage(await getStorageStatus()); } catch { setStorage(null); }
+      try { setIpfs(await getIpfsStatus()); } catch { setIpfs(null); }
       setLoading(false);
     };
     fetchAll();
@@ -274,7 +304,157 @@ export default function SecurityPage() {
             </div>
           )}
         </motion.div>
+
+        <IpfsCard ipfs={ipfs} onRefresh={async () => setIpfs(await getIpfsStatus())} />
       </div>
     </>
+  );
+}
+
+function IpfsCard({ ipfs, onRefresh }: { ipfs: IpfsStatus | null; onRefresh: () => Promise<void> }) {
+  const [syncing, setSyncing] = useState(false);
+  const [message, setMessage] = useState("");
+  const [syncError, setSyncError] = useState("");
+
+  const sync = async () => {
+    setSyncing(true);
+    setMessage("");
+    setSyncError("");
+    try {
+      const r = await syncIpfsReplication();
+      setMessage(
+        `${r.documents_scheduled} of ${r.documents_published} published document(s) sent for replication` +
+        (r.requests_refreshed ? `, ${r.requests_refreshed} pinning-service request(s) updated` : "") +
+        (r.documents_not_on_node ? `. ${r.documents_not_on_node} were never published to the node and cannot be replicated.` : ".") +
+        " Replication runs in the background — refresh to see confirmed copies."
+      );
+      await onRefresh();
+    } catch (error) {
+      setSyncError(error instanceof Error ? error.message : "Could not start replication");
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const refresh = async () => {
+    setSyncError("");
+    try { await onRefresh(); } catch { setSyncError("Could not refresh IPFS status"); }
+  };
+
+  const rep = ipfs?.replication;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.6 }}
+      className="p-6 rounded-3xl border border-slate-100 bg-white shadow-sm lg:col-span-2"
+    >
+      <div className="flex items-center gap-3 mb-4 pb-4 border-b border-slate-100 flex-wrap">
+        <Boxes className="w-5 h-5 text-teal-500" />
+        <h3 className="text-lg font-bold text-slate-800">IPFS Publishing &amp; Replication</h3>
+        <span className={`ml-auto text-[10px] font-bold px-2.5 py-1 rounded-full ${
+          ipfs?.connected ? "bg-emerald-50 text-emerald-700"
+            : ipfs?.configured ? "bg-rose-50 text-rose-700" : "bg-slate-100 text-slate-600"
+        }`}>
+          {ipfs?.connected ? "NODE CONNECTED" : ipfs?.configured ? "NODE UNREACHABLE" : "NOT CONFIGURED"}
+        </span>
+      </div>
+
+      {!ipfs ? (
+        <p className="text-sm text-slate-500">Status unavailable.</p>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 text-sm">
+          <div className="space-y-2.5">
+            <p className="flex justify-between"><span className="text-slate-500">Objects pinned on this node</span>
+              <span className="font-semibold text-slate-800 tabular-nums">{ipfs.pinned_objects ?? "—"}</span></p>
+            <p className="flex justify-between"><span className="text-slate-500">Lab reports with a CID</span>
+              <span className="font-semibold text-slate-800 tabular-nums">{ipfs.reports_with_cid}/{ipfs.reports_total}</span></p>
+            {ipfs.peer_id && <p className="text-[11px] font-mono text-slate-400 break-all">{ipfs.peer_id}</p>}
+            {ipfs.error && (
+              <p className="text-xs text-rose-700 bg-rose-50 border border-rose-100 rounded-xl p-2.5">{ipfs.error}</p>
+            )}
+            {ipfs.scope && <p className="text-xs text-slate-500 leading-relaxed">{ipfs.scope}</p>}
+          </div>
+
+          <div>
+            {!rep ? (
+              <p className="text-xs text-slate-500 bg-slate-50 border border-slate-100 rounded-xl p-3">
+                No replication targets are configured, so each document exists on this node only. Set
+                {" "}<span className="font-mono">IPFS_REPLICA_NODES</span> (other IPFS nodes) or
+                {" "}<span className="font-mono">IPFS_PINNING_SERVICES</span> (pinning services) in the backend
+                environment to keep copies elsewhere.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <div className="rounded-xl bg-slate-50 p-2.5">
+                    <p className="text-xl font-extrabold text-slate-800 tabular-nums">{rep.cids_published}</p>
+                    <p className="text-[10px] uppercase font-bold text-slate-400">Published</p>
+                  </div>
+                  <div className="rounded-xl bg-slate-50 p-2.5">
+                    <p className="text-xl font-extrabold text-emerald-600 tabular-nums">{rep.cids_on_every_target}</p>
+                    <p className="text-[10px] uppercase font-bold text-slate-400">On every target</p>
+                  </div>
+                  <div className="rounded-xl bg-slate-50 p-2.5">
+                    <p className={`text-xl font-extrabold tabular-nums ${rep.min_copies > 1 ? "text-emerald-600" : "text-amber-600"}`}>
+                      {rep.min_copies}
+                    </p>
+                    <p className="text-[10px] uppercase font-bold text-slate-400">Fewest copies</p>
+                  </div>
+                </div>
+
+                <ul className="divide-y divide-slate-100 border border-slate-100 rounded-xl">
+                  {rep.targets.map((t) => (
+                    <li key={t.name} className="flex items-center justify-between gap-3 px-3 py-2">
+                      <div className="min-w-0">
+                        <p className="font-semibold text-slate-800 truncate">{t.name}</p>
+                        <p className="text-[11px] text-slate-400 truncate">
+                          {t.kind === "node" ? "IPFS node" : "Pinning service"} · {t.url}
+                        </p>
+                      </div>
+                      <p className="text-xs tabular-nums whitespace-nowrap">
+                        <span className="font-bold text-emerald-600">{t.pinned} pinned</span>
+                        {t.in_progress > 0 && <span className="text-slate-500"> · {t.in_progress} queued</span>}
+                        {t.failed > 0 && <span className="font-bold text-rose-600"> · {t.failed} failed</span>}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+
+                {rep.configuration_errors.map((e) => (
+                  <p key={e} className="text-xs text-rose-700 bg-rose-50 border border-rose-100 rounded-xl p-2.5">{e}</p>
+                ))}
+
+                <p className="text-[11px] text-slate-400">
+                  Only copies a target has confirmed as pinned count. A queued request is not a copy.
+                </p>
+              </div>
+            )}
+
+            <div className="flex gap-2 mt-3">
+              {rep && (
+                <button
+                  type="button"
+                  onClick={sync}
+                  disabled={syncing || !ipfs.connected}
+                  className="px-3 py-2 rounded-xl bg-teal-600 text-white text-xs font-bold hover:bg-teal-700 disabled:opacity-50 flex items-center gap-1.5"
+                >
+                  {syncing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Boxes className="w-3.5 h-3.5" />}
+                  Replicate missing copies
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={refresh}
+                className="px-3 py-2 rounded-xl bg-white border border-slate-200 text-slate-600 text-xs font-bold hover:bg-slate-50 flex items-center gap-1.5"
+              >
+                <RefreshCw className="w-3.5 h-3.5" /> Refresh
+              </button>
+            </div>
+            {message && <p className="text-xs text-emerald-700 mt-2">{message}</p>}
+            {syncError && <p className="text-xs font-semibold text-rose-600 mt-2">{syncError}</p>}
+          </div>
+        </div>
+      )}
+    </motion.div>
   );
 }

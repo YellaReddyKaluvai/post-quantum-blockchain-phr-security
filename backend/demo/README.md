@@ -22,6 +22,21 @@ Six sections, every figure measured at run time:
 The refusals in 4 and 5 matter more than the successes: a verifier hardcoded to
 return true would pass every positive test.
 
+## Making a zero-knowledge consent proof
+
+```bash
+python demo/zkp_prove.py --token "mlwe1:…" --challenge <challenge> \
+    --context "consent:<patient_id>" --commitment "mlwe1:…" > proof.json
+```
+
+The doctor-side prover for the post-quantum consent proof. The token comes from
+`GET /api/doctor/consent-token/{patient_id}` (delivered once); the challenge and
+context from `POST /api/doctor/zkp/challenge`. The printed JSON is the body for
+`POST /api/doctor/zkp/verify`. With `--commitment` the proof is checked locally
+first and nothing is printed if it would fail. Needs no database, no liboqs and
+no network; set `QUANTUMCARE_CONSENT_TOKEN` instead of `--token` to keep the
+token out of shell history.
+
 ## Prerequisites for the blockchain demo
 
 Anvil is ephemeral — restarting it wipes the deployed contract, after which new

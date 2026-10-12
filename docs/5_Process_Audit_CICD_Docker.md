@@ -19,7 +19,7 @@ test suite, and builds both images.
 
 ## Test suite
 
-**203 tests**, no database or running server required.
+**263 tests**, no database or running server required.
 
 | File | Covers |
 |---|---|
@@ -34,7 +34,9 @@ test suite, and builds both images.
 | `test_delivery_and_adherence.py` | Imaging release scoping, adherence summaries |
 | `test_ipfs.py` | Publishing, with and without a node |
 | `test_federation.py` | Peer signature verification, parameter sanity |
-| `test_zkp.py` | Proof soundness and replay resistance |
+| `test_zkp.py` | Legacy Schnorr proof: soundness and replay resistance |
+| `test_zkp_lattice.py` | Post-quantum lattice proof: ring arithmetic, forgery and replay refusal, scheme separation |
+| `test_ipfs_replication.py` | Replication to nodes and pinning services; only confirmed copies count |
 
 **Every test asserts a refusal as well as a success.** A happy-path-only suite
 would pass against a verifier hardcoded to return true — which this codebase
