@@ -285,6 +285,7 @@ def record_security_event(cur, *, actor_id, actor_public_id=None, actor_role=Non
     never be the reason a clinician cannot open a chart.
     """
     import json
+    from app.audit_service import inet_or_none
     try:
         # A savepoint, so a failed insert cannot poison the caller's transaction:
         # Postgres aborts the whole transaction on any error, and swallowing the
@@ -295,7 +296,7 @@ def record_security_event(cur, *, actor_id, actor_public_id=None, actor_role=Non
                                                subject_patient_id, resource, ip_address, metadata)
                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (actor_id, actor_public_id, actor_role, event_type, subject_patient_id,
-                 resource, ip_address, json.dumps(metadata or {})),
+                 resource, inet_or_none(ip_address), json.dumps(metadata or {})),
             )
     except Exception as exc:     # noqa: BLE001 - telemetry must not break care
         import logging

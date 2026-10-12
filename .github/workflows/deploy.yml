@@ -64,11 +64,14 @@ jobs:
     # developer machine without it run here — and the end-to-end flow runs
     # against a real Postgres: access request → consent → lab request → signed,
     # encrypted report → patient release → alerts, incidents and audit.
+    # The frontend is mounted read-only so the RBAC parity test can compare the
+    # backend matrix with frontend/src/lib/iam.ts.
     - name: Test inside the image (unit + end-to-end, real liboqs and Postgres)
       env:
         E2E_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/pqc_hospital
       run: >-
         docker run --rm --network host
+        -v ${{ github.workspace }}/frontend:/frontend:ro
         -e DATABASE_URL=$E2E_DATABASE_URL
         -e RUN_E2E=1
         -e BLOCKCHAIN_ENABLED=false

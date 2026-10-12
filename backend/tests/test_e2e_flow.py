@@ -52,7 +52,7 @@ def env():
             """INSERT INTO Users (user_id, full_name, email, password_hash, role, gender,
                                   date_of_birth_encrypted, status)
                VALUES (%s, 'E2E Administrator', %s, %s, 'Administrator', 'Other', %s, 'Approved')""",
-            (admin_id, f"admin-{tag}@e2e.test", hash_password(PASSWORD), encrypt_data("1980-01-01")))
+            (admin_id, f"admin-{tag}@e2e.example.com", hash_password(PASSWORD), encrypt_data("1980-01-01")))
         yield {"client": client, "db": db, "tag": tag, "admin_id": admin_id}
         db.close()
 
@@ -65,7 +65,7 @@ def _login(client, user_id, password=PASSWORD):
 
 def _register_and_approve(env, role, admin_headers, **extra):
     client, tag = env["client"], env["tag"]
-    email = f"{role.lower().replace(' ', '')}-{tag}@e2e.test"
+    email = f"{role.lower().replace(' ', '')}-{tag}@e2e.example.com"
     body = {"full_name": f"E2E {role}", "email": email, "password": PASSWORD,
             "confirm_password": PASSWORD, "role": role, "gender": "Other",
             "date_of_birth": "1990-05-05", **extra}
