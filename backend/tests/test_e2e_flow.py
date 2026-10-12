@@ -27,6 +27,9 @@ pytestmark = pytest.mark.skipif(
     reason="end-to-end flow needs RUN_E2E=1, a disposable DATABASE_URL and liboqs")
 
 PASSWORD = "Str0ng-E2E-pass!"
+# CI runs the flow a second time against a local anvil chain with PHR.sol
+# deployed; these checks only make sense when a chain is really there.
+ON_CHAIN = os.getenv("BLOCKCHAIN_ENABLED", "false").lower() == "true"
 
 
 @pytest.fixture(scope="module")
@@ -128,6 +131,8 @@ def test_the_core_flow(env, people):
     assert any(x["request_id"] == request_id and x["status"] == "Pending" for x in pending)
     r = c.post(f"/api/patient/access-requests/{request_id}/approve", headers=P, json={})
     assert r.status_code == 200, r.text
+    if ON_CHAIN:
+        assert r.json()["consent_ledger"]["recorded_on"] == "ethereum"
 
     # ── 6–7. The backend now allows it — and only now ────────────────────────
     r = c.get(f"/api/doctor/patients/{pid}", headers=D)
@@ -177,6 +182,12 @@ def test_the_core_flow(env, people):
     assert str(row["patient_id"]) == pid                       # bound to the right patient
     assert row["encrypted_document"] and row["digital_signature"]
     assert b"%PDF" not in row["encrypted_document"].encode()   # only ciphertext at rest
+    if ON_CHAIN:
+        assert report["anchored_on"] != "local-simulated" and report["blockchain_tx_hash"]
+    if os.getenv("IPFS_API_URL"):
+        # What IPFS holds is exactly the ciphertext — never the report itself.
+        from app.storage_service import fetch_from_ipfs
+        assert fetch_from_ipfs(report["ipfs_cid"]) == row["encrypted_document"].encode("utf-8")
     assert _events(env, "LAB_REPORT_UPLOADED") >= 1
 
     # ── 14. Patient notified ─────────────────────────────────────────────────
@@ -188,6 +199,8 @@ def test_the_core_flow(env, people):
     assert r.status_code == 200 and r.content.startswith(b"%PDF")
     v = c.get(f"/api/patient/lab-reports/{report['report_id']}/verify", headers=P).json()
     assert v["hash_matches"] is True and v["signature_valid"] is True
+    if ON_CHAIN:
+        assert v["blockchain_verified"] is True        # digest read back from the contract
     assert c.get(f"/api/doctor/reports/{report['report_id']}/download", headers=D).status_code == 200
 
     # ── Integrity: a changed digest is withheld and becomes an incident ──────
@@ -211,6 +224,23 @@ def test_the_core_flow(env, people):
     # …and the nurse that doctor brought in loses access with them.
     assert c.get(f"/api/nurse/patients/{pid}", headers=N).status_code == 403
 
+    # Asking again does not lift the withdrawal: it stands until the patient decides.
+    r = c.post("/api/doctor/access-requests", headers=D, json={
+        "patient_id": pid, "purpose": "Requesting renewed access for post-procedure follow-up."})
+    assert r.status_code == 200, r.text
+    assert c.get(f"/api/doctor/patients/{pid}", headers=D).status_code == 403
+
+    if ON_CHAIN:
+        # Someone with SQL access restores the doctor's consent behind the
+        # application's back. The contract still records the withdrawal.
+        db.execute("UPDATE Consent SET status = 'Authorized', prior_refusal = FALSE "
+                   "WHERE patient_id = %s AND subject_user_id = %s", (pid, did))
+        assert c.get(f"/api/doctor/patients/{pid}", headers=D).status_code == 403
+        assert db.execute("SELECT COUNT(*) AS n FROM SecurityIncidents "
+                          "WHERE event_type = 'CONSENT_LEDGER_MISMATCH'").fetchone()["n"] >= 1
+        db.execute("UPDATE Consent SET status = 'Pending', prior_refusal = TRUE "
+                   "WHERE patient_id = %s AND subject_user_id = %s", (pid, did))
+
     # ── Emergency access: identity-verified, recorded, reviewed ──────────────
     r = c.post("/api/doctor/emergency-access", headers=D, json={
         "patient_id": pid, "reason": "Patient unresponsive in A&E; cardiac history needed now.",
@@ -221,6 +251,8 @@ def test_the_core_flow(env, people):
         "duration_hours": 1, "password": PASSWORD})
     assert r.status_code == 200, r.text
     assert r.json()["incident_ref"].startswith("INC-")
+    if ON_CHAIN:
+        assert r.json()["contract_tx_hash"]          # PHR.sol emergencyAccess()
     assert c.get(f"/api/doctor/patients/{pid}", headers=D).status_code == 200
     notes = c.get("/api/patient/notifications", headers=P).json()
     assert any(n["notification_type"] == "EMERGENCY_ACCESS" for n in notes)
