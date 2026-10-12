@@ -4,10 +4,12 @@ import React, { useEffect, useState, useCallback } from "react";
 import { motion } from "framer-motion";
 import {
   Brain, AlertTriangle, FileWarning, Network, Play, Loader2, Check, X, ShieldAlert,
+  Upload, Download, SlidersHorizontal, ShieldCheck,
 } from "lucide-react";
 import {
   runSecurityAnalysis, getRiskAssessments, getSecurityAlerts,
   acknowledgeAlert, getSecurityIncidents, getFederatedStatus, runFederatedRound,
+  updateSecurityIncident, getSecurityPolicy, submitToFederationHub, pullFromFederationHub,
 } from "@/lib/session";
 
 interface Attribution {
@@ -38,6 +40,7 @@ interface Alert {
   title: string;
   summary: string;
   response: string;
+  source?: string;
   actor_name?: string | null;
   actor_public_id?: string | null;
   acknowledged: boolean;
@@ -45,6 +48,7 @@ interface Alert {
 }
 
 interface Incident {
+  id: string;
   incident_ref: string;
   event_type: string;
   affected_resource?: string | null;
@@ -53,9 +57,12 @@ interface Incident {
   explanation?: string | null;
   response?: string | null;
   status: string;
+  resolution?: string | null;
+  resolved_by?: string | null;
   actor_name?: string | null;
   actor_public_id?: string | null;
   created_at?: string | null;
+  closed_at?: string | null;
 }
 
 interface FederatedNode { name: string; simulated: boolean; samples: number; }
@@ -66,7 +73,35 @@ interface Federated {
   nodes: FederatedNode[];
   status: string;
   disclosure: string;
+  real_nodes?: number;
+  simulated_nodes?: number;
+  detection_baseline?: string;
+  participant?: {
+    configured: boolean;
+    hub_url?: string | null;
+    node_name?: string | null;
+    last_pulled?: { hub_round: number; real_nodes: number; pulled_at: string } | null;
+  };
 }
+
+interface Policy {
+  risk_policy: { MEDIUM: string; HIGH: string; EMERGENCY_HIGH: string; step_up_minutes: number;
+                 min_peers: number; thresholds: { MEDIUM: number; HIGH: number } };
+  emergency_max_per_day: number;
+  scheduled_analysis_minutes: number;
+  consent_ledger: string;
+}
+
+const SOURCE_LABEL: Record<string, string> = {
+  LOCAL_ANOMALY: "Anomaly detection",
+  FEDERATED_IDS: "Federated IDS",
+  RISK_GATE: "Risk gate (at access)",
+  INTEGRITY_CHECK: "Integrity check",
+  SIGNATURE_CHECK: "Signature check",
+  CONSENT_LEDGER: "Consent ledger",
+  ACCESS_CONTROL: "Access control",
+  EMERGENCY_ACCESS: "Emergency access",
+};
 
 const LEVEL_STYLE: Record<string, string> = {
   HIGH: "bg-rose-50 text-rose-700 border-rose-200",
@@ -78,6 +113,7 @@ const RESPONSE_HINT: Record<string, string> = {
   MONITOR: "No action needed — recorded for context.",
   VERIFY: "Worth a look. Confirm the activity was legitimate.",
   ESCALATE: "Investigate now. An incident record was opened.",
+  RESTRICT: "The operation was refused under the configured policy.",
 };
 
 export default function AiSecurityPage() {
@@ -85,6 +121,11 @@ export default function AiSecurityPage() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [federated, setFederated] = useState<Federated | null>(null);
+  const [policy, setPolicy] = useState<Policy | null>(null);
+  const [hubBusy, setHubBusy] = useState<"" | "submit" | "pull">("");
+  const [closing, setClosing] = useState<string | null>(null);
+  const [resolution, setResolution] = useState("");
+  const [incidentBusy, setIncidentBusy] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [fedRunning, setFedRunning] = useState(false);
@@ -105,6 +146,8 @@ export default function AiSecurityPage() {
       setIncidents(inc.incidents || []);
       setFederated(fed);
       setError("");
+      // The policy panel is informative; its absence must not hide the rest.
+      getSecurityPolicy().then(setPolicy).catch(() => setPolicy(null));
     } catch (e) {
       console.error(e);
       setError("Could not load the security layer. Check that the backend is running.");
@@ -144,6 +187,40 @@ export default function AiSecurityPage() {
       setError(e instanceof Error ? e.message : "Federated round failed.");
     } finally {
       setFedRunning(false);
+    }
+  };
+
+  const hub = async (action: "submit" | "pull") => {
+    setHubBusy(action);
+    setError("");
+    try {
+      if (action === "submit") {
+        const r = await submitToFederationHub();
+        setNotice(`Local per-role model submitted to the hub for round ${r.round_number} (${(r.roles || []).join(", ")}). ${r.note}`);
+      } else {
+        const r = await pullFromFederationHub();
+        setNotice(`Global model from hub round ${r.hub_round} (${r.real_nodes} real institutions) is now used for detection.`);
+      }
+      await load(filter);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Federation request failed.");
+    } finally {
+      setHubBusy("");
+    }
+  };
+
+  const advanceIncident = async (i: Incident, status: "Investigating" | "Closed") => {
+    setIncidentBusy(i.id);
+    setError("");
+    try {
+      await updateSecurityIncident(i.id, status, status === "Closed" ? resolution : undefined);
+      setClosing(null);
+      setResolution("");
+      await load(filter);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not update that incident.");
+    } finally {
+      setIncidentBusy(null);
     }
   };
 
@@ -215,7 +292,7 @@ export default function AiSecurityPage() {
         {[
           { label: "Actors scored", value: assessments.length, icon: Brain, tint: "text-cyan-600 bg-cyan-50" },
           { label: "Open alerts", value: openAlerts.length, icon: AlertTriangle, tint: "text-amber-600 bg-amber-50" },
-          { label: "Incidents", value: incidents.filter(i => i.status === "Open").length, icon: FileWarning, tint: "text-rose-600 bg-rose-50" },
+          { label: "Open incidents", value: incidents.filter(i => i.status !== "Closed").length, icon: FileWarning, tint: "text-rose-600 bg-rose-50" },
           { label: "Federated rounds", value: federated?.rounds_completed ?? 0, icon: Network, tint: "text-violet-600 bg-violet-50" },
         ].map((s) => (
           <div key={s.label} className="bg-white rounded-2xl shadow-sm border border-slate-100 p-4">
@@ -249,6 +326,11 @@ export default function AiSecurityPage() {
                         {a.severity}
                       </span>
                       <span className="text-xs font-mono font-bold text-slate-600">{a.response}</span>
+                      {a.source && (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-white border border-slate-200 text-slate-500">
+                          {SOURCE_LABEL[a.source] || a.source}
+                        </span>
+                      )}
                     </div>
                     <p className="text-sm text-slate-800 font-semibold mt-1.5">{a.title}</p>
                     <p className="text-sm text-slate-600 mt-1">{a.summary}</p>
@@ -370,7 +452,8 @@ export default function AiSecurityPage() {
                     {i.risk_level}
                   </span>
                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide ${
-                    i.status === "Open" ? "bg-rose-100 text-rose-700" : "bg-slate-200 text-slate-600"
+                    i.status === "Open" ? "bg-rose-100 text-rose-700"
+                      : i.status === "Investigating" ? "bg-amber-100 text-amber-800" : "bg-slate-200 text-slate-600"
                   }`}>
                     {i.status}
                   </span>
@@ -383,8 +466,59 @@ export default function AiSecurityPage() {
                 </p>
                 <p className="text-sm text-slate-600 mt-1">{i.explanation}</p>
                 <p className="text-xs text-slate-500 mt-1.5">
-                  Affected: {i.affected_resource} · Detected by {i.detection_source} · Response {i.response}
+                  Affected: {i.affected_resource} · Detected by {SOURCE_LABEL[i.detection_source] || i.detection_source} · Response {i.response}
                 </p>
+                {i.status === "Closed" ? (
+                  <p className="text-xs text-slate-600 mt-2 p-2 rounded-lg bg-white border border-slate-100">
+                    <b>Resolution</b>{i.resolved_by ? ` (${i.resolved_by})` : ""}: {i.resolution}
+                  </p>
+                ) : closing === i.id ? (
+                  <div className="mt-3 space-y-2">
+                    <label htmlFor={`resolution-${i.id}`} className="block text-xs font-bold text-slate-500">
+                      Resolution (required to close)
+                    </label>
+                    <textarea
+                      id={`resolution-${i.id}`}
+                      rows={2}
+                      maxLength={2000}
+                      value={resolution}
+                      onChange={(e) => setResolution(e.target.value)}
+                      placeholder="What was found, and what was done about it."
+                      className="w-full p-2 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-cyan-200"
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => advanceIncident(i, "Closed")}
+                        disabled={!resolution.trim() || incidentBusy === i.id}
+                        className="px-3 py-1.5 rounded-lg bg-slate-800 text-white text-xs font-bold disabled:opacity-50 flex items-center gap-1.5"
+                      >
+                        {incidentBusy === i.id && <Loader2 className="w-3.5 h-3.5 animate-spin" />} Close incident
+                      </button>
+                      <button onClick={() => { setClosing(null); setResolution(""); }}
+                              className="px-3 py-1.5 rounded-lg text-xs font-bold text-slate-600 hover:bg-white">
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex gap-2 mt-3">
+                    {i.status === "Open" && (
+                      <button
+                        onClick={() => advanceIncident(i, "Investigating")}
+                        disabled={incidentBusy === i.id}
+                        className="px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                      >
+                        Start investigation
+                      </button>
+                    )}
+                    <button
+                      onClick={() => { setClosing(i.id); setResolution(""); }}
+                      className="px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                    >
+                      Close with resolution
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -416,7 +550,18 @@ export default function AiSecurityPage() {
               <span className="text-slate-600">
                 Aggregation <b className="text-slate-800">{federated.aggregation}</b>
               </span>
+              {federated.real_nodes !== undefined && (
+                <span className="text-slate-600">
+                  Latest round <b className="text-slate-800 tabular-nums">{federated.real_nodes}</b> real
+                  {federated.simulated_nodes ? <> · <b className="tabular-nums">{federated.simulated_nodes}</b> simulated</> : null}
+                </span>
+              )}
             </div>
+            {federated.detection_baseline && (
+              <p className="text-sm text-slate-600 mb-4">
+                Detection is scoring against: <b className="text-slate-800">{federated.detection_baseline}</b>
+              </p>
+            )}
 
             {federated.nodes.length > 0 && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
@@ -443,20 +588,88 @@ export default function AiSecurityPage() {
 
             {/* Kept beside the numbers, not in a footnote: a reader who sees
                 "4 nodes" must also see that three of them are not real. */}
-            <div className="p-3 rounded-xl bg-amber-50 border border-amber-100 flex items-start gap-2.5">
-              <ShieldAlert className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
-              <p className="text-xs text-amber-800">{federated.disclosure}</p>
+            <div className={`p-3 rounded-xl border flex items-start gap-2.5 ${
+              federated.status === "LIVE_FEDERATION" ? "bg-emerald-50 border-emerald-100" : "bg-amber-50 border-amber-100"
+            }`}>
+              {federated.status === "LIVE_FEDERATION"
+                ? <ShieldCheck className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                : <ShieldAlert className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />}
+              <p className={`text-xs ${federated.status === "LIVE_FEDERATION" ? "text-emerald-800" : "text-amber-800"}`}>
+                {federated.disclosure}
+              </p>
+            </div>
+
+            {/* This hospital as a participant in another hospital's federation. */}
+            <div className="mt-4 pt-4 border-t border-slate-100">
+              <p className="text-sm font-bold text-slate-700 mb-1">This hospital as a participant</p>
+              {federated.participant?.configured ? (
+                <>
+                  <p className="text-xs text-slate-500 mb-3">
+                    Hub <span className="font-mono">{federated.participant.hub_url}</span> as{" "}
+                    <span className="font-mono">{federated.participant.node_name}</span>
+                    {federated.participant.last_pulled
+                      ? ` · last model pulled from hub round ${federated.participant.last_pulled.hub_round}`
+                      : " · no model pulled yet"}
+                  </p>
+                  <div className="flex gap-2 flex-wrap">
+                    <button onClick={() => hub("submit")} disabled={hubBusy !== ""}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-violet-200 text-violet-700 text-xs font-bold hover:bg-violet-50 disabled:opacity-50">
+                      {hubBusy === "submit" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+                      Submit local update
+                    </button>
+                    <button onClick={() => hub("pull")} disabled={hubBusy !== ""}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-violet-200 text-violet-700 text-xs font-bold hover:bg-violet-50 disabled:opacity-50">
+                      {hubBusy === "pull" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                      Pull global model
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <p className="text-xs text-slate-500">
+                  Not configured. To join another hospital&apos;s federation, set FEDERATION_HUB_URL,
+                  FEDERATION_NODE_NAME and FEDERATION_SHARED_SECRET (issued when that hospital registers
+                  this one as a peer). Only per-role medians and scales are ever sent.
+                </p>
+              )}
             </div>
           </>
         )}
       </section>
 
+      {policy && (
+        <section className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5">
+          <h2 className="text-lg font-bold text-slate-800 mb-4 pb-3 border-b border-slate-100 flex items-center gap-2">
+            <SlidersHorizontal className="w-5 h-5 text-slate-500" /> Risk decision policy
+          </h2>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+            {[
+              { label: `MEDIUM (≥ ${policy.risk_policy.thresholds.MEDIUM})`, action: policy.risk_policy.MEDIUM },
+              { label: `HIGH (≥ ${policy.risk_policy.thresholds.HIGH})`, action: policy.risk_policy.HIGH },
+              { label: "HIGH during an emergency", action: policy.risk_policy.EMERGENCY_HIGH },
+            ].map((r) => (
+              <div key={r.label} className="p-3 rounded-xl bg-slate-50 border border-slate-100">
+                <p className="text-xs text-slate-500">{r.label}</p>
+                <p className="font-bold text-slate-800 uppercase">{r.action}</p>
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-slate-500 mt-3">
+            Re-verification lasts {policy.risk_policy.step_up_minutes} min · roles need at least{" "}
+            {policy.risk_policy.min_peers} peers to be scored · break-glass limited to{" "}
+            {policy.emergency_max_per_day} per doctor per day · scheduled analysis every{" "}
+            {policy.scheduled_analysis_minutes || "—"} min · consent ledger: {policy.consent_ledger}.
+            Configured through environment variables; see backend/.env.example.
+          </p>
+        </section>
+      )}
+
       <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-sm text-slate-600">
         <p className="font-bold text-slate-700 mb-1">What this layer does not do</p>
         <p>
-          It never grants or blocks access. Authentication, role, relationship and consent
-          decide that before any of this runs. A risk score is a signal for a person to act
-          on — not a gate between a clinician and a patient&rsquo;s record.
+          It never grants access. Authentication, role, relationship and consent decide that
+          before any of this runs, and a low score cannot open a record they closed. What a
+          high score does — alert, ask the user to re-enter their password, or refuse — is the
+          configured policy above, applied after those checks, never instead of them.
         </p>
       </div>
 

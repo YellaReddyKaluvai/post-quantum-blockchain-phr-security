@@ -3,6 +3,7 @@ import { Inter } from "next/font/google";
 import "./globals.css";
 import React from "react";
 import { AuthProvider } from "@/context/AuthContext";
+import StepUpDialog from "@/components/StepUpDialog";
 
 const inter = Inter({
   variable: "--font-inter",
@@ -33,6 +34,8 @@ export default function RootLayout({
           <div className="min-h-screen flex flex-col">
             {children}
           </div>
+          {/* Password re-verification requested by the backend risk policy. */}
+          <StepUpDialog />
         </AuthProvider>
       </body>
     </html>

@@ -53,7 +53,9 @@ def test_doctor_imaging_uses_the_same_test_as_the_chart():
     for fn in (get_doctor_imaging, get_doctor_imaging_image):
         src = inspect.getsource(fn)
         assert "_doctor_patient_authorization" in src
-        assert "status_code=403" in src
+        # Refusal: a literal 403, or _deny(), which raises 403 by default and also
+    # records the refused attempt for the AI layer.
+    assert "status_code=403" in src or "_deny(" in src
 
 
 def test_doctor_imaging_list_excludes_revoked_patients():
