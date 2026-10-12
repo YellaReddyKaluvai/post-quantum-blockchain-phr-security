@@ -60,6 +60,7 @@ from app.storage_service import (
     store_encrypted_document, download_file_from_s3, storage_status, StorageError,
     ipfs_status, fetch_from_ipfs, is_ipfs_configured, IPFSError,
 )
+from app import ipfs_replication
 
 from app.audit_service import log_admin_action
 from app.anchor_service import anchor_document
@@ -4002,13 +4003,14 @@ def _decide_access_request(request_id: str, session: dict, approve: bool, note: 
 
             status = "Authorized" if approve else "Rejected"
 
-            # On approval, mint the zero-knowledge consent token (§17). Only the
-            # commitment is public; the token is encrypted at rest exactly as
-            # ML-KEM private keys are, and handed to the doctor once.
+            # On approval, mint the zero-knowledge consent token (§17) — always
+            # the post-quantum lattice scheme. Only the commitment is public; the
+            # token is encrypted at rest exactly as ML-KEM private keys are, and
+            # handed to the doctor once.
             zkp_commitment = zkp_token_enc = None
             if approve:
-                token_hex, zkp_commitment = zkp.issue_consent_token()
-                zkp_token_enc = encrypt_data(token_hex)
+                consent_token, zkp_commitment = zkp.issue_consent_token()
+                zkp_token_enc = encrypt_data(consent_token)
 
             cur.execute(
                 """UPDATE Consent
@@ -4728,9 +4730,10 @@ def get_own_adherence(session: dict = Depends(require_role("Patient"))):
 # Zero-knowledge consent proofs (spec §17)
 #
 # A doctor proves they hold the consent token the patient's approval issued,
-# without transmitting it. See app/zkp_service.py for the protocol — and for
-# the statement that this component, unlike the rest of the system, is NOT
-# post-quantum secure.
+# without transmitting it. New consents use the lattice proof in
+# app/zkp_lattice.py (Module-LWE/SIS, ML-DSA-65 parameters — post-quantum).
+# Consents approved before that switch carry Schnorr commitments; those still
+# verify, and every response says plainly that they are not post-quantum.
 #
 # This runs *alongside* the ordinary consent check rather than instead of it.
 # A proof failing does not open a record, and a proof succeeding does not open
@@ -4786,9 +4789,12 @@ def collect_consent_token(patient_id: str, session: dict = Depends(require_role(
     return {
         "consent_token": token,
         "commitment": row["zkp_commitment"],
+        "scheme": zkp.scheme_of(row["zkp_commitment"]),
+        "post_quantum_secure": zkp.is_post_quantum(row["zkp_commitment"]),
         "delivered_once": True,
         "notice": "Store this securely. The server has now discarded it and keeps only "
-                  "the public commitment.",
+                  "the public commitment. Proofs are made on your side, e.g. with "
+                  "backend/demo/zkp_prove.py, so the token never has to be sent again.",
     }
 
 
@@ -4801,18 +4807,21 @@ def request_zkp_challenge(patient_id: str = Query(...),
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                """SELECT 1 FROM Consent
+                """SELECT zkp_commitment FROM Consent
                     WHERE patient_id = %s AND subject_user_id = %s
                       AND status = 'Authorized' AND zkp_commitment IS NOT NULL""",
                 (patient_id, doctor_uuid))
-            if not cur.fetchone():
+            consent = cur.fetchone()
+            if not consent:
                 raise HTTPException(status_code=404, detail="No approved consent for this patient.")
             cur.execute(
                 """INSERT INTO ZkpChallenges (challenge, subject_user_id, patient_id)
                    VALUES (%s, %s, %s)""", (challenge, doctor_uuid, patient_id))
             conn.commit()
+    # The scheme tells the prover which kind of proof this consent expects.
     return {"challenge": challenge, "expires_in_seconds": 300,
-            "context": f"consent:{patient_id}"}
+            "context": f"consent:{patient_id}",
+            "scheme": zkp.scheme_of(consent["zkp_commitment"])}
 
 
 @app.post("/api/doctor/zkp/verify")
@@ -4842,9 +4851,10 @@ def verify_zkp_proof(body: ZkpProofRequest, session: dict = Depends(require_role
             if not consent or not consent["zkp_commitment"]:
                 raise HTTPException(status_code=404, detail="No commitment recorded for this consent.")
 
+            commitment = consent["zkp_commitment"]
             ok = zkp.verify(
-                consent["zkp_commitment"],
-                {"t": body.t, "s": body.s},
+                commitment,
+                body.as_proof(),
                 body.challenge,
                 f"consent:{ch['patient_id']}",
             )
@@ -4864,14 +4874,22 @@ def verify_zkp_proof(body: ZkpProofRequest, session: dict = Depends(require_role
                 subject_patient_id=str(ch["patient_id"]), resource="consent_proof")
             conn.commit()
 
+    post_quantum = zkp.is_post_quantum(commitment)
     return {
         "verified": ok,
+        "scheme": zkp.scheme_of(commitment),
         "proves": "knowledge of the consent token issued when this patient approved access",
         "reveals": "nothing about the token itself",
-        "post_quantum_secure": False,
-        "caveat": "Schnorr rests on discrete logarithm, which Shor's algorithm breaks. "
-                  "Unlike ML-KEM-768 and ML-DSA-65 elsewhere in this system, this "
-                  "component is not quantum-resistant.",
+        "post_quantum_secure": post_quantum,
+        "caveat": (
+            "Lattice proof (Fiat–Shamir with aborts, ML-DSA-65 parameters): rests on "
+            "Module-LWE and Module-SIS, the same assumptions as ML-DSA. Not itself a "
+            "NIST-standardised scheme."
+            if post_quantum else
+            "This consent predates the post-quantum proof and still uses Schnorr, which "
+            "rests on discrete logarithm — broken by Shor's algorithm. Ask the patient to "
+            "withdraw and re-approve to have a post-quantum token issued."
+        ),
     }
 
 
@@ -4880,10 +4898,13 @@ def get_ipfs_status(session: dict = Depends(require_role("Administrator"))):
     """Live IPFS node health, and an honest count of what is actually published.
 
     Reports 'not configured' separately from 'configured but unreachable' —
-    those need different actions from whoever is on call — and states plainly
-    that pinning on one node is not replication across the public network.
+    those need different actions from whoever is on call. When replication is
+    configured it adds, per target, how many documents are confirmed pinned,
+    still queued, or failed; without it, it says plainly that pinning on one
+    node is not replication.
     """
     status = ipfs_status()
+    configured = ipfs_replication.targets()
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -4891,9 +4912,101 @@ def get_ipfs_status(session: dict = Depends(require_role("Administrator"))):
                           COUNT(ipfs_cid) AS with_cid
                      FROM LabReports""")
             reports = cur.fetchone()
+            replicas, documents = [], set()
+            if configured or ipfs_replication.config_errors():
+                cur.execute("SELECT cid, target, status FROM IpfsReplicas")
+                replicas = cur.fetchall()
+                documents = _document_cids(cur)
     status["reports_total"] = reports["total"]
     status["reports_with_cid"] = reports["with_cid"]
+
+    status["replication"] = None
+    if configured or ipfs_replication.config_errors():
+        pinned = ipfs_replication.primary_pins() if status["connected"] else None
+        status["replication"] = ipfs_replication.summarise(
+            replicas, configured, documents & pinned if pinned is not None else None)
     return status
+
+
+def _document_cids(cur) -> set[str]:
+    """Every CID a stored document points at, across all three document tables."""
+    cur.execute(
+        """SELECT ipfs_cid FROM LabReports WHERE ipfs_cid IS NOT NULL
+           UNION SELECT ipfs_cid FROM ImagingReports WHERE ipfs_cid IS NOT NULL
+           UNION SELECT ipfs_cid FROM MedicalDocuments WHERE ipfs_cid IS NOT NULL""")
+    return {r["ipfs_cid"] for r in cur.fetchall()}
+
+
+@app.post("/api/admin/ipfs/replication/sync")
+def sync_ipfs_replication(session: dict = Depends(require_role("Administrator"))):
+    """Bring every published document up to full replication.
+
+    New documents replicate on their own as they are filed. This covers the
+    rest: documents published before replication was configured, targets added
+    since, and requests that failed. It also polls pinning services for requests
+    still queued, since a service only reports progress when asked.
+
+    Replication itself runs in the background; this returns what was started.
+    """
+    configured = ipfs_replication.targets()
+    if not configured:
+        raise HTTPException(
+            status_code=409,
+            detail="No replication targets are configured. Set IPFS_REPLICA_NODES or "
+                   "IPFS_PINNING_SERVICES." + (" " + " ".join(ipfs_replication.config_errors())
+                                              if ipfs_replication.config_errors() else ""))
+    pinned = ipfs_replication.primary_pins()
+    if pinned is None:
+        raise HTTPException(
+            status_code=503,
+            detail="The primary IPFS node cannot be reached, so there is nothing to replicate from.")
+
+    by_name = {t.name: t for t in configured}
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT cid, target, status, request_id FROM IpfsReplicas")
+            rows = cur.fetchall()
+            documents = _document_cids(cur)
+
+        # 1. Poll services about requests still in flight.
+        refreshed = []
+        for row in rows:
+            target = by_name.get(row["target"])
+            if (target and target.kind == "service" and row["request_id"]
+                    and row["status"] in ("queued", "pinning")):
+                update = ipfs_replication.refresh(target, row["request_id"])
+                if update["status"]:
+                    row["status"] = update["status"]
+                    refreshed.append({"cid": row["cid"], "target": target.name, "kind": "service",
+                                      "status": update["status"], "request_id": row["request_id"],
+                                      "error": None})
+        if refreshed:
+            ipfs_replication.record(conn, refreshed)
+
+        # 2. Ask for whatever copies are missing. A failed replica is retried; a
+        #    queued or pinned one is left alone.
+        live = {(r["cid"], r["target"]) for r in rows if r["status"] in ipfs_replication.LIVE}
+        publishable = documents & pinned
+        scheduled = 0
+        for cid in sorted(publishable):
+            missing = {name for name in by_name if (cid, name) not in live}
+            if missing:
+                ipfs_replication.schedule(cid, f"quantumcare-{cid}", only=missing)
+                scheduled += 1
+
+        log_admin_action(conn, session["user_id"], session.get("public_user_id"),
+                         "IPFS_REPLICATION_SYNC")
+        conn.commit()
+
+    return {
+        "documents_published": len(publishable),
+        # CIDs recorded while no node was running were computed, never published;
+        # they cannot be replicated until the document is re-published.
+        "documents_not_on_node": len(documents - pinned),
+        "requests_refreshed": len(refreshed),
+        "documents_scheduled": scheduled,
+        "note": "Replication runs in the background. Refresh the status to see confirmed copies.",
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4948,10 +5061,10 @@ def list_federated_peers(session: dict = Depends(require_role("Administrator")))
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                """SELECT node_name, contact_url, is_active, submissions,
+                """SELECT id, node_name, contact_url, is_active, submissions,
                           last_submission_at, created_at
                      FROM FederatedPeers ORDER BY node_name""")
-            peers = [dict(r) for r in cur.fetchall()]
+            peers = [{**r, "id": str(r["id"])} for r in cur.fetchall()]
     return {
         "peers": peers,
         "total": len(peers),
@@ -4959,6 +5072,33 @@ def list_federated_peers(session: dict = Depends(require_role("Administrator")))
         "note": "Peers listed here are real remote institutions. The simulated nodes that "
                 "appear in a federated round are separate and always flagged as simulated.",
     }
+
+
+@app.post("/api/admin/federated/peers/{peer_id}/{action}")
+def set_federated_peer_active(peer_id: str, action: str,
+                              session: dict = Depends(require_role("Administrator"))):
+    """Suspend or reinstate a peer.
+
+    A suspended peer's submissions are refused with 403, which is how a
+    compromised or departed institution is cut off without losing its history.
+    Its parameters already in past rounds stay, as the record of what was used.
+    """
+    states = {"deactivate": False, "activate": True}
+    if action not in states:
+        raise HTTPException(status_code=400, detail="Action must be 'activate' or 'deactivate'.")
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "UPDATE FederatedPeers SET is_active = %s WHERE id = %s RETURNING node_name",
+                (states[action], peer_id))
+            peer = cur.fetchone()
+            if not peer:
+                raise HTTPException(status_code=404, detail="Peer not found.")
+            log_admin_action(conn, session["user_id"], session.get("public_user_id"),
+                             "FEDERATED_PEER_ACTIVATED" if states[action] else "FEDERATED_PEER_DEACTIVATED",
+                             details={"node_name": peer["node_name"]})
+            conn.commit()
+    return {"node_name": peer["node_name"], "is_active": states[action]}
 
 
 @app.post("/api/federated/submit")

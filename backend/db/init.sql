@@ -84,32 +84,27 @@ CREATE TABLE IF NOT EXISTS AuthLogs (
 );
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- DEPRECATED — MedicalRecords is not used by any code path (0 references in
--- backend/, 0 rows). It predates the current design and its 'Firestore'
--- storage default is from an abandoned backend.
---
--- Superseded by:
+-- REMOVED — MedicalRecords. No code path ever read or wrote it; it predated the
+-- current design (its 'Firestore' storage default came from an abandoned
+-- backend). Superseded by:
 --   LabReports       — lab results, with the full hybrid-encryption columns
 --   ImagingReports   — imaging studies, same protection
 --   MedicalDocuments — doctor-authored documents
 --
--- Left in place rather than dropped so an existing deployment is not altered
--- unilaterally. Safe to remove once the team agrees; nothing reads it.
+-- New databases never create it. An existing one has it dropped only while it
+-- is empty: a deployment that somehow holds rows there keeps them, and gets a
+-- notice instead, so nothing is destroyed without a person deciding to.
 -- ─────────────────────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS MedicalRecords (
-    Medical_Record_ID UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    Patient_ID UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
-    Uploaded_By UUID REFERENCES Users(id) ON DELETE SET NULL,
-    Record_Type VARCHAR(120) NOT NULL,
-    Storage_Provider VARCHAR(40) NOT NULL DEFAULT 'Firestore',
-    Storage_Reference TEXT NOT NULL,
-    Encrypted_Key_Reference TEXT NOT NULL,
-    Key_Version INTEGER NOT NULL DEFAULT 1,
-    Blockchain_Tx_Hash VARCHAR(255),
-    Consent_Required BOOLEAN NOT NULL DEFAULT TRUE,
-    Created_At TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    Updated_At TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+DO $$
+BEGIN
+    IF to_regclass('medicalrecords') IS NOT NULL THEN
+        IF NOT EXISTS (SELECT 1 FROM MedicalRecords) THEN
+            DROP TABLE MedicalRecords;
+        ELSE
+            RAISE NOTICE 'MedicalRecords holds rows, so it was kept. Nothing reads it; migrate and drop it by hand.';
+        END IF;
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS Consent (
     Consent_ID UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -343,7 +338,6 @@ CREATE INDEX IF NOT EXISTS idx_appointments_date ON Appointments(appointment_dat
 CREATE INDEX IF NOT EXISTS idx_users_role ON Users(role);
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON Sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_auditlogs_user_id ON AuthLogs(user_id);
-CREATE INDEX IF NOT EXISTS idx_records_patient_id ON MedicalRecords(Patient_ID);
 CREATE INDEX IF NOT EXISTS idx_consent_patient_subject ON Consent(Patient_ID, Subject_User_ID);
 
 -- Email Notifications
@@ -677,3 +671,21 @@ CREATE TABLE IF NOT EXISTS FederatedPeers (
     submissions INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ─── IPFS replication ────────────────────────────────────────────────────────
+-- One row per (CID, target): the latest state that target itself reported.
+-- 'queued' and 'pinning' are requests, not copies; only 'pinned' counts towards
+-- the replication factor. A failed target keeps its error for whoever is on call.
+CREATE TABLE IF NOT EXISTS IpfsReplicas (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    cid VARCHAR(255) NOT NULL,
+    target VARCHAR(255) NOT NULL,
+    target_kind VARCHAR(20) NOT NULL CHECK (target_kind IN ('node', 'service')),
+    status VARCHAR(20) NOT NULL CHECK (status IN ('queued', 'pinning', 'pinned', 'failed')),
+    request_id VARCHAR(255),          -- pinning-service request, polled for progress
+    error TEXT,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (cid, target)
+);
+CREATE INDEX IF NOT EXISTS idx_ipfs_replicas_status ON IpfsReplicas(status);

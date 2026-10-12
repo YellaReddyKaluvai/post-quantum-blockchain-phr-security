@@ -79,8 +79,11 @@ refused before it reaches the database.
 
 A doctor can prove to a third party that a patient consented **without
 revealing** the patient identifier, the doctor identifier, or the consent
-record. Implemented as a Schnorr-style non-interactive proof over a
-challenge–response, with challenges single-use to prevent replay.
+record. Implemented as a lattice proof of knowledge — Fiat–Shamir with aborts
+under Module-LWE/SIS with ML-DSA-65 parameters, so it is post-quantum — bound
+to a single-use server challenge to prevent replay. Consents approved before
+the switch keep their original Schnorr commitment, which still verifies and is
+reported as not post-quantum.
 
 ## Emergency access
 

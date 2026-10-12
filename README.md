@@ -21,7 +21,8 @@ The design rule throughout: *the system never claims a protection it did not act
 - **Automated Public ID Generation**: Issues sequential identifiers (`PAT-2026-000001`, `DOC-2026-000001`, `LAB-2026-000001`, `NUR-2026-000001`).
 - **User Management & Role Access Control**: Active user toggles, status management, and permissions.
 - **Cryptographic Key Center**: Live counts of issued ML-KEM / ML-DSA keypairs and active cryptographic identities.
-- **Infrastructure Health**: Live blockchain and cloud-storage status — chain connectivity and block height, the **on-chain vs locally-simulated** anchor split, and how many reports actually have a cloud copy. Built to surface problems rather than imply everything is fine.
+- **Infrastructure Health**: Live blockchain, cloud-storage and IPFS status — chain connectivity and block height, the **on-chain vs locally-simulated** anchor split, how many reports actually have a cloud copy, and per replication target how many documents are confirmed pinned, still queued or failed. Built to surface problems rather than imply everything is fine.
+- **Federation Peers**: Register a peer institution (its HMAC secret is shown once), and suspend or reinstate it; a suspended peer's submissions are refused.
 - **Emergency Access Review**: Every break-glass declaration with its verbatim clinical reason, both parties, expiry and on-chain transaction hash. Active declarations are surfaced first.
 - **AI Security**: Behavioural anomaly detection over record access — alerts to work, risk scores with the attribution that produced them, incident records, and the federated IDS panel with its honesty disclosure beside the node count.
 - **Audit Log**: Every administrative action, report access and download, with search and pagination.
@@ -179,7 +180,7 @@ treating is the kind of obstruction clinicians route around. A doctor with no
 relationship has no implicit access at all.
 
 The doctor can later prove they hold the consent token **without sending it**
-(Schnorr NIZK). That proof neither opens nor closes a record; it evidences that
+(a post-quantum lattice zero-knowledge proof). That proof neither opens nor closes a record; it evidences that
 the party presenting it is the one the patient approved.
 
 ### 6. Patient → appointment → Doctor
@@ -259,24 +260,21 @@ listed as not built.
 | Consent management | ✅ | Revoking a doctor genuinely blocks reads — the same report returns 200 before and 404 after |
 | Doctor access requests | ✅ | Doctor requests with a stated purpose → patient approves or declines → the backend enforces it. Verified: no request 403, pending 403, rejected 403, approved 200 |
 | AI security layer | ✅ | Anomaly detection, XAI, alerts, incidents. Peers can register and submit signed parameters for real |
-| Zero-knowledge consent proof | ✅ | Schnorr NIZK — genuine, though **not** post-quantum. See its own section |
+| Zero-knowledge consent proof | ✅ | **Post-quantum**: lattice proof (Fiat–Shamir with aborts, ML-DSA-65 parameters). Consents approved before the switch keep their Schnorr commitment, which still verifies and is reported as *not* post-quantum. See its own section |
 | IPFS publishing | ✅ | Really pinned to a running kubo node; joins the recovery chain behind the database and S3 |
+| IPFS replication | 🟡 | Copies on other IPFS nodes and/or Pinning-Service-API providers; only copies a target confirms count. Unit-tested against a scripted HTTP fake — **not yet run against a real second node or pinning service** |
+| Federation peer admin screen | 🟡 | Register a peer (secret shown once), suspend, reinstate. Rendered and exercised against sample data — **not yet against a live backend** |
 | Medication adherence | ✅ | Refusals and misses reach the prescriber and the patient, not only a percentage |
 | Emergency break-glass access | ✅ | Time-boxed override, patient notified immediately, anchored on-chain, reviewable by an admin |
-| Automated tests | ✅ | 203 tests, mutation-checked; weighted toward refusals |
+| Automated tests | ✅ | 263 tests, mutation-checked; weighted toward refusals |
 
-### Imaging: encrypted but unreachable
-
-Imaging studies receive the full hybrid pipeline and the patient is notified
-that a study is ready — but **no patient or doctor endpoint exists to open one**.
-Only the uploading technician can view it. The protection is real; the delivery
-is missing. Listed below rather than counted as complete.
+🟡 = built and tested in isolation, still to be verified on the running system.
 
 ---
 
 ## ⚠️ Incomplete Workflows
 
-Flows that start but do not finish. Five were closed in this pass; what remains
+Flows that start but do not finish. Nine have been closed so far; what remains
 is listed honestly rather than quietly dropped.
 
 ### Closed
@@ -288,23 +286,24 @@ is listed honestly rather than quietly dropped.
 | **Appointment outcome → patient** | Accept, complete and cancel notified nobody, so a cancelled appointment was one the patient turned up for. | Every outcome reaches the patient |
 | **Lab request → laboratory** | The only role in the system not told when work arrived for it. | All technicians notified, priority marked |
 | **Report reviewed → patient** | The moment the patient is really waiting for went unannounced. | Patient told a clinician has read their result |
+| **Post-quantum ZKP** | The consent proof was Schnorr, which Shor's algorithm breaks. | New consents get a lattice proof under Module-LWE/SIS; old Schnorr commitments still verify and are labelled not post-quantum |
+| **IPFS replication** | Content was pinned on one node only. | Each new CID is replicated in the background to configured replica nodes and pinning services; an admin can backfill and retry from the Security page |
+| **Peer registration UI** | Peers could only be registered by API call. | Admin → Federation Peers: register (secret shown once), suspend, reinstate |
+| **`MedicalRecords` table** | Dead schema, never read or written. | No longer created; dropped from existing databases only while empty |
 
 ### Still open
 
 | # | Workflow | Where it stops |
 |---|---|---|
-| 1 | **Post-quantum ZKP** | The zero-knowledge proof is Schnorr — genuine, but classically secure only. See below. |
-| 2 | **Public IPFS replication** | Content is really pinned, but on one node. That is not replication across the public network. |
-| 3 | **Peer registration UI** | `/api/admin/federated/peers` works; there is no admin screen for it yet, so peers are registered by API call. |
+| 1 | **Live verification of replication** | Tested against a scripted fake only. Needs a run with a real second kubo node (`IPFS_REPLICA_NODES`) or a pinning-service account (`IPFS_PINNING_SERVICES`). |
+| 2 | **ZKP prover in the browser** | Proofs are made on the doctor's side with `backend/demo/zkp_prove.py`; the web UI has no prover, because the token must never be sent to the server to make one. |
 
 ### Not implemented
 
 | Area | Status |
 |---|---|
-| **Post-quantum ZKP** | The Schnorr proof below is real but rests on discrete logarithm, which Shor's algorithm breaks. A quantum-resistant proof system (hash-based STARKs, lattice-based proofs) is not implemented. |
 | **Multi-hospital federation** | Real peers can now register and submit signed parameters, and displace the simulated nodes when they do. Simulated peers remain only as the fallback when nobody has federated yet. |
-| **Public IPFS replication** | Content is genuinely pinned to a running node — real CIDs, real blocks, real retrieval — but on one node, which is not the same as replication across the public network. |
-| `MedicalRecords` table | Dead schema — 0 references, 0 rows. Marked deprecated in `init.sql` and left in place rather than dropped unilaterally; safe to remove once the team agrees. |
+| **Standardised post-quantum ZKP** | The lattice proof uses ML-DSA-65's parameters and assumptions, but the construction itself (Lyubashevsky's, uncompressed) is not a NIST standard and has not been independently reviewed. |
 
 > On AI: the security layer performs **behavioural anomaly detection**, not
 > clinical prediction. It never reads medical content and never makes a
@@ -450,15 +449,45 @@ be had is an error rather than empty data. The admin status endpoint reports
 *not configured* separately from *configured but unreachable* — those need
 different actions from whoever is on call.
 
-> **Scope.** Pinning on one node is real IPFS but it is not replication. Content
-> is reachable while that node runs and is dialable; it is not spread across the
-> public network. The status endpoint says exactly this rather than implying
-> global availability.
-
 ```bash
 export IPFS_PATH=~/devtools/ipfs-repo
 ~/devtools/kubo/ipfs daemon --enable-gc
 ```
+
+### Replication
+
+Pinning on one node is real IPFS but it is not resilience: content is reachable
+only while that node runs and is dialable. Replication keeps further copies
+elsewhere, using either or both of:
+
+| Target | Configure | How a copy is made |
+|---|---|---|
+| Other IPFS nodes — a second site, a teammate's node, a cloud VM | `IPFS_REPLICA_NODES=http://host-a:5001,http://host-b:5001` | The replica is dialled to this node (`swarm/connect`), then asked to `pin/add` the CID; bitswap moves the blocks. Confirmed synchronously |
+| Pinning services — any provider of the [IPFS Pinning Service API](https://ipfs.github.io/pinning-services-api-spec/) (Pinata, Filebase, 4EVERLAND, …) | `IPFS_PINNING_SERVICES='[{"name":"pinata","endpoint":"https://api.pinata.cloud/psa","token":"…"}]'` | The CID is submitted with this node's addresses as origins; the service fetches it and reports `queued` → `pinning` → `pinned` |
+
+```
+document filed ─► pinned on this node ─► background job ─► each target ─► IpfsReplicas row
+                                                                          (status the target reported)
+```
+
+- **Only confirmed copies count.** A request a service has merely queued is
+  recorded as `queued`, not as a copy; an unreachable target is `failed` with its
+  error. The admin Security page shows, per target, how many CIDs are pinned,
+  in progress and failed, and the fewest copies any document has.
+- **Never blocks a clinician.** Replication runs in a background thread after
+  the report is saved. A slow or broken target costs nothing at filing time.
+- **Backfill and retry.** *Admin → Security → Replicate missing copies* (or
+  `POST /api/admin/ipfs/replication/sync`) polls services about queued requests
+  and requests copies for every published document a target does not yet hold.
+  CIDs recorded while no node was running were never published and are skipped.
+- **Only ciphertext**, as before — the same bytes the primary node already
+  serves to anyone with the CID. Service tokens are never returned by any
+  endpoint.
+
+> **Status.** Tested against a scripted HTTP fake (17 tests: confirmed vs queued,
+> one failing target not stopping the others, a failed status check not
+> downgrading a pin, malformed configuration reported). It has not yet been run
+> against a real second node or a real pinning service.
 
 ---
 
@@ -466,42 +495,73 @@ export IPFS_PATH=~/devtools/ipfs-repo
 
 When a patient approves an access request, the system issues the doctor a secret
 **consent token**. To exercise that access the doctor proves they know the token
-— without ever sending it.
+— without ever sending it. The proof is **post-quantum**: it rests on the same
+lattice problems as ML-DSA-65 rather than on discrete logarithm.
 
 ```
-patient approves  →  token x issued once   ·   commitment y = g^x stored
+patient approves  →  token ξ issued once
+                     A = ExpandA(ρ),  s1, s2 short (from ξ)
+                     commitment (ρ, t = A·s1 + s2) stored
                             │
-doctor proves     →  t = g^r     r fresh, never reused
-                     c = H(g, y, t, challenge, context)
-                     s = r + c·x
+doctor proves     →  y fresh,  w = A·y1 + y2
+                     c = H(t, w, challenge, context)
+                     z = y + c·s      abort and retry unless ‖z‖∞ < γ1 − β
                             │
-server verifies   →  g^s  ==  t · y^c        token never transmitted
+server verifies   →  ‖z‖∞ < γ1 − β   and   c == H(t, A·z1 + z2 − c·t, …)
+                                              token never transmitted
 ```
 
-Schnorr's identification protocol made non-interactive with Fiat–Shamir — the
-canonical zero-knowledge proof of knowledge of a discrete logarithm.
+Lyubashevsky's identification scheme made non-interactive with Fiat–Shamir
+"with aborts" — the construction ML-DSA itself is built on — over
+Z_q[X]/(X²⁵⁶+1) with ML-DSA-65's parameters (q = 8 380 417, 6×5 matrix,
+η = 4, τ = 49, γ1 = 2¹⁹). Code: [`zkp_lattice.py`](backend/app/zkp_lattice.py).
+
+- **Hiding the token** is Module-LWE; **forging a proof** yields a Module-SIS
+  solution of the same shape and order of bound as in ML-DSA-65's analysis.
+- **Zero-knowledge comes from the abort.** z = y + c·s alone would leak s; keeping
+  only z inside the smaller box makes every accepted z uniform whatever s is.
+  `simulate_transcript` makes this executable — it produces accepting transcripts
+  with no secret at all, and a test checks they verify.
+- **Size and speed:** commitment 4.4 KB, proof 7 KB; about 0.1 s to prove and
+  0.04 s to verify in pure Python. Nothing is compressed (no HighBits or hint),
+  so it is larger than an ML-DSA signature but short enough to read line by line.
 
 **What it buys.** After issuance the secret never crosses the wire again, and a
 full database compromise yields only commitments, which are public by
-construction. An attacker who reads every row still cannot produce a valid proof.
+construction. An attacker who reads every row still cannot produce a valid proof
+— now including one with a quantum computer.
 
-**Verified by test:** an honest prover is accepted; the wrong token, a replayed
-challenge, a proof reused against a different patient, a tampered response, and a
-value outside the prime-order subgroup are all refused. The token appears nowhere
-in the transmitted proof.
+**Verified by test (43):** the NTT agrees with schoolbook multiplication; an honest
+prover is accepted; the wrong token, another commitment, a replayed challenge, a
+proof for a different patient, a tampered response or challenge hash, a response
+on the norm bound, and a long "solution" that satisfies the equation are all
+refused; malformed input returns false rather than crashing; the token appears in
+neither proof nor commitment. Three deliberate mutations — no abort, no norm check
+in the verifier, context dropped from the hash — each make a test fail.
 
-> ### ⚠️ This one component is not post-quantum secure
+**Making a proof.** The token never goes back to the server, so proofs are made
+where it is kept:
+
+```bash
+# token from GET /api/doctor/consent-token/{patient_id} (delivered once)
+# challenge + context from POST /api/doctor/zkp/challenge?patient_id=...
+QUANTUMCARE_CONSENT_TOKEN="mlwe1:…" python demo/zkp_prove.py \
+    --challenge <challenge> --context "consent:<patient_id>" > proof.json
+# then POST proof.json to /api/doctor/zkp/verify
+```
+
+> ### Honest limits
 >
-> Schnorr rests on the hardness of discrete logarithm, which **Shor's algorithm
-> breaks**. Everything else here — ML-KEM-768, ML-DSA-65 — was chosen precisely
-> to resist that attack; this module is the exception, and saying so is the
-> point. A quantum adversary who recovered `x` from `y` could forge consent
-> proofs, though they still could not decrypt any record: confidentiality does
-> not depend on this module.
->
-> It is included because a working, textbook-correct ZKP is worth more than an
-> empty interface. Post-quantum zero-knowledge exists, but implementing one
-> correctly is research-grade work and a broken one would be far worse than none.
+> - The construction uses ML-DSA-65's parameters and assumptions, but it is not
+>   itself a NIST-standardised scheme, and this implementation has not been
+>   independently reviewed.
+> - Python big-integer arithmetic is not constant-time. Only the prover handles
+>   the secret, and it runs on the doctor's side; the server only verifies public
+>   values.
+> - Consents approved **before** the switch carry Schnorr commitments. Those
+>   still verify — every response then says `post_quantum_secure: false` and
+>   explains why — until the patient withdraws and re-approves, which issues a
+>   lattice token. Confidentiality never depended on this module either way.
 
 The proof runs **alongside** the ordinary consent check, never instead of it. A
 proof failing does not open a record, and a proof succeeding does not open one
@@ -624,7 +684,8 @@ activity on its first run. 15 tests.
 | **Key Encapsulation** | **ML-KEM (Kyber-768)** | Post-Quantum Key Encapsulation (FIPS 203) for payload AES keys |
 | **Digital Signatures** | **ML-DSA (Dilithium-3)** | Post-Quantum Digital Signature (FIPS 204) for document authenticity |
 | **Cloud Storage** | **AWS S3** | Resilient cloud storage bucket (`postquantumcryptography`) |
-| **Content Addressing** | **CIDv0 (IPFS multihash format)** | Deterministic fingerprint of the encrypted document. Computed locally — **not** published to the IPFS network |
+| **Content Addressing** | **IPFS (CIDv0)** | The encrypted document is pinned on this hospital's node when one is configured, and replicated to further nodes or pinning services when those are configured; otherwise a CID is computed locally and nothing is published |
+| **Consent Proof** | **Lattice ZKP (Module-LWE/SIS, ML-DSA-65 parameters)** | A doctor proves they hold the consent token without sending it; post-quantum. Pre-switch consents keep a Schnorr proof, reported as not post-quantum |
 | **Integrity Anchoring** | **Ethereum (`PHR.sol`)** | Document digests committed on-chain via `DocumentAnchors`; falls back to a labelled local anchor when no chain is reachable |
 | **Access Auditing** | **PostgreSQL** | Every read, download and admin action recorded in `AdminAuditLogs` / `AuthLogs` |
 | **Consent Enforcement** | **PostgreSQL + RBAC** | A patient's revocation is checked on every doctor-facing read, so withdrawal actually blocks rather than merely records |
@@ -707,8 +768,9 @@ cd backend
 python3 -m pytest
 ```
 
-203 tests, no database or running server required — they exercise pure functions
-so they fail for exactly one reason.
+263 tests, no database or running server required — they exercise pure functions
+so they fail for exactly one reason. Without liboqs the post-quantum pipeline tests
+skip (they never pass vacuously), as do the live-IPFS-node tests without a node.
 
 What they cover, and why these specific assertions: every test asserts a
 *refusal* as well as a success, because a happy-path-only suite would pass
@@ -721,6 +783,8 @@ codebase previously shipped one.
 | `test_storage_and_anchoring.py` | A failed upload records no object key; a failed download raises instead of returning placeholder bytes; placeholder credentials read as *unconfigured*; an unreachable chain yields a clearly-labelled local anchor |
 | `test_clinical_validation.py` | Impossible vitals (SpO₂ 990%) are rejected while abnormal-but-real ones (SpO₂ 88%) are accepted; past appointment dates are refused; break-glass demands a substantive reason and a bounded duration |
 | `test_rbac_parity.py` | The backend permission matrix and the frontend IAM map cannot drift apart |
+| `test_zkp_lattice.py` | Ring arithmetic matches a schoolbook reference; every forgery, replay, cross-patient and cross-scheme proof is refused; the abort and the verifier's norm check each hold on their own |
+| `test_ipfs_replication.py` | A queued request is never counted as a copy; one failing target does not stop the rest; a failed status check does not downgrade a pin; service tokens never appear in a report |
 
 The suite was checked by mutation: reintroducing three real past bugs — a
 signature verifier that always returned true, an upload that recorded a key it
