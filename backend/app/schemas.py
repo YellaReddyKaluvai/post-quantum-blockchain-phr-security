@@ -1,5 +1,5 @@
 from datetime import datetime, date
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 # Roles a member of the public may request during self-registration.
@@ -776,10 +776,31 @@ class AccessRequestRecord(BaseModel):
 
 
 class ZkpProofRequest(BaseModel):
-    """A Schnorr proof: the commitment t and the response s, both hex."""
+    """A consent proof, in one of two shapes.
+
+    * ``mlwe-v1`` (post-quantum, issued for every new consent): ``proof`` is the
+      base64 lattice proof, 7 072 bytes decoded.
+    * ``schnorr-v1`` (legacy): ``t`` and ``s``, both hex. A request with no
+      ``scheme`` is read as Schnorr so clients written before the switch work.
+    """
     challenge: str = Field(..., min_length=8, max_length=64)
-    t: str = Field(..., min_length=1, max_length=1024)
-    s: str = Field(..., min_length=1, max_length=1024)
+    scheme: Literal["mlwe-v1", "schnorr-v1"] = "schnorr-v1"
+    proof: Optional[str] = Field(default=None, min_length=1, max_length=10_000)
+    t: Optional[str] = Field(default=None, min_length=1, max_length=1024)
+    s: Optional[str] = Field(default=None, min_length=1, max_length=1024)
+
+    @model_validator(mode="after")
+    def _fields_match_scheme(self):
+        if self.scheme == "mlwe-v1" and not self.proof:
+            raise ValueError("A post-quantum proof needs the 'proof' field.")
+        if self.scheme == "schnorr-v1" and not (self.t and self.s):
+            raise ValueError("A Schnorr proof needs both 't' and 's'.")
+        return self
+
+    def as_proof(self) -> dict:
+        if self.scheme == "mlwe-v1":
+            return {"scheme": self.scheme, "proof": self.proof}
+        return {"scheme": self.scheme, "t": self.t, "s": self.s}
 
 
 class RegisterPeerRequest(BaseModel):

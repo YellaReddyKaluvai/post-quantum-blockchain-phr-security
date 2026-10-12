@@ -85,7 +85,11 @@ def test_status_reports_a_live_node():
     if not s["connected"]:
         pytest.skip("configured but not running")
     assert s["peer_id"]
-    assert "not the same as being replicated" in s["scope"]
+    from app import ipfs_replication
+    if ipfs_replication.is_configured():
+        assert "replicated to the targets" in s["scope"]
+    else:
+        assert "not the same as being replicated" in s["scope"]
 
 
 @needs_node

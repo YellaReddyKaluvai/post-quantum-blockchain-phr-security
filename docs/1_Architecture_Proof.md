@@ -17,7 +17,7 @@ flowchart TB
         A[Admin Portal]
     end
 
-    subgraph API["Application — FastAPI, 125 REST endpoints"]
+    subgraph API["Application — FastAPI, 127 REST endpoints"]
         AUTH[Identity &amp; RBAC]
         CONSENT[Consent &amp; Access Requests]
         CLIN[Clinical Records]
@@ -83,15 +83,18 @@ only after that decision and cannot feed back into it.
 
 | Path | Responsibility |
 |---|---|
-| `backend/app/main.py` | 125 REST endpoints, request handling, authorization |
+| `backend/app/main.py` | 127 REST endpoints, request handling, authorization |
 | `backend/app/crypto_service.py` | ML-KEM / ML-DSA / AES-GCM primitives |
 | `backend/app/security.py` | Argon2id, column encryption, session tokens |
 | `backend/app/rbac.py` | Role requirements per endpoint |
 | `backend/app/storage_service.py` | S3 upload/download, IPFS publish/fetch |
+| `backend/app/ipfs_replication.py` | Replicating published CIDs to other IPFS nodes and pinning services |
 | `backend/app/anchor_service.py` | On-chain anchoring and verification |
 | `backend/app/ai_security.py` | Anomaly detection, XAI, FedAvg |
-| `backend/app/zkp_service.py` | Zero-knowledge consent proofs |
+| `backend/app/zkp_service.py` | Zero-knowledge consent proofs — picks the scheme from the stored commitment |
+| `backend/app/zkp_lattice.py` | Post-quantum lattice proof (Fiat–Shamir with aborts, ML-DSA-65 parameters) |
+| `backend/app/zkp_schnorr.py` | Legacy Schnorr proof, kept so pre-switch commitments still verify |
 | `backend/app/lab_catalog.py` | 9 lab panels — drives both form and PDF |
 | `backend/db/init.sql` | 30-table schema |
 | `contracts/PHR.sol` | Integrity anchor contract |
-| `frontend/src/app/dashboard/*` | Five role portals, 50 pages |
+| `frontend/src/app/dashboard/*` | Five role portals, 51 pages |
