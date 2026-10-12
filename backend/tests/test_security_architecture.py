@@ -476,3 +476,57 @@ def test_clinician_reads_pass_the_risk_gate(endpoint):
 
 def test_failed_sign_ins_reach_the_ai_layer():
     assert "secresp.failed_login" in _src("login")
+
+
+# ═══ Audit and telemetry survive a non-IP client address ═════════════════════
+
+@pytest.mark.parametrize("value,expected", [
+    ("127.0.0.1", "127.0.0.1"), ("::1", "::1"), (" 10.0.0.7 ", "10.0.0.7"),
+    ("testclient", None), ("unix:/run/app.sock", None), ("", None), (None, None)])
+def test_only_real_addresses_reach_inet_columns(value, expected):
+    from app.audit_service import inet_or_none
+    assert inet_or_none(value) == expected
+
+
+def test_security_event_drops_a_non_ip_host_instead_of_the_event():
+    cur = FakeCursor()
+    aisec.record_security_event(cur, actor_id="a1", event_type="RECORD_ACCESS",
+                                ip_address="testclient")
+    (sql, params), = cur.executed
+    assert "INSERT INTO SecurityEvents" in sql and params[6] is None
+
+
+def test_a_failed_audit_insert_cannot_abort_the_callers_transaction():
+    from app.audit_service import log_admin_action
+
+    class Savepoint:
+        rolled_back = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, *_):
+            Savepoint.rolled_back = exc_type is not None
+            return False
+
+    class FailingCursor(FakeCursor):
+        def execute(self, sql, params=None):
+            raise RuntimeError("insert failed")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    class Conn(FakeConnection):
+        def cursor(self):
+            return FailingCursor()
+
+        def transaction(self):
+            return Savepoint()
+
+    conn = Conn()
+    log_admin_action(conn, "a1", "ADM-1", "TEST_ACTION", ip_address="testclient")
+    assert Savepoint.rolled_back           # the failure stayed inside the savepoint
+    assert conn.commits == 0
