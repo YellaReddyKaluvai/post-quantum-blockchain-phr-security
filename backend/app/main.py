@@ -41,7 +41,7 @@ from app.schemas import (
     NursePatientDetail,
     StepUpRequest, IncidentUpdateRequest,
 )
-from app.config import get_settings
+from app.config import configuration_warnings, get_settings
 from app.database import get_db, init_db
 from app.security import (
     hash_password, verify_password, encrypt_data, decrypt_data,
@@ -104,6 +104,8 @@ def handle_malformed_identifier(request: Request, exc: psycopg.errors.InvalidTex
 
 @app.on_event("startup")
 def on_startup():
+    for warning in configuration_warnings(get_settings()):
+        logger.warning("INSECURE CONFIGURATION: %s", warning)
     init_db()
     _start_background_analysis()
 
@@ -4667,6 +4669,7 @@ def get_security_policy(session: dict = Depends(require_role("Administrator"))):
         "federation_participant": {"configured": federation.is_configured(),
                                    "hub_url": s_["hub_url"], "node_name": s_["node_name"]},
         "consent_ledger": "on-chain" if _chain_reachable() else "database only (chain unreachable)",
+        "configuration_warnings": configuration_warnings(get_settings()),
     }
 
 

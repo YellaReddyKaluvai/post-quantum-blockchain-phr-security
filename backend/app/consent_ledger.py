@@ -14,8 +14,9 @@ the property a database alone cannot give: an administrator with SQL access can
 rewrite a row, but not a mined transaction.
 
 What goes on-chain: two pseudonymous references and a boolean. The references
-are HMAC-SHA256 over the internal user id with the server's secret, so the
-public ledger cannot be joined back to a person without that secret.
+are HMAC-SHA256 over the internal user id with CONSENT_LEDGER_KEY, so the
+public ledger cannot be joined back to a person without that key. It is a key
+of its own, not the session key, so rotating sessions never breaks verification.
 
 Honest limits
 -------------
@@ -55,7 +56,7 @@ _cache_lock = threading.Lock()
 
 def party_ref(user_id: str) -> str:
     """Pseudonymous on-chain reference for one party to a consent."""
-    secret = get_settings().SECRET_KEY.encode("utf-8")
+    secret = get_settings().CONSENT_LEDGER_KEY.encode("utf-8")
     return hmac.new(secret, f"consent-party:{user_id}".encode("utf-8"),
                     hashlib.sha256).hexdigest()[:32]
 
