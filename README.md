@@ -195,21 +195,28 @@ Patient books (past dates and unknown doctors refused at the schema)
 ### 7. Consent and break-glass
 
 ```
-Patient revokes a doctor's access
-      → Consent row → every doctor-facing read now returns 404
-      → CONSENT_REVOKED notification to the doctor
+Patient approves / withdraws a doctor's access
+      → Consent row  +  PHR.sol updateConsent()   (pseudonymous refs, when a chain is up)
+      → every doctor-facing read checks the row; a read that rests on consent
+        also asks the contract (checkConsent) — disagreement refuses access
+        and opens a CONSENT_LEDGER_MISMATCH incident
+      → CONSENT_* notification to the doctor
 
-Doctor declares emergency access (substantive reason required, ≤24h)
-      → overrides the revocation
+Doctor declares emergency access
+      → re-enters their password                    (identity verification)
+      → at most EMERGENCY_MAX_PER_DAY per doctor     (rate limit)
+      → scored by the AI risk gate, emergency policy
+      → overrides the withdrawal, time-boxed ≤24h
       → EMERGENCY_ACCESS notification to the patient immediately
-      → written to the admin audit log
-      → anchored on-chain so it cannot be quietly removed
-      → Administrator reviews it in Emergency Access
+      → anchored on-chain + PHR.sol emergencyAccess()
+      → compliance incident opened automatically for review
 ```
 
-Break-glass is deliberately **not** gated on approval — waiting for a second
-party in an emergency defeats the purpose. The control is accountability, not
-prevention.
+Break-glass is deliberately **not** gated on a second person's approval —
+waiting for one in an emergency defeats the purpose. It is not a silent bypass
+either: identity is re-verified, frequency is limited, behaviour is scored, the
+patient is told, and every override becomes a compliance record someone must
+close with a resolution.
 
 ### 8. Everything is audited
 
@@ -220,20 +227,26 @@ Every login attempt
       → AuthLogs
 Every finalised document, consent decision and break-glass declaration
       → DocumentAnchors + on-chain transaction
+Every sign-in, read, refusal, consent decision, upload and failed check
+      → SecurityEvents (the AI layer's input — metadata only, never content)
 ```
 
-### 9. Every action feeds the AI security layer
+### 9. Every access passes the security layer
 
 ```
-action already permitted by auth + RBAC + consent
-      → SecurityEvent emitted   (behavioural metadata only, never content)
-      → scored against a baseline of the actor's OWN role
-      → risk + per-feature explanation
-      → LOW monitor · MEDIUM verify · HIGH escalate → incident record
+authenticated → RBAC → relationship / consent (+ on-chain consent check)
+      → AI risk gate: this actor, scored now against their role's baseline
+          (the federated model when real institutions built one, else local)
+      → LOW allow · MEDIUM monitor · HIGH re-enter password     ← configurable
+      → release: decrypt → digest check → ML-DSA signature check
+          (a failure withholds the record and opens an incident)
+      → SecurityEvent → scheduled anomaly analysis → alerts → incidents
 ```
 
-The layer runs **after** the access decision and never feeds back into it. It
-can raise an alarm about a read; it cannot authorise or prevent one.
+The gate only ever makes access stricter: a low score cannot open a record that
+consent closed. What MEDIUM and HIGH do — monitor, ask for the password again,
+or refuse — is a policy setting, shown on Admin → AI Security. A refused
+attempt is itself recorded, so probing for records raises an alert.
 
 ---
 
@@ -258,15 +271,18 @@ listed as not built.
 | Doctor-authored documents | ✅ | Encrypted, signed and anchored — and readable by the patient they concern, completing the spec's "patient receives authorized access" |
 | Clinical record encryption | ✅ | Diagnoses and prescriptions encrypted at column level; grepping the database for a diagnosis returns nothing |
 | Consent management | ✅ | Revoking a doctor genuinely blocks reads — the same report returns 200 before and 404 after |
+| Smart-contract consent | 🟡 | Decisions written to `PHR.sol` (`updateConsent`, pseudonymous refs); consent-based reads refused if `checkConsent` disagrees with the row. Unit-tested with a fake chain — **not yet run against a live chain** |
 | Doctor access requests | ✅ | Doctor requests with a stated purpose → patient approves or declines → the backend enforces it. Verified: no request 403, pending 403, rejected 403, approved 200 |
-| AI security layer | ✅ | Anomaly detection, XAI, alerts, incidents. Peers can register and submit signed parameters for real |
+| AI security layer | ✅ | Anomaly detection (scheduled, and inline at every clinician read), XAI explanations, configurable risk policy with password re-verification, alerts from every security source, incidents worked to closure |
+| Federated learning loop | 🟡 | Per-role FedAvg; a hospital can submit its signed per-role update to a hub and pull the global model back; detection uses a global model only when real institutions built it. Tested against a fake hub — **not yet between two running hospitals** |
 | Zero-knowledge consent proof | ✅ | **Post-quantum**: lattice proof (Fiat–Shamir with aborts, ML-DSA-65 parameters). Consents approved before the switch keep their Schnorr commitment, which still verifies and is reported as *not* post-quantum. See its own section |
 | IPFS publishing | ✅ | Really pinned to a running kubo node; joins the recovery chain behind the database and S3 |
 | IPFS replication | 🟡 | Copies on other IPFS nodes and/or Pinning-Service-API providers; only copies a target confirms count. Unit-tested against a scripted HTTP fake — **not yet run against a real second node or pinning service** |
 | Federation peer admin screen | 🟡 | Register a peer (secret shown once), suspend, reinstate. Rendered and exercised against sample data — **not yet against a live backend** |
 | Medication adherence | ✅ | Refusals and misses reach the prescriber and the patient, not only a percentage |
-| Emergency break-glass access | ✅ | Time-boxed override, patient notified immediately, anchored on-chain, reviewable by an admin |
-| Automated tests | ✅ | 263 tests, mutation-checked; weighted toward refusals |
+| Emergency break-glass access | ✅ | Password re-verification, daily limit, risk-scored, time-boxed, patient notified immediately, anchored on-chain, compliance incident opened automatically |
+| End-to-end flow (spec §37) | ✅ | `tests/test_e2e_flow.py` drives access request → consent → lab request → signed, encrypted report → patient release → tamper detection → withdrawal → break-glass → incidents and audit, against real Postgres and real liboqs, in CI |
+| Automated tests | ✅ | 327 tests, mutation-checked; weighted toward refusals. CI runs them inside the backend image, where liboqs is real |
 
 🟡 = built and tested in isolation, still to be verified on the running system.
 
@@ -290,6 +306,17 @@ is listed honestly rather than quietly dropped.
 | **IPFS replication** | Content was pinned on one node only. | Each new CID is replicated in the background to configured replica nodes and pinning services; an admin can backfill and retry from the Security page |
 | **Peer registration UI** | Peers could only be registered by API call. | Admin → Federation Peers: register (secret shown once), suspend, reinstate |
 | **`MedicalRecords` table** | Dead schema, never read or written. | No longer created; dropped from existing databases only while empty |
+| **Lab request → consent** | Ordering a test needed nothing, and a lab request counts as a treating relationship — one order for any patient unlocked their whole chart. | The ordering doctor must already be entitled to the patient |
+| **Chart writes → authorization** | Diagnoses, prescriptions, consultations and documents could be written to any patient, which then also counted as a treating relationship. | Writing needs the same entitlement as reading |
+| **Report ↔ request binding** | The requested investigation was loaded and never compared; any technician could file any panel against any order. | The panel must match the order, and only the technician holding the request can file or advance it |
+| **Signature on release** | A failed ML-DSA check was logged and the report released anyway; documents and scans were never checked. | Every release verifies digest and signature; a failure withholds the record and opens an incident |
+| **Failures → Alert & Response** | Integrity and signature failures, refusals and break-glass produced no alert or incident; only the anomaly model did. | Every security source reports to one alert queue, with its source shown |
+| **Failed sign-ins → AI** | Written to AuthLogs, which the detector never reads. | Recorded as security events as they happen; a burst on one account alerts |
+| **Break-glass → AI** | The event was written through a closed cursor and silently lost. | Recorded, scored, and turned into a compliance record |
+| **Incident lifecycle** | Incidents could be listed, never worked. | Open → Investigating → Closed, with a required resolution |
+| **Federated loop** | The global model was computed and never used; no hospital could send its update or receive the model. | Per-role models, participant submit/pull, global model used for detection when real institutions built it |
+| **Smart-contract consent** | `updateConsent`/`checkConsent` existed in `PHR.sol` and were never called. | Decisions written on-chain; consent-based reads checked against the contract |
+| **Blockchain in the image** | `web3` was missing from `requirements.txt`, so the container could never reach a chain. | Added |
 
 ### Still open
 
@@ -297,12 +324,14 @@ is listed honestly rather than quietly dropped.
 |---|---|---|
 | 1 | **Live verification of replication** | Tested against a scripted fake only. Needs a run with a real second kubo node (`IPFS_REPLICA_NODES`) or a pinning-service account (`IPFS_PINNING_SERVICES`). |
 | 2 | **ZKP prover in the browser** | Proofs are made on the doctor's side with `backend/demo/zkp_prove.py`; the web UI has no prover, because the token must never be sent to the server to make one. |
+| 3 | **Chain-dependent paths in CI** | CI runs with the chain disabled, so on-chain consent, `emergencyAccess()` and anchoring are exercised only by unit tests with a fake chain. Needs a run with anvil and the deployed contract. |
+| 4 | **Nurse access scope** | A nurse can open any approved patient's chart; there is no ward or assignment model to restrict it. Needs a decision on what a nurse's relationship to a patient is. |
 
 ### Not implemented
 
 | Area | Status |
 |---|---|
-| **Multi-hospital federation** | Real peers can now register and submit signed parameters, and displace the simulated nodes when they do. Simulated peers remain only as the fallback when nobody has federated yet. |
+| **Multi-hospital federation in practice** | Both sides are built — hub (aggregate, serve the global model) and participant (submit, pull). A live federation needs a second running hospital; nothing here pretends one exists. |
 | **Standardised post-quantum ZKP** | The lattice proof uses ML-DSA-65's parameters and assumptions, but the construction itself (Lyubashevsky's, uncompressed) is not a NIST standard and has not been independently reviewed. |
 
 > On AI: the security layer performs **behavioural anomaly detection**, not
@@ -579,29 +608,33 @@ records are touched — never what they contain.
 ### Where it sits
 
 ```
-Authentication → RBAC → Consent → ACCESS DECISION
-                                        │
-                                        ▼
-                            (action proceeds or is refused)
-                                        │
-                                        ▼
-                              Security event emitted
-                                        │
-                          Local anomaly detection (peer baseline)
-                                        │
-                              Risk score + explanation
-                                        │
-                    LOW ──── MEDIUM ──────── HIGH
-                     │         │               │
-                  MONITOR   VERIFY         ESCALATE
-                                               │
-                                     Alert → Incident → Compliance
+Authentication → RBAC → relationship / consent ──── refused ──► ACCESS_DENIED event
+                                │ permitted                      (repeated → alert)
+                                ▼
+             AI RISK GATE  (this actor, scored now, own-role baseline)
+                                │
+          LOW ──────── MEDIUM ──────────── HIGH          (configurable policy)
+          allow        monitor            verify: re-enter password
+                       + alert            + alert + incident   (or block)
+                                │
+                                ▼
+            release → digest + ML-DSA signature verified → SecurityEvent
+                                │
+              Scheduled analysis (every 30 min) + on demand
+                                │
+                     Risk score + explanation (XAI)
+                                │
+                  Alert → Incident → worked to Closed (compliance)
 ```
 
-**The layer never grants or revokes access.** Authentication, RBAC and consent
-have already decided that. A statistical model must not be the thing standing
-between a clinician and a patient's record; this scores behaviour, explains the
-score, and hands a human something to judge.
+**The layer never grants access.** Authentication, RBAC and consent decide that
+first, and a low score cannot open a record they closed. It can make access
+*stricter* — by default only by asking a HIGH-risk user to re-enter their
+password, which stops a stolen session without stopping a clinician. Whether
+MEDIUM/HIGH monitor, verify or block is the configured policy
+(`RISK_POLICY_*`), visible on Admin → AI Security. Roles with fewer than
+`RISK_MIN_PEERS` actors are not scored at all: with two technicians, "unusual"
+would only mean "busier than the other one".
 
 ### How detection works
 
@@ -641,11 +674,25 @@ DOC-2026-000011   score 85.42   HIGH
 
 | Component | Status |
 |---|---|
-| FedAvg aggregation, weighted by sample count | **Real** |
-| Local baseline fitted from this hospital's activity | **Real** |
+| FedAvg aggregation, **per role**, weighted by that role's sample count | **Real** |
+| Local per-role baselines fitted from this hospital's activity | **Real** |
 | Only parameters (medians, scales) cross the boundary | **Real** |
 | Peer registration, signed submission, poisoning floor | **Real** |
+| Participant side: submit local update, pull the global model (HMAC-signed, replay-protected) | **Real** — tested against a fake hub |
+| Global model used by detection | **Real** — only when built by real institutions; a round with simulated peers never scores anyone |
 | Peer institutions actually running | **Depends on deployment** |
+
+```
+Hospital B (participant)                              Hospital A (hub)
+fit per-role baselines ── signed update ──► /api/federated/submit
+                                            Run Round: FedAvg per role
+store FederatedHubModels ◄── signed pull ── /api/federated/global-model
+risk engine scores with it                  (only models with 0 simulated nodes)
+```
+
+Per role, because detection compares each actor with their own role: an
+all-roles average would describe nobody and flag doctors and technicians alike
+for being themselves.
 
 A second QuantumCare instance registers as a peer, fits its own baseline, and
 POSTs only its parameters to `/api/federated/submit`. Submissions are HMAC-signed
@@ -768,9 +815,13 @@ cd backend
 python3 -m pytest
 ```
 
-263 tests, no database or running server required — they exercise pure functions
-so they fail for exactly one reason. Without liboqs the post-quantum pipeline tests
-skip (they never pass vacuously), as do the live-IPFS-node tests without a node.
+327 tests. All but the end-to-end flow need no database or running server —
+they exercise pure functions so they fail for exactly one reason. Without
+liboqs the post-quantum pipeline tests skip (they never pass vacuously), as do
+the live-IPFS-node tests without a node and the end-to-end flow without
+`RUN_E2E=1`. CI runs the full suite inside the backend image, where liboqs is
+real, against a Postgres service — so nothing is skipped there except the
+live IPFS node.
 
 What they cover, and why these specific assertions: every test asserts a
 *refusal* as well as a success, because a happy-path-only suite would pass
@@ -785,6 +836,8 @@ codebase previously shipped one.
 | `test_rbac_parity.py` | The backend permission matrix and the frontend IAM map cannot drift apart |
 | `test_zkp_lattice.py` | Ring arithmetic matches a schoolbook reference; every forgery, replay, cross-patient and cross-scheme proof is refused; the abort and the verifier's norm check each hold on their own |
 | `test_ipfs_replication.py` | A queued request is never counted as a copy; one failing target does not stop the rest; a failed status check does not downgrade a pin; service tokens never appear in a report |
+| `test_security_architecture.py` | The default risk policy never blocks care; an insider sweep is challenged *with* its explanation; refusals, failed sign-ins and tampering reach alerts and incidents without duplicating them; the chain contradicting a consent row is a mismatch, an unreachable chain is "unverified" not "agreed"; hub requests are signed, fresh and purpose-bound; chart writes, lab orders and report filing need entitlement |
+| `test_e2e_flow.py` | The whole §37 flow against real Postgres and real liboqs (CI only — opt-in with `RUN_E2E=1`) |
 
 The suite was checked by mutation: reintroducing three real past bugs — a
 signature verifier that always returned true, an upload that recorded a key it
