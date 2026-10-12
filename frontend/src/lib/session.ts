@@ -800,6 +800,34 @@ export async function clearLabNotifications() {
   return response.json();
 }
 
+// ─── Zero-knowledge consent proof (the token stays in this browser) ─────────
+
+export interface CollectedConsentToken {
+  consent_token: string;
+  commitment: string;
+  scheme: string;
+  post_quantum_secure: boolean;
+}
+
+export async function collectConsentToken(patientId: string): Promise<CollectedConsentToken> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/consent-token/${patientId}`);
+  return jsonOrThrow(response, "Failed to collect the consent token");
+}
+
+export async function requestZkpChallenge(patientId: string): Promise<{ challenge: string; context: string; scheme: string }> {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/doctor/zkp/challenge?patient_id=${encodeURIComponent(patientId)}`, { method: "POST" });
+  return jsonOrThrow(response, "Failed to get a challenge");
+}
+
+export async function submitZkpProof(body: { challenge: string; scheme: string; proof: string }) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/zkp/verify`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return jsonOrThrow(response, "Proof verification failed");
+}
+
 // ─── Care team: which nurses may open a patient's chart ─────────────────────
 
 export interface CareTeamMember {
