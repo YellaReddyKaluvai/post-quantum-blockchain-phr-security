@@ -172,7 +172,7 @@ export default function PatientDetails() {
   const [consultationError, setConsultationError] = useState("");
 
   const [emergencyModal, setEmergencyModal] = useState(false);
-  const [emergencyForm, setEmergencyForm] = useState({ reason: "", duration_hours: 4 });
+  const [emergencyForm, setEmergencyForm] = useState({ reason: "", duration_hours: 4, password: "" });
   const [emergencySubmitting, setEmergencySubmitting] = useState(false);
   const [emergencyError, setEmergencyError] = useState("");
   const [emergencyGranted, setEmergencyGranted] = useState<string | null>(null);
@@ -186,13 +186,16 @@ export default function PatientDetails() {
         patient_id: params.id as string,
         reason: emergencyForm.reason,
         duration_hours: emergencyForm.duration_hours,
+        password: emergencyForm.password,
       });
       setEmergencyGranted(res.message);
       setEmergencyModal(false);
-      setEmergencyForm({ reason: "", duration_hours: 4 });
+      setEmergencyForm({ reason: "", duration_hours: 4, password: "" });
       await fetchDetail();
     } catch (error) {
       setEmergencyError(error instanceof Error ? error.message : "Failed to declare emergency access.");
+      // Never leave a password sitting in the form after a failed attempt.
+      setEmergencyForm((f) => ({ ...f, password: "" }));
     } finally {
       setEmergencySubmitting(false);
     }
@@ -911,9 +914,27 @@ export default function PatientDetails() {
                 </select>
               </div>
 
+              <div>
+                <label htmlFor="emergency-password" className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">
+                  Confirm your password *
+                </label>
+                <input
+                  id="emergency-password"
+                  type="password"
+                  required
+                  autoComplete="current-password"
+                  className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-rose-500 outline-none"
+                  value={emergencyForm.password}
+                  onChange={(e) => setEmergencyForm({ ...emergencyForm, password: e.target.value })}
+                />
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Identity verification — a signed-in session alone is not enough to override consent.
+                </p>
+              </div>
+
               <button
                 type="submit"
-                disabled={emergencySubmitting || emergencyForm.reason.trim().length < 10}
+                disabled={emergencySubmitting || emergencyForm.reason.trim().length < 10 || !emergencyForm.password}
                 className="w-full bg-rose-600 text-white rounded-xl py-2.5 font-bold hover:bg-rose-700 disabled:opacity-50 flex items-center justify-center gap-2"
               >
                 {emergencySubmitting

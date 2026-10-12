@@ -47,6 +47,7 @@ FEATURE_WEIGHTS: dict[str, float] = {
     "failed_logins": 1.4,
     "emergency_declarations": 1.8,   # rare by design; frequency is meaningful
     "peak_burst": 1.1,
+    "access_denied": 1.5,       # probing for records one is not entitled to
 }
 
 FEATURE_LABELS: dict[str, str] = {
@@ -56,6 +57,7 @@ FEATURE_LABELS: dict[str, str] = {
     "failed_logins": "failed sign-in attempts",
     "emergency_declarations": "emergency overrides declared",
     "peak_burst": "busiest single hour",
+    "access_denied": "refused access attempts",
 }
 
 # Thresholds for the decision policy (§23). Configurable in one place so the
@@ -214,6 +216,7 @@ WITH window_events AS (
       FROM SecurityEvents
      WHERE occurred_at >= %s AND occurred_at < %s
        AND actor_id IS NOT NULL
+       AND (%s::uuid IS NULL OR actor_id = %s::uuid)
 ),
 per_actor AS (
     SELECT actor_id,
@@ -224,6 +227,7 @@ per_actor AS (
                 (WHERE event_type = 'RECORD_ACCESS')                   AS distinct_patients,
            COUNT(*) FILTER (WHERE event_type = 'LOGIN_FAILED')         AS failed_logins,
            COUNT(*) FILTER (WHERE event_type = 'EMERGENCY_ACCESS')     AS emergency_declarations,
+           COUNT(*) FILTER (WHERE event_type = 'ACCESS_DENIED')        AS access_denied,
            COUNT(*)                                                    AS total_events,
            COUNT(*) FILTER (
                WHERE EXTRACT(HOUR FROM occurred_at) >= 22
@@ -242,11 +246,15 @@ SELECT a.*, COALESCE(b.peak_burst, 0) AS peak_burst
 """
 
 
-def extract_windows(cur, hours: int = 24) -> list[ActorWindow]:
-    """Build one feature vector per active actor over the last `hours`."""
+def extract_windows(cur, hours: int = 24, actor_id: Optional[str] = None) -> list[ActorWindow]:
+    """Build one feature vector per active actor over the last `hours`.
+
+    With ``actor_id`` only that actor's window is built — the inline risk check
+    in the access path scores one person per request and must stay cheap.
+    """
     end = datetime.now(timezone.utc)
     start = end - timedelta(hours=hours)
-    cur.execute(FEATURE_SQL, (start, end))
+    cur.execute(FEATURE_SQL, (start, end, actor_id, actor_id))
     windows = []
     for r in cur.fetchall():
         total = float(r["total_events"]) or 1.0
@@ -261,6 +269,7 @@ def extract_windows(cur, hours: int = 24) -> list[ActorWindow]:
                 "failed_logins": float(r["failed_logins"]),
                 "emergency_declarations": float(r["emergency_declarations"]),
                 "peak_burst": float(r["peak_burst"]),
+                "access_denied": float(r["access_denied"]),
             },
         ))
     return windows
@@ -277,15 +286,20 @@ def record_security_event(cur, *, actor_id, actor_public_id=None, actor_role=Non
     """
     import json
     try:
-        cur.execute(
-            """INSERT INTO SecurityEvents (actor_id, actor_public_id, actor_role, event_type,
-                                           subject_patient_id, resource, ip_address, metadata)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (actor_id, actor_public_id, actor_role, event_type, subject_patient_id,
-             resource, ip_address, json.dumps(metadata or {})),
-        )
-    except Exception:            # noqa: BLE001 - telemetry must not break care
-        pass
+        # A savepoint, so a failed insert cannot poison the caller's transaction:
+        # Postgres aborts the whole transaction on any error, and swallowing the
+        # exception alone would leave every later statement in the request failing.
+        with cur.connection.transaction():
+            cur.execute(
+                """INSERT INTO SecurityEvents (actor_id, actor_public_id, actor_role, event_type,
+                                               subject_patient_id, resource, ip_address, metadata)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (actor_id, actor_public_id, actor_role, event_type, subject_patient_id,
+                 resource, ip_address, json.dumps(metadata or {})),
+            )
+    except Exception as exc:     # noqa: BLE001 - telemetry must not break care
+        import logging
+        logging.getLogger(__name__).warning("Security event %s not recorded: %s", event_type, exc)
 
 
 # ─── Federated averaging (spec §20/§21) ──────────────────────────────────────
@@ -319,6 +333,78 @@ def federated_average(node_parameters: list[tuple[str, int, dict]]) -> dict[str,
 
     return {"medians": medians, "scales": scales,
             "contributing_nodes": len(node_parameters), "total_samples": total}
+
+
+# ─── Per-role models (spec §21) ──────────────────────────────────────────────
+#
+# Detection compares each actor with their own role, so the federated model has
+# to be per role as well. A single all-roles baseline would describe nobody: it
+# would average doctors' chart reads with technicians' report filings and then
+# flag both groups for being themselves. Version 2 parameters therefore carry
+# one baseline per role:
+#
+#     {"version": 2, "roles": {"Doctor": {medians, scales, sample_count}, …}}
+#
+# Version 1 (one flat baseline) is still accepted from older peers. It is
+# aggregated into its own "ALL" bucket, which is used only for a role that no
+# version-2 participant has described.
+
+PARAMETERS_VERSION = 2
+ALL_ROLES = "ALL"
+
+
+def fit_role_baselines(windows: list[ActorWindow]) -> dict[str, Baseline]:
+    """One baseline per role, fitted from that role's own actors."""
+    by_role: dict[str, list[ActorWindow]] = {}
+    for w in windows:
+        by_role.setdefault(w.actor_role or "Unknown", []).append(w)
+    return {role: fit_baseline(group) for role, group in by_role.items()}
+
+
+def role_parameters(baselines: dict[str, Baseline]) -> dict[str, Any]:
+    """Version-2 parameters: what this institution shares, and all it shares."""
+    return {"version": PARAMETERS_VERSION,
+            "roles": {role: b.to_parameters() for role, b in baselines.items()}}
+
+
+def as_role_parameters(parameters: dict[str, Any]) -> dict[str, dict]:
+    """Read either version as ``{role: flat_parameters}``."""
+    if isinstance(parameters, dict) and isinstance(parameters.get("roles"), dict):
+        return parameters["roles"]
+    return {ALL_ROLES: parameters}
+
+
+def federated_average_roles(node_parameters: list[tuple[str, int, dict]]) -> dict[str, Any]:
+    """FedAvg run separately for every role any participant described.
+
+    Within a role each node is weighted by the number of actors it observed *in
+    that role*, so a hospital with forty doctors and two technicians shapes the
+    doctor model far more than the technician model — which is the point.
+    """
+    per_role: dict[str, list[tuple[str, int, dict]]] = {}
+    for name, count, params in node_parameters:
+        for role, flat in as_role_parameters(params).items():
+            samples = int(flat.get("sample_count", 0) or count or 0)
+            per_role.setdefault(role, []).append((name, samples, flat))
+
+    roles = {}
+    for role, nodes in per_role.items():
+        agg = federated_average(nodes)
+        roles[role] = {"medians": agg["medians"], "scales": agg["scales"],
+                       "sample_count": agg["total_samples"],
+                       "contributing_nodes": agg["contributing_nodes"]}
+    return {"version": PARAMETERS_VERSION, "roles": roles,
+            "contributing_nodes": len(node_parameters),
+            "total_samples": sum(max(1, c) for _, c, _ in node_parameters)}
+
+
+def baseline_for_role(parameters: dict[str, Any], role: str) -> Optional[Baseline]:
+    """The baseline a global model holds for ``role``, falling back to ALL."""
+    roles = as_role_parameters(parameters)
+    flat = roles.get(role) or roles.get(ALL_ROLES)
+    if not flat or not flat.get("medians"):
+        return None
+    return Baseline.from_parameters(flat)
 
 
 # ─── Peer submission integrity (spec §21) ────────────────────────────────────
@@ -366,6 +452,15 @@ def sane_parameters(parameters: dict) -> bool:
     against a determined poisoner is its own research problem, and pretending
     otherwise would be the kind of overclaim this project has been correcting.
     """
+    if not isinstance(parameters, dict):
+        return False
+    if "roles" in parameters:
+        roles = parameters.get("roles")
+        if not isinstance(roles, dict) or not roles or len(roles) > 20:
+            return False
+        return all(isinstance(role, str) and len(role) <= 40 and sane_parameters(flat)
+                   and "roles" not in flat
+                   for role, flat in roles.items())
     medians = parameters.get("medians")
     scales = parameters.get("scales")
     if not isinstance(medians, dict) or not isinstance(scales, dict):
