@@ -1,4 +1,8 @@
-"""The zero-knowledge consent proof.
+"""The legacy Schnorr consent proof.
+
+No longer issued — new consents use the lattice proof (test_zkp_lattice.py) —
+but commitments issued before the switch must still verify, and must still
+refuse everything they refused before.
 
 A ZKP that only ever gets tested on the happy path proves nothing: a verifier
 hardcoded to return True passes every completeness test. What matters here is
@@ -8,7 +12,7 @@ a value outside the group.
 
 import pytest
 
-from app.zkp_service import (
+from app.zkp_schnorr import (
     P, Q, G, ZKPError,
     issue_consent_token, make_challenge, prove, verify,
 )

@@ -318,12 +318,21 @@ def ipfs_status() -> dict:
         pass
 
     # Said plainly so nobody mistakes a local node for global availability.
-    status["scope"] = (
-        "Content is pinned on this node. It is genuine IPFS — real CIDs, real "
-        "block storage, real retrieval — but it is reachable only while this "
-        "node runs and is dialable. That is not the same as being replicated "
-        "across the public network."
-    )
+    from app import ipfs_replication  # deferred: it imports this module
+    if ipfs_replication.is_configured():
+        status["scope"] = (
+            "Content is pinned on this node and replicated to the targets listed "
+            "under replication. Only copies a target has confirmed as pinned count "
+            "towards the replication factor; queued requests do not."
+        )
+    else:
+        status["scope"] = (
+            "Content is pinned on this node only. It is genuine IPFS — real CIDs, "
+            "real block storage, real retrieval — but it is reachable only while "
+            "this node runs and is dialable. That is not the same as being "
+            "replicated across the public network; set IPFS_REPLICA_NODES or "
+            "IPFS_PINNING_SERVICES to keep copies elsewhere."
+        )
     return status
 
 
@@ -357,6 +366,9 @@ def store_encrypted_document(
             # is genuinely published the node's CID is the one that resolves, so
             # it is the one recorded.
             content_cid = node_cid
+            # Copies beyond this node, in the background (see ipfs_replication).
+            from app import ipfs_replication  # deferred: it imports this module
+            ipfs_replication.schedule(node_cid, file_name)
     except IPFSError as exc:
         logger.error("IPFS publish failed for %s: %s", document_name, exc)
 

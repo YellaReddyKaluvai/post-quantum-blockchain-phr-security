@@ -95,17 +95,19 @@ erDiagram
 | `imagingreports` | 22 | Encrypted studies |
 | `medicaldocuments` | 19 | Discharge summaries, referrals |
 
-### Audit & integrity — 4 tables
-`documentanchors` (13) · `adminauditlogs` (9) · `authlogs` (8) · `emailnotifications` (10)
+### Audit & integrity — 5 tables
+`documentanchors` (13) · `adminauditlogs` (9) · `authlogs` (8) · `emailnotifications` (10) ·
+`ipfsreplicas` (9) — one row per (CID, replication target) with the status that target reported
 
 ### AI security — 7 tables
 `securityevents` (10) · `riskassessments` (11) · `securityalerts` (10) ·
 `securityincidents` (16) · `federatedrounds` (7) · `federatedglobalmodel` (7) ·
 `federatedpeers` (8)
 
-### Deprecated — 1 table
-`medicalrecords` (12) — dead schema from an earlier design, 0 rows, 0 code
-references. Marked deprecated rather than dropped unilaterally.
+### Removed
+`medicalrecords` — dead schema from an earlier design, never read or written.
+No longer created; `init.sql` drops it from an existing database only while it
+is empty, and leaves it (with a notice) if it somehow holds rows.
 
 ## Encryption at rest
 

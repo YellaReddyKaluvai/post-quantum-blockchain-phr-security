@@ -937,6 +937,57 @@ export async function runFederatedRound() {
   return response.json();
 }
 
+// ─── Federation peers ────────────────────────────────────────────────────────
+
+export async function getFederatedPeers() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/peers`);
+  if (!response.ok) throw new Error("Failed to load federation peers");
+  return response.json();
+}
+
+export async function registerFederatedPeer(nodeName: string, contactUrl?: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/peers`, {
+    method: "POST",
+    body: JSON.stringify({ node_name: nodeName, contact_url: contactUrl || null }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not register that peer"));
+  }
+  return response.json();
+}
+
+export async function setFederatedPeerActive(peerId: string, active: boolean) {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/admin/federated/peers/${encodeURIComponent(peerId)}/${active ? "activate" : "deactivate"}`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not update that peer"));
+  }
+  return response.json();
+}
+
+// ─── IPFS publishing and replication ─────────────────────────────────────────
+
+export async function getIpfsStatus() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/ipfs/status`);
+  if (!response.ok) throw new Error("Failed to load IPFS status");
+  return response.json();
+}
+
+export async function syncIpfsReplication() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/ipfs/replication/sync`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not start replication"));
+  }
+  return response.json();
+}
+
 // ─── Imaging ─────────────────────────────────────────────────────────────────
 
 export async function getPatientImaging() {

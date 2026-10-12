@@ -2,8 +2,11 @@
 # the runtime image carries the compiled library without the build toolchain.
 FROM python:3.12-slim AS liboqs-build
 
+# libssl-dev: liboqs uses OpenSSL for its symmetric primitives and its CMake
+# configure step fails ("Could NOT find OpenSSL") without the headers. The
+# runtime image needs no extra package — python:3.12-slim already ships libssl3.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake ninja-build git ca-certificates \
+        build-essential cmake ninja-build git ca-certificates libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 ARG LIBOQS_VERSION=0.16.0
