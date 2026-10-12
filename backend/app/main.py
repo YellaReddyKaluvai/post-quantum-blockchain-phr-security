@@ -5710,8 +5710,9 @@ def collect_consent_token(patient_id: str, session: dict = Depends(require_role(
         "post_quantum_secure": zkp.is_post_quantum(row["zkp_commitment"]),
         "delivered_once": True,
         "notice": "Store this securely. The server has now discarded it and keeps only "
-                  "the public commitment. Proofs are made on your side, e.g. with "
-                  "backend/demo/zkp_prove.py, so the token never has to be sent again.",
+                  "the public commitment. Proofs are made on your side — in the browser "
+                  "on the patient's page, or with backend/demo/zkp_prove.py — so the token "
+                  "never has to be sent again.",
     }
 
 

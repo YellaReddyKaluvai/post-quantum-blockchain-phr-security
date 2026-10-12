@@ -14,16 +14,20 @@ jobs:
         working-directory: ./frontend
     steps:
     - uses: actions/checkout@v4
-    - name: Use Node.js 20.x
+    # 22.x runs the TypeScript ZKP module directly in the vector check below.
+    - name: Use Node.js 22.x
       uses: actions/setup-node@v4
       with:
-        node-version: 20.x
+        node-version: 22.x
         cache: 'npm'
         cache-dependency-path: './frontend/package-lock.json'
     - name: Install dependencies
       run: npm ci
     - name: Run Linter
       run: npm run lint
+    # The browser prover must agree byte for byte with the Python verifier.
+    - name: Check the browser ZKP prover against the server's vectors
+      run: node scripts/check-zkp.mjs
     - name: Build Next.js
       run: npm run build
     - name: Build Frontend Docker Image (Dry Run)
