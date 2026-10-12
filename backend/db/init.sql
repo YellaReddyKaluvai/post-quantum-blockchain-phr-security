@@ -760,3 +760,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_care_team_active
     ON CareTeamAssignments(patient_id, nurse_id) WHERE ended_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_care_team_nurse
     ON CareTeamAssignments(nurse_id) WHERE ended_at IS NULL;
+
+-- A doctor re-asking after a withdrawal or refusal puts the row back to
+-- Pending. The earlier refusal must keep blocking until the patient decides.
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS prior_refusal BOOLEAN NOT NULL DEFAULT FALSE;
