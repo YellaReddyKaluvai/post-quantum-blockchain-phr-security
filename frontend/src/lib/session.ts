@@ -161,7 +161,7 @@ export async function register(data: Record<string, unknown>) {
   });
   if (!response.ok) {
     const err = await response.json().catch(() => null);
-    throw new Error(err?.detail || "Registration failed");
+    throw new Error(extractErrorDetail(err, "Registration failed"));
   }
   return response.json();
 }
@@ -174,7 +174,7 @@ export async function login(user_id: string, password: string) {
   });
   if (!response.ok) {
     const err = await response.json().catch(() => null);
-    throw new Error(err?.detail || "Login failed");
+    throw new Error(extractErrorDetail(err, "Login failed"));
   }
   return response.json();
 }
@@ -304,7 +304,7 @@ export async function resendEmail(notificationId: string) {
   });
   if (!response.ok) {
     const err = await response.json().catch(() => null);
-    throw new Error(err?.detail || "Failed to resend email");
+    throw new Error(extractErrorDetail(err, "Failed to resend email"));
   }
   return response.json();
 }
@@ -341,7 +341,7 @@ export async function downloadPatientLabReport(id: string) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/lab-reports/${id}/download`);
   if (!response.ok) {
     const err = await response.json().catch(() => null);
-    throw new Error(err?.detail || "Failed to securely decrypt and download lab report");
+    throw new Error(extractErrorDetail(err, "Failed to securely decrypt and download lab report"));
   }
   return response.blob();
 }
@@ -448,7 +448,7 @@ export async function createPatientAppointment(data: {
   });
   if (!response.ok) {
     const err = await response.json().catch(() => null);
-    throw new Error(err?.detail?.[0]?.msg || err?.detail || "Failed to book appointment");
+    throw new Error(extractErrorDetail(err, "Failed to book appointment"));
   }
   return response.json();
 }
@@ -582,7 +582,7 @@ export async function downloadDoctorLabReport(id: string) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/reports/${id}/download`);
   if (!response.ok) {
     const err = await response.json().catch(() => null);
-    throw new Error(err?.detail || "Failed to securely decrypt and download lab report");
+    throw new Error(extractErrorDetail(err, "Failed to securely decrypt and download lab report"));
   }
   return response.blob();
 }

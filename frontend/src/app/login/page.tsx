@@ -24,15 +24,17 @@ function LoginForm() {
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;                      // one sign-in attempt at a time
     setError("");
-    if (userId && password) {
+    const id = userId.trim();
+    if (id && password) {
       setLoading(true);
       try {
-        const result = await login(userId, password);
-        setAuthCookies(result.access_token, result.role, userId);
+        const result = await login(id, password);
+        setAuthCookies(result.access_token, result.role, result.public_user_id || id);
         setSession({
           role: result.role,
-          userId: userId,
+          userId: result.public_user_id || id,
           accessToken: result.access_token,
         });
         const appRole = normalizeRole(result.role);
@@ -108,21 +110,21 @@ function LoginForm() {
                   </span>
                 </div>
               )}
-              {error && <div className="mb-5 p-3.5 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-semibold">{error}</div>}
+              {error && <div role="alert" className="mb-5 p-3.5 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-semibold">{error}</div>}
 
               <form onSubmit={handleLoginSubmit} className="space-y-5 mt-6">
                 <div>
-                  <label className={labelClass}>User ID</label>
+                  <label htmlFor="login-id" className={labelClass}>User ID</label>
                   <div className="relative group">
                     <User className="absolute left-4 top-1/2 -translate-y-1/2 w-[20px] h-[20px] text-teal-500 group-focus-within:text-cyan-500 group-focus-within:drop-shadow-sm transition-colors" />
-                    <input type="text" required value={userId} onChange={e => setUserId(e.target.value)} className={inputClass} placeholder="PAT-2026-000001" />
+                    <input id="login-id" type="text" required autoComplete="username" value={userId} onChange={e => setUserId(e.target.value)} className={inputClass} placeholder="PAT-2026-000001" />
                   </div>
                 </div>
                 <div>
-                  <label className={labelClass}>Password</label>
+                  <label htmlFor="login-password" className={labelClass}>Password</label>
                   <div className="relative group">
                     <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-[20px] h-[20px] text-teal-500 group-focus-within:text-cyan-500 group-focus-within:drop-shadow-sm transition-colors" />
-                    <input type="password" required value={password} onChange={e => setPassword(e.target.value)} className={inputClass} placeholder="••••••••••••" />
+                    <input id="login-password" type="password" required autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} className={inputClass} placeholder="••••••••••••" />
                   </div>
                 </div>
 
