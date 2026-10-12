@@ -3,7 +3,7 @@
 FROM python:3.12-slim AS liboqs-build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake ninja-build git ca-certificates \
+        build-essential cmake ninja-build git ca-certificates libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 ARG LIBOQS_VERSION=0.16.0
