@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { motion } from "framer-motion";
 import { User, Activity, FileText, ChevronLeft, Plus, X, FlaskConical, CheckCircle, HeartPulse, ShieldAlert, Loader2, Stethoscope } from "lucide-react";
 import Link from "next/link";
+import CareTeamPanel from "@/components/CareTeamPanel";
 import {
   getDoctorPatientDetail, createDiagnosis, createPrescription,
   getDoctorLabPanels, requestLabTest, declareEmergencyAccess, createConsultation,
@@ -470,6 +471,9 @@ export default function PatientDetails() {
           )}
         </motion.div>
       )}
+
+      {/* Care team — which nurses may open this chart (delegated by this doctor) */}
+      <CareTeamPanel patientId={params.id as string} />
 
       {/* Nursing observations — recorded by nurses, read here by the treating doctor */}
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.05 }}

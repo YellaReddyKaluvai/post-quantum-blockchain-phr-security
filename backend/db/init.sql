@@ -738,3 +738,25 @@ CREATE TABLE IF NOT EXISTS FederatedHubModels (
     real_nodes INTEGER NOT NULL DEFAULT 0,
     pulled_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ─── Care team: which nurses may open which patients (spec §4, §34) ─────────
+-- A nurse's access is a relationship like a doctor's, not a property of the
+-- role. It is granted by a doctor already authorized for the patient (and lasts
+-- only as long as that doctor's own access) or by an administrator (ward
+-- allocation), optionally time-boxed, and ended rather than deleted.
+CREATE TABLE IF NOT EXISTS CareTeamAssignments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    nurse_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    assigned_by UUID REFERENCES Users(id) ON DELETE SET NULL,
+    assigned_by_role VARCHAR(20) NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ,
+    ended_at TIMESTAMPTZ,
+    ended_by UUID REFERENCES Users(id) ON DELETE SET NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_care_team_active
+    ON CareTeamAssignments(patient_id, nurse_id) WHERE ended_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_care_team_nurse
+    ON CareTeamAssignments(nurse_id) WHERE ended_at IS NULL;

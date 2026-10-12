@@ -559,6 +559,42 @@ class NursePatientListItem(BaseModel):
     blood_group: Optional[str] = None
     last_recorded_at: Optional[datetime] = None
     status: str
+    # Why this nurse may open the chart: the care-team assignment behind it.
+    assigned_by_name: Optional[str] = None
+    assignment_expires_at: Optional[datetime] = None
+    assignment_reason: Optional[str] = None
+
+
+class CareTeamAssignRequest(BaseModel):
+    """Add a nurse to a patient's care team."""
+    nurse_id: str = Field(min_length=1, max_length=64)        # internal id or public user id
+    patient_id: Optional[str] = Field(default=None, max_length=64)   # admin form only
+    reason: str = Field(min_length=10, max_length=300)
+    # Time-boxed by default; a ward allocation may run longer (max 30 days).
+    duration_hours: Optional[int] = Field(default=72, ge=1, le=720)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_must_be_substantive(cls, v: str) -> str:
+        cleaned = " ".join(v.split())
+        if len(cleaned) < 10 or len(cleaned.split()) < 2:
+            raise ValueError("Give the clinical reason for the assignment — a short phrase at least.")
+        return cleaned
+
+
+class CareTeamMember(BaseModel):
+    id: str
+    patient_id: str
+    patient_user_id: Optional[str] = None
+    patient_name: Optional[str] = None
+    nurse_id: str
+    nurse_user_id: Optional[str] = None
+    nurse_name: Optional[str] = None
+    assigned_by_name: Optional[str] = None
+    assigned_by_role: str
+    reason: str
+    created_at: datetime
+    expires_at: Optional[datetime] = None
 
 
 class PatientVitalsRecord(BaseModel):
