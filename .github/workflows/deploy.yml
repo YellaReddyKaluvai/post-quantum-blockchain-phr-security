@@ -199,6 +199,53 @@ jobs:
         $IMAGE
         python -m pytest -p no:cacheprovider -rs
         tests/test_e2e_flow.py tests/test_ipfs.py tests/test_federation_live.py
+        tests/test_contract_migration_live.py
+    # The real frontend in a real browser against a real backend (hospital B):
+    # sign-in with the HttpOnly cookie, the federation peers screen end to end,
+    # the CSRF header on every change, and a cookie that is dead after logout.
+    - name: Use Node.js 22.x for the browser test
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22.x
+        cache: 'npm'
+        cache-dependency-path: './frontend/package-lock.json'
+    - name: Browser test — the frontend against hospital B
+      working-directory: .
+      env:
+        UI_ADMIN_ID: ADM-UI-SMOKE
+        UI_ADMIN_PASSWORD: UiSmoke-Pass-1!
+      run: |
+        docker run --rm --network host -e UI_ADMIN_ID -e UI_ADMIN_PASSWORD $IMAGE python -c "
+        import os, psycopg
+        from app.security import hash_password, encrypt_data
+        with psycopg.connect('$DB_ROOT/hospital_b', autocommit=True) as db:
+            db.execute('''INSERT INTO Users (user_id, full_name, email, password_hash, role, gender,
+                                             date_of_birth_encrypted, status)
+                          VALUES (%s, 'UI Smoke Admin', 'ui-smoke@e2e.example.com', %s, 'Administrator',
+                                  'Other', %s, 'Approved')''',
+                       (os.environ['UI_ADMIN_ID'], hash_password(os.environ['UI_ADMIN_PASSWORD']),
+                        encrypt_data('1980-01-01')))
+        "
+        cd frontend
+        npm ci
+        NEXT_PUBLIC_BACKEND_URL=http://localhost:8001 npm run build
+        cp -r .next/static .next/standalone/.next/static
+        cp -r public .next/standalone/public
+        PORT=3000 HOSTNAME=localhost nohup node .next/standalone/server.js > /tmp/frontend.log 2>&1 &
+        for i in $(seq 1 60); do curl -fs http://localhost:3000/login >/dev/null && break; sleep 1; done
+        mkdir -p /tmp/ui && cp e2e/ui-smoke.mjs /tmp/ui/ && cd /tmp/ui
+        npm init -y >/dev/null && npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
+        npx playwright install --with-deps chromium
+        node ui-smoke.mjs
+    - name: Browser test artifacts
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ui-smoke
+        path: |
+          /tmp/ui-smoke-failure.png
+          /tmp/frontend.log
+        if-no-files-found: ignore
     - name: Hub and chain logs
       if: failure()
       run: |
