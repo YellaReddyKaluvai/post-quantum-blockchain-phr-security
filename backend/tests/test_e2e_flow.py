@@ -92,6 +92,7 @@ def people(env):
     return {
         "admin": admin,
         "patient": _login(env["client"], patient_pub), "patient_uuid": patient_uuid,
+        "patient_pub": patient_pub, "patient_email": f"patient-{env['tag']}@e2e.example.com",
         "doctor": _login(env["client"], doctor_pub), "doctor_uuid": doctor_uuid,
         "tech": _login(env["client"], tech_pub),
         "nurse": _login(env["client"], nurse_pub), "nurse_pub": nurse_pub,
@@ -188,6 +189,18 @@ def test_the_core_flow(env, people):
     assert b"%PDF" not in row["encrypted_document"].encode()   # only ciphertext at rest
     if ON_CHAIN:
         assert report["anchored_on"] != "local-simulated" and report["blockchain_tx_hash"]
+    if os.getenv("AWS_S3_ENDPOINT_URL"):
+        # The cloud copy is exactly the ciphertext, and it is a real recovery
+        # path: with the database copy gone the report is still released, and
+        # still has to pass its integrity and signature checks to be.
+        from app.storage_service import download_file_from_s3
+        assert report["s3_key"]
+        assert download_file_from_s3(report["s3_key"]) == row["encrypted_document"].encode("utf-8")
+        db.execute("UPDATE LabReports SET encrypted_document = NULL WHERE id = %s", (report["report_id"],))
+        r = c.get(f"/api/patient/lab-reports/{report['report_id']}/download", headers=P)
+        assert r.status_code == 200 and r.content.startswith(b"%PDF")
+        db.execute("UPDATE LabReports SET encrypted_document = %s WHERE id = %s",
+                   (row["encrypted_document"], report["report_id"]))
     if os.getenv("IPFS_API_URL"):
         # What IPFS holds is exactly the ciphertext — never the report itself.
         from app.storage_service import fetch_from_ipfs
@@ -293,3 +306,24 @@ def test_failed_sign_ins_reach_the_detector_and_alert(env, people):
         assert c.post("/api/login", json={"user_id": public_id, "password": "nope"}).status_code == 401
     assert db.execute("SELECT COUNT(*) AS n FROM SecurityAlerts WHERE title LIKE %s",
                       (f"Repeated failed sign-ins — {public_id}%",)).fetchone()["n"] >= 1
+
+
+@pytest.mark.skipif(not os.getenv("MAILPIT_API_URL"), reason="no mail server to read back from")
+def test_the_approval_email_reaches_the_patient(env, people):
+    """Delivered through a real SMTP exchange and read back from the mail server —
+    not the application's own record that it sent something."""
+    import json
+    import urllib.parse
+    import urllib.request
+    api = os.environ["MAILPIT_API_URL"].rstrip("/")
+    query = urllib.parse.quote(f'to:"{people["patient_email"]}"')
+    with urllib.request.urlopen(f"{api}/api/v1/search?query={query}", timeout=10) as r:
+        messages = json.loads(r.read())["messages"]
+    approval = next(m for m in messages if "Approved" in m["Subject"])
+    with urllib.request.urlopen(f"{api}/api/v1/message/{approval['ID']}", timeout=10) as r:
+        body = json.loads(r.read())["Text"]
+    assert people["patient_pub"] in body                 # the generated User ID, to the right person
+    sent = env["db"].execute(
+        "SELECT sent_status FROM EmailNotifications WHERE email_address = %s AND notification_type = 'APPROVAL'",
+        (people["patient_email"],)).fetchone()
+    assert sent["sent_status"] == "SENT"

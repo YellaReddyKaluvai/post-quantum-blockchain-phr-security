@@ -35,8 +35,9 @@ jobs:
 
   build-backend:
     runs-on: ubuntu-latest
-    # Disposable services for the end-to-end tests: a database, and two
-    # independent IPFS nodes so replication runs between real daemons.
+    # Disposable services for the end-to-end tests: a database, two independent
+    # IPFS nodes so replication runs between real daemons, and a mail server
+    # whose API lets a test read back what was actually delivered.
     services:
       postgres:
         image: postgres:16
@@ -58,12 +59,25 @@ jobs:
         image: ipfs/kubo:v0.29.0
         ports:
           - 5002:5001
+      mailpit:
+        image: axllent/mailpit:latest
+        env:
+          MP_SMTP_AUTH_ACCEPT_ANY: "true"
+          MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+        ports:
+          - 1025:1025
+          - 8025:8025
     defaults:
       run:
         working-directory: ./backend
     env:
       DB_ROOT: postgresql://postgres:postgres@127.0.0.1:5432
       IMAGE: post-quantum-phr-backend:latest
+      # Throwaway credentials for the MinIO container below; nothing real.
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_USER: quantumcare-ci
+      S3_SECRET: quantumcare-ci-secret
+      S3_BUCKET: quantumcare-ci
     steps:
     - uses: actions/checkout@v4
     - name: Set up Python
@@ -123,6 +137,11 @@ jobs:
           $IMAGE uvicorn app.main:app --host 127.0.0.1 --port 8001
         for i in $(seq 1 60); do curl -fs http://127.0.0.1:8001/api/health >/dev/null && break; sleep 1; done
         curl -fsS http://127.0.0.1:8001/api/health
+    - name: Start S3-compatible storage (MinIO) with a bucket
+      run: |
+        docker run -d --name minio --network host           -e MINIO_ROOT_USER=$S3_USER -e MINIO_ROOT_PASSWORD=$S3_SECRET           minio/minio:latest server /data --address 127.0.0.1:9000
+        for i in $(seq 1 60); do curl -fs http://127.0.0.1:9000/minio/health/live >/dev/null && break; sleep 1; done
+        docker run --rm --network host $IMAGE python -c "import boto3; boto3.client('s3', endpoint_url='$S3_ENDPOINT', aws_access_key_id='$S3_USER', aws_secret_access_key='$S3_SECRET', region_name='us-east-1').create_bucket(Bucket='$S3_BUCKET')"
     - name: Wait for both IPFS nodes
       run: |
         for port in 5001 5002; do
@@ -130,9 +149,10 @@ jobs:
           curl -fsS -X POST http://127.0.0.1:$port/api/v0/id | head -c 200; echo
         done
     # On-chain consent, anchoring and break-glass against the deployed contract;
-    # the encrypted report published to IPFS and replicated to the second node;
+    # the encrypted report published to IPFS and replicated to the second node,
+    # stored in S3 and recovered from it; approval e-mail delivered over SMTP;
     # and federated learning between this hospital and hospital B over HTTP.
-    - name: End-to-end with the chain, IPFS replication and a second hospital
+    - name: End-to-end with the chain, IPFS, S3, e-mail and a second hospital
       run: >-
         docker run --rm --network host
         -v ${{ github.workspace }}/contracts:/contracts:ro
@@ -146,6 +166,18 @@ jobs:
         -e IPFS_REPLICA_NODES=http://127.0.0.1:5002
         -e FED_HUB_URL=http://127.0.0.1:8001
         -e FED_HUB_DATABASE_URL=$DB_ROOT/hospital_b
+        -e AWS_S3_ENDPOINT_URL=$S3_ENDPOINT
+        -e AWS_ACCESS_KEY_ID=$S3_USER
+        -e AWS_SECRET_ACCESS_KEY=$S3_SECRET
+        -e AWS_S3_BUCKET=$S3_BUCKET
+        -e AWS_REGION=us-east-1
+        -e SMTP_HOST=127.0.0.1
+        -e SMTP_PORT=1025
+        -e SMTP_USER=quantumcare-ci
+        -e SMTP_PASSWORD=quantumcare-ci
+        -e SMTP_STARTTLS=false
+        -e ADMIN_EMAIL=admin@e2e.example.com
+        -e MAILPIT_API_URL=http://127.0.0.1:8025
         $IMAGE
         python -m pytest -p no:cacheprovider -rs
         tests/test_e2e_flow.py tests/test_ipfs.py tests/test_federation_live.py
@@ -153,4 +185,5 @@ jobs:
       if: failure()
       run: |
         docker logs hospital-b 2>&1 | tail -80 || true
+        docker logs minio 2>&1 | tail -30 || true
         tail -40 /tmp/anvil.log || true
