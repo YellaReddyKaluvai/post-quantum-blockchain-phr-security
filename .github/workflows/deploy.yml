@@ -216,8 +216,9 @@ jobs:
         UI_ADMIN_PASSWORD: UiSmoke-Pass-1!
         UI_DOCTOR_ID: DOC-UI-SMOKE
       run: |
-        # An administrator, and a doctor with an approved consent to prove: the
-        # consent token is minted exactly as the patient's approval mints it.
+        # An administrator, and a doctor with three approved consents — one per
+        # scenario, because a consent token is deliberately delivered only once.
+        # Each is minted exactly as the patient's approval mints it.
         docker run --rm --network host -e UI_ADMIN_ID -e UI_ADMIN_PASSWORD -e UI_DOCTOR_ID $IMAGE python -c "
         import os, psycopg
         from app.security import hash_password, encrypt_data
@@ -232,16 +233,19 @@ jobs:
                                   (uid, name, uid.lower() + '@e2e.example.com', pw, role, dob)).fetchone()[0]
             user(os.environ['UI_ADMIN_ID'], 'UI Smoke Admin', 'Administrator')
             doctor = user(os.environ['UI_DOCTOR_ID'], 'UI Smoke Doctor', 'Doctor')
-            patient = user('PAT-UI-SMOKE', 'UI Smoke Patient', 'Patient')
-            token, commitment = zkp.issue_consent_token()
-            db.execute('''INSERT INTO Consent (patient_id, subject_user_id, subject_role, status,
-                                               zkp_commitment, zkp_token_encrypted)
-                          VALUES (%s, %s, 'Doctor', 'Authorized', %s, %s)''',
-                       (patient, doctor, commitment, encrypt_data(token)))
-            print('UI_PATIENT_UUID=' + str(patient))
+            patients = []
+            for n in (1, 2, 3):
+                patient = user(f'PAT-UI-SMOKE-{n}', f'UI Smoke Patient {n}', 'Patient')
+                token, commitment = zkp.issue_consent_token()
+                db.execute('''INSERT INTO Consent (patient_id, subject_user_id, subject_role, status,
+                                                   zkp_commitment, zkp_token_encrypted)
+                              VALUES (%s, %s, 'Doctor', 'Authorized', %s, %s)''',
+                           (patient, doctor, commitment, encrypt_data(token)))
+                patients.append(str(patient))
+            print('UI_PATIENT_UUIDS=' + ','.join(patients))
         " | tee /tmp/ui-seed.log
-        export UI_PATIENT_UUID=$(grep -oE 'UI_PATIENT_UUID=.*' /tmp/ui-seed.log | cut -d= -f2)
-        test -n "$UI_PATIENT_UUID"
+        export UI_PATIENT_UUIDS=$(grep -oE 'UI_PATIENT_UUIDS=.*' /tmp/ui-seed.log | cut -d= -f2)
+        test -n "$UI_PATIENT_UUIDS"
         cd frontend
         npm ci
         NEXT_PUBLIC_BACKEND_URL=http://localhost:8001 npm run build
