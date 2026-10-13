@@ -31,6 +31,20 @@ jobs:
 
   build-backend:
     runs-on: ubuntu-latest
+    # A disposable database for the end-to-end flow test (tests/test_e2e_flow.py).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: pqc_hospital
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     defaults:
       run:
         working-directory: ./backend
@@ -46,3 +60,21 @@ jobs:
         pip install -r requirements.txt
     - name: Build Backend Docker Image (Dry Run)
       run: docker build . -t post-quantum-phr-backend:latest
+    # Inside the image liboqs is real, so the post-quantum tests that skip on a
+    # developer machine without it run here — and the end-to-end flow runs
+    # against a real Postgres: access request → consent → lab request → signed,
+    # encrypted report → patient release → alerts, incidents and audit.
+    # The frontend is mounted read-only so the RBAC parity test can compare the
+    # backend matrix with frontend/src/lib/iam.ts.
+    - name: Test inside the image (unit + end-to-end, real liboqs and Postgres)
+      env:
+        E2E_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/pqc_hospital
+      run: >-
+        docker run --rm --network host
+        -v ${{ github.workspace }}/frontend:/frontend:ro
+        -e DATABASE_URL=$E2E_DATABASE_URL
+        -e RUN_E2E=1
+        -e BLOCKCHAIN_ENABLED=false
+        -e SECURITY_ANALYSIS_INTERVAL_MINUTES=0
+        post-quantum-phr-backend:latest
+        python -m pytest -p no:cacheprovider -rs

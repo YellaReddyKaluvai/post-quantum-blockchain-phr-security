@@ -74,5 +74,7 @@ def test_chart_authorization_is_actually_enforced():
     from app.main import get_doctor_patient_detail
     src = inspect.getsource(get_doctor_patient_detail)
     assert "_doctor_patient_authorization" in src
-    assert "status_code=403" in src
+    # Refusal: a literal 403, or _deny(), which raises 403 by default and also
+    # records the refused attempt for the AI layer.
+    assert "status_code=403" in src or "_deny(" in src
     assert "let's allow it" not in src

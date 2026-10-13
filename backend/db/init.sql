@@ -689,3 +689,52 @@ CREATE TABLE IF NOT EXISTS IpfsReplicas (
     UNIQUE (cid, target)
 );
 CREATE INDEX IF NOT EXISTS idx_ipfs_replicas_status ON IpfsReplicas(status);
+
+-- ─── Connecting the security architecture (spec §7–§25) ──────────────────────
+-- Alerts now come from more than the anomaly model: integrity and signature
+-- checks, the consent ledger, access control and break-glass all report here,
+-- and an administrator needs to see which one is speaking.
+ALTER TABLE SecurityAlerts ADD COLUMN IF NOT EXISTS source VARCHAR(40) NOT NULL DEFAULT 'LOCAL_ANOMALY';
+
+-- Incidents can be worked: Open → Investigating → Closed, with a resolution.
+ALTER TABLE SecurityIncidents ADD COLUMN IF NOT EXISTS resolved_by UUID REFERENCES Users(id) ON DELETE SET NULL;
+ALTER TABLE SecurityIncidents ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+
+-- The inline risk check scores one actor per request; this keeps it cheap.
+CREATE INDEX IF NOT EXISTS idx_security_events_actor_time ON SecurityEvents(actor_id, occurred_at);
+
+-- Step-up verification: a password re-entry that the risk policy can demand
+-- before releasing records to an actor currently scoring MEDIUM/HIGH.
+CREATE TABLE IF NOT EXISTS StepUpVerifications (
+    user_id UUID PRIMARY KEY REFERENCES Users(id) ON DELETE CASCADE,
+    verified_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- On-chain consent (PHR.sol updateConsent/checkConsent). The transaction that
+-- recorded the latest decision, so a later read can check the chain agrees.
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS onchain_tx_hash VARCHAR(120);
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS onchain_authorized BOOLEAN;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS onchain_recorded_at TIMESTAMPTZ;
+
+-- Break-glass: the behavioural risk at declaration, the compliance record it
+-- opened, and the contract's own emergency event.
+ALTER TABLE EmergencyAccess ADD COLUMN IF NOT EXISTS risk_level VARCHAR(10);
+ALTER TABLE EmergencyAccess ADD COLUMN IF NOT EXISTS incident_ref VARCHAR(24);
+ALTER TABLE EmergencyAccess ADD COLUMN IF NOT EXISTS contract_tx_hash VARCHAR(120);
+
+-- Federated models record how many real institutions built them, so a model
+-- made only from simulated peers is never used to score a real person.
+ALTER TABLE FederatedGlobalModel ADD COLUMN IF NOT EXISTS real_nodes INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE FederatedGlobalModel ADD COLUMN IF NOT EXISTS simulated_nodes INTEGER NOT NULL DEFAULT 0;
+
+-- Global models pulled from a federation hub when this hospital is a peer.
+CREATE TABLE IF NOT EXISTS FederatedHubModels (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    hub_url TEXT NOT NULL,
+    hub_round INTEGER NOT NULL,
+    parameters JSONB NOT NULL,
+    contributing_nodes INTEGER NOT NULL,
+    total_samples INTEGER NOT NULL,
+    real_nodes INTEGER NOT NULL DEFAULT 0,
+    pulled_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

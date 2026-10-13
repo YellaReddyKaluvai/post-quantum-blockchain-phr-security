@@ -39,6 +39,7 @@ from app.schemas import (
     PatientVitalsRecord, CreateVitalsRequest, NursingNoteRecord, CreateNursingNoteRequest,
     ActivePrescriptionForNurse, MedicationAdministrationRecord, CreateMedicationAdministrationRequest,
     NursePatientDetail,
+    StepUpRequest, IncidentUpdateRequest,
 )
 from app.config import get_settings
 from app.database import get_db, init_db
@@ -61,6 +62,9 @@ from app.storage_service import (
     ipfs_status, fetch_from_ipfs, is_ipfs_configured, IPFSError,
 )
 from app import ipfs_replication
+from app import ai_security as aisec
+from app import security_response as secresp
+from app import risk_engine, consent_ledger, federation
 
 from app.audit_service import log_admin_action
 from app.anchor_service import anchor_document
@@ -101,10 +105,72 @@ def handle_malformed_identifier(request: Request, exc: psycopg.errors.InvalidTex
 @app.on_event("startup")
 def on_startup():
     init_db()
+    _start_background_analysis()
+
+
+def _start_background_analysis() -> None:
+    """Run local anomaly detection on a schedule (spec §19).
+
+    Detection used to happen only when an administrator pressed "Analyse", so
+    an insider sweeping records at 03:00 went unnoticed until someone thought
+    to look. SECURITY_ANALYSIS_INTERVAL_MINUTES sets the cadence (default 30);
+    0 turns it off. The inline risk gate covers the access path between runs.
+    """
+    import threading
+    import time as _time
+
+    try:
+        minutes = int(os.getenv("SECURITY_ANALYSIS_INTERVAL_MINUTES", "30"))
+    except ValueError:
+        minutes = 30
+    if minutes <= 0:
+        return
+
+    def _loop():
+        while True:
+            _time.sleep(minutes * 60)
+            try:
+                result = _run_security_analysis(hours=24)
+                logger.info("Scheduled security analysis: %s", result.get("risk_breakdown"))
+            except Exception as exc:  # noqa: BLE001 - keep the schedule alive
+                logger.error("Scheduled security analysis failed: %s", exc)
+
+    threading.Thread(target=_loop, name="security-analysis", daemon=True).start()
 
 @app.get("/api/health")
 def health_check():
     return {"status": "ok"}
+
+
+@app.post("/api/auth/step-up")
+def step_up_verification(req: StepUpRequest, request: Request,
+                         session: dict = Depends(get_current_session)):
+    """Re-enter the password when the risk policy asks for it (spec §23).
+
+    A MEDIUM/HIGH risk score under a "verify" policy answers 428 until the user
+    proves, again, that they are who the session says. A stolen session token
+    cannot do that; the person at the keyboard can, in a few seconds.
+    """
+    user_uuid = session["user_id"]
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT password_hash FROM Users WHERE id = %s", (user_uuid,))
+            row = cur.fetchone()
+            if not row or not verify_password(req.password, row["password_hash"]):
+                secresp.failed_login(cur, user_id=user_uuid,
+                                     public_user_id=session.get("public_user_id"),
+                                     role=session.get("role"), ip_address=_client_ip(request))
+                conn.commit()
+                # 403, not 401: a wrong re-entry must not log the user out.
+                raise HTTPException(status_code=403, detail="Password incorrect.")
+            risk_engine.record_step_up(cur, user_uuid)
+            aisec.record_security_event(
+                cur, actor_id=user_uuid, actor_public_id=session.get("public_user_id"),
+                actor_role=session.get("role"), event_type="STEP_UP_VERIFIED",
+                resource="step_up", ip_address=_client_ip(request))
+            conn.commit()
+    return {"status": "verified",
+            "valid_for_minutes": risk_engine.policy()["step_up_minutes"]}
 
 @app.post("/api/register", response_model=RegistrationResponse)
 def register(request: RegistrationRequest):
@@ -150,8 +216,12 @@ def login(request: LoginRequest, response: Response):
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("SELECT * FROM Users WHERE user_id = %s", (request.user_id,))
             user = cur.fetchone()
-            
+
             if not user:
+                # Unattributable, but still a security event: sign-in attempts
+                # against IDs that do not exist are how enumeration looks.
+                secresp.failed_login(cur, user_id=None, public_user_id=None, role=None)
+                conn.commit()
                 raise HTTPException(status_code=401, detail="Invalid User ID or Password.")
             
             if user["status"] == "Pending":
@@ -163,8 +233,11 @@ def login(request: LoginRequest, response: Response):
                 
             if not verify_password(request.password, user["password_hash"]):
                 # Log failed attempt
-                cur.execute("INSERT INTO AuthLogs (user_id, public_user_id, action) VALUES (%s, %s, %s)", 
+                cur.execute("INSERT INTO AuthLogs (user_id, public_user_id, action) VALUES (%s, %s, %s)",
                             (user["id"], user["user_id"], "LOGIN_FAILED"))
+                # AuthLogs is not read by the detector; this event is.
+                secresp.failed_login(cur, user_id=str(user["id"]), public_user_id=user["user_id"],
+                                     role=user["role"])
                 conn.commit()
                 raise HTTPException(status_code=401, detail="Invalid User ID or Password.")
             
@@ -185,8 +258,11 @@ def login(request: LoginRequest, response: Response):
             """, (user["id"], hash_password(token), user["role"], expires_at))
             
             # Log successful login
-            cur.execute("INSERT INTO AuthLogs (user_id, public_user_id, action) VALUES (%s, %s, %s)", 
+            cur.execute("INSERT INTO AuthLogs (user_id, public_user_id, action) VALUES (%s, %s, %s)",
                         (user["id"], user["user_id"], "LOGIN_SUCCESS"))
+            aisec.record_security_event(
+                cur, actor_id=str(user["id"]), actor_public_id=user["user_id"],
+                actor_role=user["role"], event_type="LOGIN_SUCCESS", resource="login")
             conn.commit()
             
     response.set_cookie(SESSION_COOKIE_NAME, token, httponly=True, secure=False, samesite="lax", path="/")
@@ -1048,12 +1124,16 @@ def download_patient_lab_report(report_id: str, request: Request, session: dict 
         if not report:
             raise HTTPException(status_code=404, detail="Report not found")
 
-        pdf_bytes = _decrypt_report_pdf(report)
-
-        if not verify_mldsa_signature(report.get("document_hash") or "",
-                                      report.get("digital_signature") or "",
-                                      report.get("signer_mldsa_public_key") or ""):
-            logger.warning("Releasing report %s with an unverified ML-DSA signature", report_id)
+        # Previously a failed signature only logged a warning and the report was
+        # released anyway. An unverifiable report is not shown as trusted.
+        pdf_bytes = _release_verified(
+            conn, session, lambda: _decrypt_report_pdf(report), report,
+            resource=f"LabReport {report.get('report_id_public') or report_id}",
+            patient_id=str(user_uuid))
+        with conn.cursor(row_factory=dict_row) as cur:
+            _record_access(cur, session, patient_id=str(user_uuid), resource="lab_report",
+                           basis="own record")
+            conn.commit()
 
         anchor_document(
             conn, document_type="LabReport", document_id=str(report["id"]),
@@ -1085,9 +1165,9 @@ def verify_patient_lab_report(report_id: str, session: dict = Depends(require_ro
             cur.execute(_REPORT_SELECT + " WHERE lr.id = %s AND lr.patient_id = %s",
                         (report_id, user_uuid))
             report = cur.fetchone()
-    if not report:
-        raise HTTPException(status_code=404, detail="Report not found")
-    return _verify_report(report)
+        if not report:
+            raise HTTPException(status_code=404, detail="Report not found")
+        return _verify_and_record(conn, session, report)
 
 
 @app.get("/api/patient/prescriptions")
@@ -1195,9 +1275,11 @@ def get_patient_document_content(
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
-                SELECT m.*, u.mlkem_private_key_encrypted
+                SELECT m.*, u.mlkem_private_key_encrypted,
+                       a.mldsa_public_key AS signer_mldsa_public_key
                 FROM MedicalDocuments m
                 JOIN Users u ON m.patient_id = u.id
+                LEFT JOIN Users a ON a.id = m.doctor_id
                 WHERE m.id = %s AND m.patient_id = %s
             """, (document_id, user_uuid))
             r = cur.fetchone()
@@ -1205,7 +1287,9 @@ def get_patient_document_content(
         if not r:
             raise HTTPException(status_code=404, detail="Document not found")
 
-        released = _decrypt_medical_document(r)
+        released = _release_verified(conn, session, lambda: _decrypt_medical_document(r), r,
+                                     resource=f"MedicalDocument {document_id}",
+                                     patient_id=str(user_uuid))
 
         log_admin_action(
             conn, user_uuid, session.get("public_user_id"),
@@ -1296,13 +1380,25 @@ def revoke_patient_consent(
                 VALUES (%s, %s, 'Doctor', 'Revoked', %s, NOW())
                 ON CONFLICT (patient_id, subject_user_id, subject_role)
                 DO UPDATE SET status = 'Revoked', revoked_at = NOW(), scope = EXCLUDED.scope
+                RETURNING consent_id
             """, (user_uuid, doctor_id, json.dumps({"reason": body.reason} if body.reason else {})))
+            consent_id = cur.fetchone()["consent_id"]
 
             cur.execute("""
                 INSERT INTO Notifications (user_id, notification_type, title, body)
                 VALUES (%s, 'CONSENT_REVOKED', 'Record access withdrawn',
                         'A patient has withdrawn your access to their records. Emergency access remains available and is audited.')
             """, (doctor_id,))
+            # The withdrawal goes on-chain too, so a later database edit that
+            # quietly restores the doctor's access disagrees with the ledger.
+            ledger = consent_ledger.record(cur, consent_id=str(consent_id),
+                                           patient_id=str(user_uuid), doctor_id=str(doctor_id),
+                                           authorized=False)
+            aisec.record_security_event(
+                cur, actor_id=user_uuid, actor_public_id=session.get("public_user_id"),
+                actor_role="Patient", event_type="CONSENT_EVENT",
+                subject_patient_id=str(user_uuid), resource="CONSENT_REVOKED",
+                metadata={"ledger": ledger["recorded_on"]})
             conn.commit()
 
         log_admin_action(
@@ -1312,7 +1408,9 @@ def revoke_patient_consent(
             {"doctor": doctor["full_name"], "reason": body.reason},
         )
 
-    return {"status": "success", "message": f"Dr. {doctor['full_name']} can no longer access your records."}
+    return {"status": "success",
+            "message": f"Dr. {doctor['full_name']} can no longer access your records.",
+            "consent_ledger": ledger}
 
 
 @app.post("/api/patient/consent/{doctor_id}/grant")
@@ -1335,13 +1433,23 @@ def grant_patient_consent(
                 VALUES (%s, %s, 'Doctor', 'Authorized', NOW(), NULL)
                 ON CONFLICT (patient_id, subject_user_id, subject_role)
                 DO UPDATE SET status = 'Authorized', granted_at = NOW(), revoked_at = NULL
+                RETURNING consent_id
             """, (user_uuid, doctor_id))
+            consent_id = cur.fetchone()["consent_id"]
 
             cur.execute("""
                 INSERT INTO Notifications (user_id, notification_type, title, body)
                 VALUES (%s, 'CONSENT_GRANTED', 'Record access restored',
                         'A patient has restored your access to their records.')
             """, (doctor_id,))
+            ledger = consent_ledger.record(cur, consent_id=str(consent_id),
+                                           patient_id=str(user_uuid), doctor_id=str(doctor_id),
+                                           authorized=True)
+            aisec.record_security_event(
+                cur, actor_id=user_uuid, actor_public_id=session.get("public_user_id"),
+                actor_role="Patient", event_type="CONSENT_EVENT",
+                subject_patient_id=str(user_uuid), resource="CONSENT_GRANTED",
+                metadata={"ledger": ledger["recorded_on"]})
             conn.commit()
 
         log_admin_action(
@@ -1351,7 +1459,9 @@ def grant_patient_consent(
             {"doctor": doctor["full_name"]},
         )
 
-    return {"status": "success", "message": f"Dr. {doctor['full_name']}'s access has been restored."}
+    return {"status": "success",
+            "message": f"Dr. {doctor['full_name']}'s access has been restored.",
+            "consent_ledger": ledger}
 
 
 @app.get("/api/patient/vitals")
@@ -1624,26 +1734,21 @@ def get_doctor_patient_detail(patient_id: str, session: dict = Depends(require_r
             # relationship nor consent is refused, and told how to ask.
             allowed, basis = _doctor_patient_authorization(cur, user_uuid, patient_id)
             if not allowed:
-                raise HTTPException(
-                    status_code=403,
-                    detail=(
-                        "You do not have access to this patient's record — "
-                        f"{basis}. Request access from the patient to proceed."
-                    ),
-                )
+                _deny(cur, session, resource="patient_chart", reason=basis,
+                      patient_id=str(patient_id),
+                      detail=("You do not have access to this patient's record — "
+                              f"{basis}. Request access from the patient to proceed."))
+            decision = _security_gate(cur, session, resource="patient_chart",
+                                      patient_id=str(patient_id))
             log_admin_action(
                 conn, user_uuid, session.get("public_user_id"),
                 "DOCTOR_READ_PATIENT_RECORD", str(patient_id), user.get("user_id"),
-                details={"basis": basis},
+                details={"basis": basis, "risk_level": decision.level},
             )
             # Feed the AI security layer (§18). Behavioural metadata only —
             # which record, by whom, when — never the clinical content itself.
-            aisec.record_security_event(
-                cur, actor_id=user_uuid, actor_public_id=session.get("public_user_id"),
-                actor_role="Doctor", event_type="RECORD_ACCESS",
-                subject_patient_id=str(patient_id), resource="patient_chart",
-                metadata={"basis": basis},
-            )
+            _record_access(cur, session, patient_id=str(patient_id), resource="patient_chart",
+                           basis=basis, decision=decision)
 
             cur.execute("SELECT * FROM Diagnoses WHERE patient_id = %s ORDER BY visit_date DESC LIMIT 5", (patient_id,))
             diagnoses = cur.fetchall()
@@ -1690,11 +1795,26 @@ def get_doctor_patient_detail(patient_id: str, session: dict = Depends(require_r
         ],
     }
 
+def _require_write_access(cur, session: dict, patient_id: str, kind: str) -> None:
+    """Writing to a chart needs the same entitlement as reading it (spec §34).
+
+    These writes previously had no check at all — and because a diagnosis is
+    itself a "treating relationship", writing one for any patient then unlocked
+    that patient's whole chart. A doctor must already be treating, or have the
+    patient's consent, before adding to their record.
+    """
+    allowed, basis = _doctor_patient_authorization(cur, session["user_id"], patient_id)
+    if not allowed:
+        _deny(cur, session, resource=kind, reason=basis, patient_id=str(patient_id),
+              detail=f"You cannot add a {kind} to this patient's record — {basis}.")
+
+
 @app.post("/api/doctor/patients/{patient_id}/diagnosis")
 def create_diagnosis(patient_id: str, req: CreateDiagnosisRequest, session: dict = Depends(require_role("Doctor"))):
     user_uuid = session["user_id"]
     with get_db() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(row_factory=dict_row) as cur:
+            _require_write_access(cur, session, patient_id, "diagnosis")
             cur.execute("""
                 INSERT INTO Diagnoses (patient_id, doctor_id, title, description, symptoms, doctor_notes, recommended_tests, visit_date)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
@@ -1707,7 +1827,8 @@ def create_diagnosis(patient_id: str, req: CreateDiagnosisRequest, session: dict
 def create_prescription(patient_id: str, req: CreatePrescriptionRequest, session: dict = Depends(require_role("Doctor"))):
     user_uuid = session["user_id"]
     with get_db() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(row_factory=dict_row) as cur:
+            _require_write_access(cur, session, patient_id, "prescription")
             cur.execute("""
                 INSERT INTO Prescriptions (patient_id, doctor_id, medicine_name, dosage, frequency, duration, instructions, prescribed_date)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
@@ -1720,7 +1841,8 @@ def create_prescription(patient_id: str, req: CreatePrescriptionRequest, session
 def create_consultation(patient_id: str, req: CreateConsultationRequest, session: dict = Depends(require_role("Doctor"))):
     user_uuid = session["user_id"]
     with get_db() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(row_factory=dict_row) as cur:
+            _require_write_access(cur, session, patient_id, "consultation")
             cur.execute("""
                 INSERT INTO DoctorConsultations (patient_id, doctor_id, consultation_date, symptoms, diagnosis_summary, doctor_notes)
                 VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
@@ -1733,19 +1855,34 @@ def get_doctor_reports(session: dict = Depends(require_role("Doctor"))):
     user_uuid = session["user_id"]
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
+            # Same rule as _doctor_patient_authorization: a treating relationship
+            # or consent, and no withdrawal unless break-glass is live. The list
+            # previously ignored withdrawals, so a revoked doctor still saw
+            # every finding in it.
             cur.execute("""
                 SELECT lr.*, u.full_name as patient_name, u.user_id as patient_user_id
                 FROM LabReports lr
                 JOIN Users u ON lr.patient_id = u.id
-                WHERE lr.doctor_id = %s
+                WHERE (lr.doctor_id = %(d)s
                    OR EXISTS (SELECT 1 FROM Diagnoses d
-                               WHERE d.patient_id = lr.patient_id AND d.doctor_id = %s)
+                               WHERE d.patient_id = lr.patient_id AND d.doctor_id = %(d)s)
                    OR EXISTS (SELECT 1 FROM DoctorConsultations c
-                               WHERE c.patient_id = lr.patient_id AND c.doctor_id = %s)
+                               WHERE c.patient_id = lr.patient_id AND c.doctor_id = %(d)s)
                    OR EXISTS (SELECT 1 FROM Appointments a
-                               WHERE a.patient_id = lr.patient_id AND a.doctor_id = %s)
+                               WHERE a.patient_id = lr.patient_id AND a.doctor_id = %(d)s)
+                   OR EXISTS (SELECT 1 FROM LabTestRequests r
+                               WHERE r.patient_id = lr.patient_id AND r.doctor_id = %(d)s)
+                   OR EXISTS (SELECT 1 FROM Consent k
+                               WHERE k.patient_id = lr.patient_id AND k.subject_user_id = %(d)s
+                                 AND k.subject_role = 'Doctor' AND k.status = 'Authorized'))
+                  AND (NOT EXISTS (SELECT 1 FROM Consent x
+                                    WHERE x.patient_id = lr.patient_id AND x.subject_user_id = %(d)s
+                                      AND x.status IN ('Revoked', 'Rejected'))
+                       OR EXISTS (SELECT 1 FROM EmergencyAccess e
+                                   WHERE e.patient_id = lr.patient_id AND e.requester_id = %(d)s
+                                     AND e.expires_at > NOW()))
                 ORDER BY lr.upload_date DESC
-            """, (user_uuid, user_uuid, user_uuid, user_uuid))
+            """, {"d": user_uuid})
             rows = cur.fetchall()
     return [LabReportItem(
         id=str(r["id"]), report_name=r["report_name"], report_type=r["report_type"],
@@ -1834,6 +1971,7 @@ def create_medical_document(
             patient = cur.fetchone()
             if not patient:
                 raise HTTPException(status_code=404, detail="Patient not found")
+            _require_write_access(cur, session, str(req.patient_id), "medical document")
             if not patient["mlkem_public_key"]:
                 raise HTTPException(
                     status_code=409,
@@ -1940,10 +2078,10 @@ def _decrypt_medical_document(row: dict) -> dict:
     except PQCUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail="Document failed its integrity check.") from exc
+        raise _IntegrityFailure(status_code=409, detail="Document failed its integrity check.") from exc
 
     if sha256_hex(content_bytes) != row.get("document_hash"):
-        raise HTTPException(status_code=409, detail="Document digest does not match the recorded hash.")
+        raise _IntegrityFailure(status_code=409, detail="Document digest does not match the recorded hash.")
 
     return {"content": content_bytes.decode("utf-8"), "encrypted": True}
 
@@ -1959,16 +2097,27 @@ def get_medical_document_content(document_id: str, session: dict = Depends(requi
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
-                SELECT m.*, u.mlkem_private_key_encrypted
+                SELECT m.*, u.mlkem_private_key_encrypted,
+                       a.mldsa_public_key AS signer_mldsa_public_key
                 FROM MedicalDocuments m
                 JOIN Users u ON m.patient_id = u.id
+                LEFT JOIN Users a ON a.id = m.doctor_id
                 WHERE m.id = %s AND m.doctor_id = %s
             """, (document_id, user_uuid))
             r = cur.fetchone()
+            if not r:
+                raise HTTPException(status_code=404, detail="Document not found")
+            # Authorship does not outlive a withdrawal: the document is part of
+            # the patient's record, and the patient decides who reads it.
+            allowed, basis = _doctor_patient_authorization(cur, user_uuid, str(r["patient_id"]))
+            if not allowed:
+                _deny(cur, session, resource="medical_document", reason=basis,
+                      patient_id=str(r["patient_id"]),
+                      detail=f"You no longer have access to this patient's record — {basis}.")
 
-    if not r:
-        raise HTTPException(status_code=404, detail="Document not found")
-    return _decrypt_medical_document(r)
+        return _release_verified(conn, session, lambda: _decrypt_medical_document(r), r,
+                                 resource=f"MedicalDocument {document_id}",
+                                 patient_id=str(r["patient_id"]))
 
 @app.get("/api/doctor/appointments")
 def get_doctor_appointments(session: dict = Depends(require_role("Doctor"))):
@@ -2086,6 +2235,17 @@ def create_lab_test_request(
             if not patient:
                 raise HTTPException(status_code=404, detail="Patient not found or not an approved patient account")
 
+            # Spec §10: validate the doctor-patient relationship. Ordering a
+            # test previously needed nothing, and a lab request counts as a
+            # treating relationship — so one order for any patient unlocked
+            # that patient's whole chart.
+            allowed, basis = _doctor_patient_authorization(cur, user_uuid, str(patient["id"]))
+            if not allowed:
+                _deny(cur, session, resource="lab_request", reason=basis,
+                      patient_id=str(patient["id"]), request=request,
+                      detail=("You cannot order investigations for this patient — "
+                              f"{basis}. Request access from the patient first."))
+
             test_name = req.test_name or (panel["name"] if panel else None)
             if not test_name:
                 raise HTTPException(status_code=400, detail="A test name or panel must be supplied")
@@ -2112,6 +2272,11 @@ def create_lab_test_request(
                     [(tech["id"], f"{urgency}New investigation requested",
                       f"{test_name} requested for {patient['full_name']} ({patient['user_id']}).")
                      for tech in technicians])
+            aisec.record_security_event(
+                cur, actor_id=user_uuid, actor_public_id=session.get("public_user_id"),
+                actor_role="Doctor", event_type="LAB_REQUEST_CREATED",
+                subject_patient_id=str(patient["id"]), resource="lab_request",
+                ip_address=_client_ip(request), metadata={"priority": req.priority})
             conn.commit()
 
         log_admin_action(
@@ -2209,6 +2374,161 @@ def _emergency_record(row: dict) -> EmergencyAccessRecord:
 
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Access-path security (spec §8, §14, §23, §24, §34)
+#
+# One sequence for every clinical read, so no endpoint can quietly skip a step:
+#
+#   RBAC (require_role) → relationship / consent (+ on-chain consent check)
+#     → AI risk gate → release with integrity + ML-DSA signature verification
+#     → audit log + security event for the AI layer
+#
+# Refusals are recorded as ACCESS_DENIED events, so repeated probing for
+# records is itself a signal; integrity and signature failures open incidents.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _IntegrityFailure(HTTPException):
+    """A stored record failed its integrity check (GCM tag or recorded digest)."""
+
+
+def _client_ip(request: Optional[Request]) -> Optional[str]:
+    return request.client.host if request and request.client else None
+
+
+def _deny(cur, session: dict, *, resource: str, reason: str, patient_id: Optional[str] = None,
+          status_code: int = 403, detail: Optional[str] = None,
+          request: Optional[Request] = None):
+    """Refuse an access, and make the refusal count.
+
+    The refusal is recorded for the AI layer and committed before raising —
+    ``get_db`` rolls back on an exception, which would otherwise erase the
+    evidence that someone tried.
+    """
+    secresp.access_denied(
+        cur, actor_id=session["user_id"], actor_public_id=session.get("public_user_id"),
+        actor_role=session.get("role"), resource=resource, reason=reason,
+        patient_id=patient_id, ip_address=_client_ip(request))
+    secresp.commit_before_refusal(cur)
+    raise HTTPException(status_code=status_code, detail=detail or reason)
+
+
+def _security_gate(cur, session: dict, *, resource: str, patient_id: Optional[str] = None,
+                   emergency: bool = False) -> risk_engine.Decision:
+    """AI risk assessment between authorization and release (spec §23).
+
+    Runs only after RBAC and consent have already allowed the read, and can
+    only make it stricter: ``monitor`` lets it through with an alert, ``verify``
+    demands a recent password re-entry, ``block`` refuses. Which one a level
+    gets is configured in ``risk_engine.policy()``.
+    """
+    actor_id = session["user_id"]
+    actor_pub = session.get("public_user_id")
+    decision = risk_engine.evaluate(cur, actor_id, session.get("role") or "Unknown",
+                                    emergency=emergency)
+    if decision.level == "LOW":
+        return decision
+
+    alert_id, created = secresp.raise_alert_once(
+        cur, severity=decision.level, source=secresp.SOURCE_RISK_GATE, actor_id=actor_id,
+        title=f"{decision.level} risk at access — {actor_pub or 'unknown actor'}",
+        summary=(f"{decision.narrative} Action under the configured policy: "
+                 f"{decision.action.upper()} (resource: {resource}; baseline: "
+                 f"{decision.baseline_source}, {decision.baseline_samples} peers)."),
+        response={"monitor": "MONITOR", "verify": "VERIFY", "block": "RESTRICT"}.get(
+            decision.action, "MONITOR"),
+        dedupe_minutes=60)
+    if created and decision.level == "HIGH" and not emergency:
+        secresp.open_incident(
+            cur, event_type="HIGH_RISK_ACCESS", risk_level="HIGH",
+            detection_source=decision.baseline_source, actor_id=actor_id,
+            affected_resource=resource, alert_id=alert_id,
+            explanation=decision.narrative,
+            response=f"{decision.action.upper()} under the configured risk policy.")
+
+    if decision.action == "block":
+        secresp.access_denied(cur, actor_id=actor_id, actor_public_id=actor_pub,
+                              actor_role=session.get("role"), resource=resource,
+                              reason=f"blocked by risk policy ({decision.level})",
+                              patient_id=patient_id)
+        secresp.commit_before_refusal(cur)
+        raise HTTPException(status_code=403, detail={
+            "code": "RISK_BLOCKED",
+            "message": ("Access refused by the security policy. An administrator has "
+                        "been alerted."),
+            "risk_level": decision.level, "explanation": decision.narrative})
+
+    if decision.action == "verify" and not risk_engine.step_up_valid(cur, actor_id):
+        aisec.record_security_event(
+            cur, actor_id=actor_id, actor_public_id=actor_pub, actor_role=session.get("role"),
+            event_type="STEP_UP_REQUIRED", subject_patient_id=patient_id, resource=resource,
+            metadata={"risk_level": decision.level})
+        secresp.commit_before_refusal(cur)
+        raise HTTPException(status_code=428, detail={
+            "code": "STEP_UP_REQUIRED",
+            "message": ("Your recent activity was flagged for review. Re-enter your "
+                        "password to continue."),
+            "risk_level": decision.level, "explanation": decision.narrative})
+    return decision
+
+
+def _record_access(cur, session: dict, *, patient_id: str, resource: str,
+                   basis: Optional[str] = None,
+                   decision: Optional[risk_engine.Decision] = None) -> None:
+    """Feed one completed record read to the AI layer. Metadata only."""
+    aisec.record_security_event(
+        cur, actor_id=session["user_id"], actor_public_id=session.get("public_user_id"),
+        actor_role=session.get("role"), event_type="RECORD_ACCESS",
+        subject_patient_id=str(patient_id), resource=resource,
+        metadata={"basis": basis, "risk_level": decision.level if decision else None})
+
+
+def _signature_verdict(document_hash: Optional[str], signature: Optional[str],
+                       public_key: Optional[str]) -> Optional[bool]:
+    """True/False when the signature can be checked; None when it cannot be.
+
+    Without liboqs every verification returns False, and treating that as
+    tampering would raise an incident for every record in the system. "Cannot
+    check" is reported as exactly that.
+    """
+    if not pqc_available():
+        return None
+    return verify_mldsa_signature(document_hash or "", signature or "", public_key or "")
+
+
+def _release_verified(conn, session: dict, release, row: dict, *, resource: str,
+                      patient_id: Optional[str]):
+    """Release a stored record only if it is intact and its signature verifies.
+
+    ``release`` decrypts and checks the digest. A failure of either check is a
+    security event, not just an error: the record is withheld and an incident
+    opened (spec §14 — "do not silently display as trusted").
+    """
+    actor = {"actor_id": session.get("user_id"), "actor_public_id": session.get("public_user_id"),
+             "actor_role": session.get("role")}
+    try:
+        payload = release()
+    except _IntegrityFailure as exc:
+        with conn.cursor(row_factory=dict_row) as cur:
+            secresp.integrity_failure(cur, resource=resource, detail=str(exc.detail),
+                                      patient_id=patient_id, **actor)
+            secresp.commit_before_refusal(cur)
+        raise
+
+    if row.get("digital_signature"):
+        verdict = _signature_verdict(row.get("document_hash"), row.get("digital_signature"),
+                                     row.get("signer_mldsa_public_key"))
+        if verdict is False:
+            with conn.cursor(row_factory=dict_row) as cur:
+                secresp.signature_failure(
+                    cur, resource=resource, patient_id=patient_id, **actor,
+                    detail="The ML-DSA signature does not verify against the signer's public key.")
+                secresp.commit_before_refusal(cur)
+            raise HTTPException(
+                status_code=409,
+                detail=f"{resource} failed signature verification and was not released.")
+    return payload
+
+
 def _doctor_patient_authorization(cur, doctor_uuid: str, patient_uuid: str) -> tuple[bool, str]:
     """Decide whether this doctor may read this patient, and on what basis.
 
@@ -2247,6 +2567,19 @@ def _doctor_patient_authorization(cur, doctor_uuid: str, patient_uuid: str) -> t
     if r["treating"]:
         return True, "treating relationship"
     if r["consented"]:
+        # Smart-contract consent verification (spec §7). The row says
+        # Authorized; the contract must agree, or the row was changed outside
+        # the application and is not to be trusted.
+        ledger = consent_ledger.verify(cur, patient_id=patient_uuid, doctor_id=doctor_uuid,
+                                       db_authorized=True)
+        if ledger == consent_ledger.MISMATCH:
+            secresp.consent_ledger_mismatch(
+                cur, patient_id=patient_uuid, doctor_id=doctor_uuid,
+                detail=("The consent row grants access but the on-chain consent record "
+                        "does not. Access refused pending investigation."))
+            return False, "consent record does not match the blockchain ledger"
+        if ledger == consent_ledger.VERIFIED:
+            return True, "patient consent (verified on-chain)"
         return True, "patient consent"
     return False, "no treating relationship and no consent"
 
@@ -2279,24 +2612,23 @@ def _doctor_may_read_report(cur, doctor_uuid: str, report_id: str) -> Optional[d
     revoked consent for this doctor, the report is withheld unless a live
     emergency declaration is in force.
     """
-    cur.execute(_REPORT_SELECT + """
-        WHERE lr.id = %s
-          AND (
-            lr.doctor_id = %s
-            OR EXISTS (SELECT 1 FROM Diagnoses d
-                        WHERE d.patient_id = lr.patient_id AND d.doctor_id = %s)
-            OR EXISTS (SELECT 1 FROM DoctorConsultations c
-                        WHERE c.patient_id = lr.patient_id AND c.doctor_id = %s)
-            OR EXISTS (SELECT 1 FROM Appointments a
-                        WHERE a.patient_id = lr.patient_id AND a.doctor_id = %s)
-          )
-    """, (report_id, doctor_uuid, doctor_uuid, doctor_uuid, doctor_uuid))
+    report, allowed, _ = _doctor_report_access(cur, doctor_uuid, report_id)
+    return report if allowed else None
+
+
+def _doctor_report_access(cur, doctor_uuid: str, report_id: str) -> tuple[Optional[dict], bool, str]:
+    """The report, and whether this doctor may read it — by the same test as the chart.
+
+    Reports previously had their own, looser rule (any relationship, consent
+    ignored) — two answers to one question. Returns ``(report, allowed, basis)``
+    so a refusal can be recorded without revealing whether the report exists.
+    """
+    cur.execute(_REPORT_SELECT + " WHERE lr.id = %s", (report_id,))
     report = cur.fetchone()
     if not report:
-        return None
-    if _doctor_access_blocked(cur, doctor_uuid, str(report["patient_id"])):
-        return None
-    return report
+        return None, False, "not found"
+    allowed, basis = _doctor_patient_authorization(cur, doctor_uuid, str(report["patient_id"]))
+    return report, allowed, basis
 
 
 @app.post("/api/doctor/emergency-access")
@@ -2305,19 +2637,42 @@ def declare_emergency_access(
     request: Request,
     session: dict = Depends(require_role("Doctor")),
 ):
-    """Break-glass override of a patient's consent revocation.
+    """Break-glass override of a patient's consent decision (spec §9, §30).
 
-    Deliberately not gated on approval: in an emergency, waiting for a second
-    party defeats the purpose. The control is accountability rather than
-    prevention — the declaration is time-boxed, notified to the patient
-    immediately, written to the admin audit log, and anchored on-chain so it
-    cannot later be quietly removed.
+    Not gated on a second party's approval: in an emergency, waiting for one
+    defeats the purpose. The controls sit around the override instead, so it is
+    restricted, purpose-bound and reviewed rather than a silent bypass:
+
+      identity verification   the declarer re-enters their password
+      rate limit              at most EMERGENCY_MAX_PER_DAY declarations a day
+      AI risk assessment      scored like any access; HIGH is escalated, or
+                              refused if RISK_POLICY_EMERGENCY_HIGH=block
+      time box                1–24 hours, then it lapses on its own
+      notification            the patient is told immediately
+      blockchain              anchored, and recorded through the contract's own
+                              emergencyAccess() entry point when a chain is up
+      compliance record       an incident is opened for every override
     """
     user_uuid = session["user_id"]
+    actor_pub = session.get("public_user_id")
+    max_per_day = max(1, int(os.getenv("EMERGENCY_MAX_PER_DAY", "3")))
     expires_at = datetime.now(timezone.utc) + timedelta(hours=req.duration_hours)
 
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
+            # Identity verification. A session token alone may be stolen, or
+            # left open on a shared ward terminal.
+            cur.execute("SELECT password_hash FROM Users WHERE id = %s", (user_uuid,))
+            me = cur.fetchone()
+            if not me or not verify_password(req.password, me["password_hash"]):
+                secresp.failed_login(cur, user_id=user_uuid, public_user_id=actor_pub,
+                                     role="Doctor", ip_address=_client_ip(request))
+                _deny(cur, session, resource="break_glass", reason="identity verification failed",
+                      patient_id=str(req.patient_id), request=request,
+                      detail="Password incorrect — emergency access was not granted.")
+            # The password was just proven, which also satisfies a step-up.
+            risk_engine.record_step_up(cur, user_uuid)
+
             cur.execute(
                 "SELECT id, user_id, full_name FROM Users WHERE id = %s AND role = 'Patient'",
                 (req.patient_id,),
@@ -2326,11 +2681,33 @@ def declare_emergency_access(
             if not patient:
                 raise HTTPException(status_code=404, detail="Patient not found")
 
+            cur.execute(
+                """SELECT COUNT(*) AS n FROM EmergencyAccess
+                    WHERE requester_id = %s AND created_at > NOW() - INTERVAL '24 hours'""",
+                (user_uuid,))
+            recent = cur.fetchone()["n"]
+            if recent >= max_per_day:
+                secresp.raise_alert(
+                    cur, severity="HIGH", source=secresp.SOURCE_EMERGENCY, actor_id=user_uuid,
+                    title=f"Emergency access limit reached — {actor_pub or 'unknown actor'}",
+                    summary=(f"{actor_pub or 'A doctor'} attempted a further break-glass "
+                             f"declaration after {recent} in 24 hours (limit {max_per_day})."),
+                    response="ESCALATE", dedupe_minutes=24 * 60)
+                _deny(cur, session, resource="break_glass", reason="emergency declaration limit reached",
+                      patient_id=str(req.patient_id), status_code=429, request=request,
+                      detail=(f"You have declared {recent} emergency accesses in the last 24 hours, "
+                              "the configured maximum. An administrator has been alerted."))
+
+            # AI risk assessment, under the emergency policy.
+            decision = _security_gate(cur, session, resource="break_glass",
+                                      patient_id=str(req.patient_id), emergency=True)
+
             cur.execute("""
-                INSERT INTO EmergencyAccess (requester_id, patient_id, reason, status, expires_at)
-                VALUES (%s, %s, %s, 'Emergency', %s)
+                INSERT INTO EmergencyAccess (requester_id, patient_id, reason, status, expires_at,
+                                             risk_level)
+                VALUES (%s, %s, %s, 'Emergency', %s, %s)
                 RETURNING emergency_access_id
-            """, (user_uuid, req.patient_id, req.reason, expires_at))
+            """, (user_uuid, req.patient_id, req.reason, expires_at, decision.level))
             access_id = cur.fetchone()["emergency_access_id"]
 
             # The patient is told at once. Break-glass that the patient only
@@ -2346,38 +2723,46 @@ def declare_emergency_access(
             ))
             conn.commit()
 
+        event_hash = sha256_hex(
+            f"{access_id}|{user_uuid}|{req.patient_id}|{req.reason}".encode("utf-8"))
         anchor = anchor_document(
             conn,
             document_type="EmergencyAccess", document_id=str(access_id),
-            document_hash=sha256_hex(
-                f"{access_id}|{user_uuid}|{req.patient_id}|{req.reason}".encode("utf-8")
-            ),
-            action="EMERGENCY_ACCESS_DECLARED",
-            patient_id=str(req.patient_id), actor_id=user_uuid,
-            actor_public_id=session.get("public_user_id"),
+            document_hash=event_hash, action="EMERGENCY_ACCESS_DECLARED",
+            patient_id=str(req.patient_id), actor_id=user_uuid, actor_public_id=actor_pub,
         )
+        contract_tx = consent_ledger.emergency(doctor_id=user_uuid, patient_id=str(req.patient_id),
+                                               resource_hash=event_hash)
 
-        with conn.cursor() as cur:
+        with conn.cursor(row_factory=dict_row) as cur:
+            incident_ref = secresp.emergency_compliance_record(
+                cur, actor_id=user_uuid, actor_public_id=actor_pub,
+                patient_id=str(req.patient_id), emergency_id=str(access_id),
+                risk_level=decision.level, risk_explanation=decision.narrative,
+                tx_hash=anchor["tx_hash"])
             cur.execute(
-                "UPDATE EmergencyAccess SET blockchain_tx_hash = %s WHERE emergency_access_id = %s",
-                (anchor["tx_hash"], access_id),
+                """UPDATE EmergencyAccess SET blockchain_tx_hash = %s, contract_tx_hash = %s,
+                                              incident_ref = %s
+                    WHERE emergency_access_id = %s""",
+                (anchor["tx_hash"], contract_tx, incident_ref, access_id),
             )
+            # Break-glass is rare by design, so its frequency is a strong signal.
+            # The reason text is deliberately NOT forwarded: the AI layer scores
+            # behaviour, and the clinical justification is none of its business.
+            aisec.record_security_event(
+                cur, actor_id=user_uuid, actor_public_id=actor_pub,
+                actor_role="Doctor", event_type="EMERGENCY_ACCESS",
+                subject_patient_id=str(req.patient_id), resource="break_glass",
+                ip_address=_client_ip(request), metadata={"risk_level": decision.level})
             conn.commit()
 
         log_admin_action(
-            conn, user_uuid, session.get("public_user_id"),
+            conn, user_uuid, actor_pub,
             "EMERGENCY_ACCESS_DECLARED", str(req.patient_id), patient["user_id"],
-            request.client.host if request and request.client else None,
-            {"reason": req.reason, "expires_at": expires_at.isoformat(), "tx_hash": anchor["tx_hash"]},
-        )
-        # Break-glass is rare by design, so its frequency is a strong signal.
-        # The reason text is deliberately NOT forwarded: the AI layer scores
-        # behaviour, and the clinical justification is none of its business.
-        aisec.record_security_event(
-            cur, actor_id=user_uuid, actor_public_id=session.get("public_user_id"),
-            actor_role="Doctor", event_type="EMERGENCY_ACCESS",
-            subject_patient_id=str(req.patient_id), resource="break_glass",
-            ip_address=request.client.host if request and request.client else None,
+            _client_ip(request),
+            {"reason": req.reason, "expires_at": expires_at.isoformat(),
+             "tx_hash": anchor["tx_hash"], "contract_tx_hash": contract_tx,
+             "risk_level": decision.level, "incident_ref": incident_ref},
         )
 
     return {
@@ -2387,9 +2772,12 @@ def declare_emergency_access(
         "expires_at": expires_at.isoformat(),
         "blockchain_tx_hash": anchor["tx_hash"],
         "anchored_on": anchor["anchored_on"],
+        "contract_tx_hash": contract_tx,
+        "risk_level": decision.level,
+        "incident_ref": incident_ref,
         "message": (
             f"Emergency access granted until {expires_at.strftime('%H:%M UTC')}. "
-            "The patient has been notified and this is permanently recorded."
+            f"The patient has been notified and compliance record {incident_ref} was opened."
         ),
     }
 
@@ -2417,12 +2805,26 @@ def download_doctor_lab_report(report_id: str, request: Request, session: dict =
     user_uuid = session["user_id"]
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            report = _doctor_may_read_report(cur, user_uuid, report_id)
+            report, allowed, basis = _doctor_report_access(cur, user_uuid, report_id)
+            if report is None:
+                raise HTTPException(status_code=404, detail="Report not found or not authorised")
+            if not allowed:
+                # Same 404 as "no such report", so a refusal does not confirm the
+                # report exists — but the attempt is recorded.
+                _deny(cur, session, resource="lab_report", reason=basis,
+                      patient_id=str(report["patient_id"]), status_code=404, request=request,
+                      detail="Report not found or not authorised")
+            decision = _security_gate(cur, session, resource="lab_report",
+                                      patient_id=str(report["patient_id"]))
 
-        if not report:
-            raise HTTPException(status_code=404, detail="Report not found or not authorised")
-
-        pdf_bytes = _decrypt_report_pdf(report)
+        pdf_bytes = _release_verified(
+            conn, session, lambda: _decrypt_report_pdf(report), report,
+            resource=f"LabReport {report.get('report_id_public') or report_id}",
+            patient_id=str(report["patient_id"]))
+        with conn.cursor(row_factory=dict_row) as cur:
+            _record_access(cur, session, patient_id=str(report["patient_id"]),
+                           resource="lab_report", basis=basis, decision=decision)
+            conn.commit()
 
         anchor_document(
             conn, document_type="LabReport", document_id=str(report["id"]),
@@ -2451,10 +2853,14 @@ def verify_doctor_lab_report(report_id: str, session: dict = Depends(require_rol
     user_uuid = session["user_id"]
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            report = _doctor_may_read_report(cur, user_uuid, report_id)
-    if not report:
-        raise HTTPException(status_code=404, detail="Report not found or not authorised")
-    return _verify_report(report)
+            report, allowed, basis = _doctor_report_access(cur, user_uuid, report_id)
+            if report is None:
+                raise HTTPException(status_code=404, detail="Report not found or not authorised")
+            if not allowed:
+                _deny(cur, session, resource="lab_report", reason=basis,
+                      patient_id=str(report["patient_id"]), status_code=404,
+                      detail="Report not found or not authorised")
+        return _verify_and_record(conn, session, report)
 
 # ─── Lab Technician Dashboard Endpoints ────────────────────────────────────
 
@@ -2618,12 +3024,19 @@ def update_lab_test_request_status(request_id: str, payload: dict = Body(...), s
     user_uuid = session["user_id"]
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("SELECT status FROM LabTestRequests WHERE id = %s", (request_id,))
+            cur.execute("SELECT status, accepted_by, patient_id FROM LabTestRequests WHERE id = %s",
+                        (request_id,))
             existing = cur.fetchone()
             if not existing:
                 raise HTTPException(status_code=404, detail="Test request not found")
             if existing["status"] == "Completed":
                 raise HTTPException(status_code=409, detail="This request is already completed.")
+            # A request belongs to the technician who accepted it. Another
+            # technician advancing it would leave nobody accountable for it.
+            if existing["accepted_by"] and str(existing["accepted_by"]) != str(user_uuid):
+                _deny(cur, session, resource="lab_request", reason="request held by another technician",
+                      patient_id=str(existing["patient_id"]), status_code=409,
+                      detail="Another technician has already accepted this request.")
 
             cur.execute("""
                 UPDATE LabTestRequests
@@ -2711,7 +3124,7 @@ def _load_report_subject(cur, req: CreateStructuredLabReportRequest, tech_uuid: 
     if req.request_id:
         cur.execute("""
             SELECT r.id AS request_id, r.status, r.test_name, r.panel_code AS requested_panel,
-                   r.requested_date, r.doctor_id,
+                   r.requested_date, r.doctor_id, r.accepted_by,
                    p.id AS patient_id, p.user_id AS patient_user_id, p.full_name AS patient_name,
                    p.gender, p.date_of_birth_encrypted, p.blood_group_encrypted,
                    p.mlkem_public_key,
@@ -2735,6 +3148,7 @@ def _load_report_subject(cur, req: CreateStructuredLabReportRequest, tech_uuid: 
     cur.execute("""
         SELECT NULL::uuid AS request_id, NULL AS status, NULL AS test_name,
                NULL AS requested_panel, NULL AS requested_date, NULL::uuid AS doctor_id,
+               NULL::uuid AS accepted_by,
                p.id AS patient_id, p.user_id AS patient_user_id, p.full_name AS patient_name,
                p.gender, p.date_of_birth_encrypted, p.blood_group_encrypted,
                p.mlkem_public_key,
@@ -2793,6 +3207,30 @@ def create_structured_lab_report(
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             subject = _load_report_subject(cur, req, tech_uuid)
+
+            # Spec §11: a report must answer the request it claims to — the
+            # investigation that was ordered, filed by the technician who took
+            # it. The requested panel was loaded but never compared, so any
+            # result could be filed against any order.
+            if subject.get("request_id"):
+                if subject.get("requested_panel") and subject["requested_panel"] != panel["code"]:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(f"This request is for {subject['requested_panel']}, not "
+                                f"{panel['code']}. File the investigation that was ordered."))
+                holder = subject.get("accepted_by")
+                if holder and str(holder) != str(tech_uuid):
+                    _deny(cur, session, resource="lab_request",
+                          reason="report filed against another technician's request",
+                          patient_id=str(subject["patient_id"]), status_code=409,
+                          detail="Another technician has accepted this request.")
+                if not holder:
+                    # Filing an unaccepted request claims it, as accepting would.
+                    cur.execute(
+                        """UPDATE LabTestRequests
+                              SET accepted_by = %s, accepted_at = COALESCE(accepted_at, CURRENT_TIMESTAMP)
+                            WHERE id = %s AND accepted_by IS NULL""",
+                        (tech_uuid, subject["request_id"]))
 
             cur.execute(
                 "SELECT id, user_id, full_name, mldsa_private_key_encrypted FROM Users WHERE id = %s",
@@ -2922,6 +3360,11 @@ def create_structured_lab_report(
                 ))
                 notified.append(subject.get("doctor_user_id"))
 
+            aisec.record_security_event(
+                cur, actor_id=tech_uuid, actor_public_id=session.get("public_user_id"),
+                actor_role="Lab Technician", event_type="LAB_REPORT_UPLOADED",
+                subject_patient_id=str(patient_uuid), resource=f"LabReport {report_no}",
+                ip_address=_client_ip(request), metadata={"panel": panel["code"]})
             conn.commit()
 
         # 8. Anchor the digest for the audit trail (identifiers + hash only).
@@ -3000,7 +3443,7 @@ def _decrypt_report_pdf(report: dict) -> bytes:
     except ValueError as exc:
         # GCM authentication failed: the stored ciphertext does not match its tag.
         logger.error("Integrity failure decrypting report %s: %s", report.get("id"), exc)
-        raise HTTPException(
+        raise _IntegrityFailure(
             status_code=409,
             detail="Report failed its integrity check and was not released.",
         ) from exc
@@ -3009,7 +3452,7 @@ def _decrypt_report_pdf(report: dict) -> bytes:
         raise HTTPException(status_code=500, detail="Unable to decrypt this report.") from exc
 
     if sha256_hex(pdf_bytes) != report.get("document_hash"):
-        raise HTTPException(
+        raise _IntegrityFailure(
             status_code=409,
             detail="Report digest does not match the recorded hash; release withheld.",
         )
@@ -3059,6 +3502,9 @@ def _verify_report(report: dict) -> ReportVerification:
     try:
         pdf_bytes = _decrypt_report_pdf(report)
         hash_matches = sha256_hex(pdf_bytes) == report.get("document_hash")
+    except _IntegrityFailure as exc:
+        detail = str(exc.detail)
+        report["_integrity_failed"] = True
     except HTTPException as exc:
         detail = str(exc.detail)
 
@@ -3093,6 +3539,37 @@ def _verify_report(report: dict) -> ReportVerification:
         anchored_on=report.get("anchored_on"),
         verified_at=datetime.now(timezone.utc), detail=detail,
     )
+
+
+def _verify_and_record(conn, session: dict, report: dict) -> ReportVerification:
+    """Verify a report, and report any failure to Alert & Response (spec §24).
+
+    Verification is the moment tampering is discovered, so a failed check must
+    open an incident rather than only render red text to whoever clicked.
+    """
+    result = _verify_report(report)
+    resource = f"LabReport {report.get('report_id_public') or report.get('id')}"
+    patient_id = str(report.get("patient_id"))
+    actor = {"actor_id": session.get("user_id"), "actor_public_id": session.get("public_user_id"),
+             "actor_role": session.get("role")}
+    with conn.cursor(row_factory=dict_row) as cur:
+        if report.get("_integrity_failed"):
+            secresp.integrity_failure(cur, resource=resource, detail=result.detail,
+                                      patient_id=patient_id, **actor)
+        elif result.blockchain_verified is False:
+            secresp.integrity_failure(
+                cur, resource=resource, patient_id=patient_id, **actor,
+                detail="The stored digest differs from the digest anchored on the blockchain.")
+        if pqc_available() and report.get("digital_signature") and not result.signature_valid:
+            secresp.signature_failure(
+                cur, resource=resource, patient_id=patient_id, **actor,
+                detail="The ML-DSA signature does not verify against the signer's public key.")
+        aisec.record_security_event(
+            cur, event_type="REPORT_VERIFIED", subject_patient_id=patient_id, resource="lab_report",
+            metadata={"hash_matches": result.hash_matches, "signature_valid": result.signature_valid,
+                      "blockchain_verified": result.blockchain_verified}, **actor)
+        conn.commit()
+    return result
 
 
 _REPORT_SELECT = """
@@ -3187,7 +3664,10 @@ def download_lab_tech_report(report_id: str, request: Request, session: dict = D
         if not report:
             raise HTTPException(status_code=404, detail="Report not found or not authorised")
 
-        pdf_bytes = _decrypt_report_pdf(report)
+        pdf_bytes = _release_verified(
+            conn, session, lambda: _decrypt_report_pdf(report), report,
+            resource=f"LabReport {report.get('report_id_public') or report_id}",
+            patient_id=str(report["patient_id"]))
 
         anchor_document(
             conn, document_type="LabReport", document_id=str(report["id"]),
@@ -3351,52 +3831,20 @@ def get_imaging_image(imaging_id: str, session: dict = Depends(require_role("Lab
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
-                SELECT ir.*, u.mlkem_private_key_encrypted
+                SELECT ir.*, u.mlkem_private_key_encrypted,
+                       t.mldsa_public_key AS signer_mldsa_public_key
                 FROM ImagingReports ir
                 JOIN Users u ON ir.patient_id = u.id
+                LEFT JOIN Users t ON t.id = ir.lab_tech_id
                 WHERE ir.id = %s AND ir.lab_tech_id = %s
             """, (imaging_id, user_uuid))
             r = cur.fetchone()
-
-    if not r:
-        raise HTTPException(status_code=404, detail="Imaging report not found")
-
-    # Rows predating encryption kept their plaintext payload in image_data.
-    if not r.get("encrypted_image"):
-        if r.get("image_data"):
-            return {"image_data": r["image_data"], "encrypted": False}
-        raise HTTPException(status_code=404, detail="No image stored for this study.")
-
-    ciphertext = r["encrypted_image"]
-    if not ciphertext and r.get("s3_key"):
-        try:
-            ciphertext = download_file_from_s3(r["s3_key"]).decode("utf-8")
-        except StorageError as exc:
-            logger.error("S3 recovery failed for imaging %s: %s", imaging_id, exc)
-    # Third copy. Now that content is genuinely pinned, IPFS is a real recovery
-    # path rather than a fingerprint — worth trying before giving up.
-    if not ciphertext and r.get("ipfs_cid") and is_ipfs_configured():
-        try:
-            ciphertext = fetch_from_ipfs(r["ipfs_cid"]).decode("utf-8")
-            logger.info("Recovered imaging %s from IPFS", imaging_id)
-        except IPFSError as exc:
-            logger.error("IPFS recovery failed for imaging %s: %s", imaging_id, exc)
-
-    try:
-        shared_secret = decapsulate_aes_key(r["encrypted_aes_key"], r["mlkem_private_key_encrypted"])
-        image_bytes = decrypt_document(
-            ciphertext, derive_aes_key(shared_secret),
-            r["encryption_nonce"], r["encryption_tag"],
-        )
-    except PQCUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail="Image failed its integrity check.") from exc
-
-    if sha256_hex(image_bytes) != r.get("document_hash"):
-        raise HTTPException(status_code=409, detail="Image digest does not match the recorded hash.")
-
-    return {"image_data": image_bytes.decode("utf-8"), "encrypted": True}
+        if not r:
+            raise HTTPException(status_code=404, detail="Imaging report not found")
+        # One release path for every reader (it used to be a copy of it).
+        return _release_verified(conn, session, lambda: _release_imaging_payload(r, imaging_id),
+                                 r, resource=f"Imaging {imaging_id}",
+                                 patient_id=str(r["patient_id"]))
 
 @app.get("/api/lab-tech/notifications")
 def get_lab_tech_notifications(session: dict = Depends(require_role("Lab Technician"))):
@@ -4053,12 +4501,19 @@ def _decide_access_request(request_id: str, session: dict, approve: bool, note: 
                 patient_id=str(patient_uuid), actor_id=patient_uuid,
                 actor_public_id=session.get("public_user_id"),
             )
+            # Smart-contract consent (spec §7): the decision itself goes on-chain
+            # as consent state, separately from the audit anchor above, so that
+            # checkConsent() can later be asked whether the row still agrees.
+            ledger = consent_ledger.record(cur, consent_id=str(request_id),
+                                           patient_id=str(patient_uuid),
+                                           doctor_id=str(row["doctor_id"]), authorized=approve)
             conn.commit()
 
             cur.execute(_ACCESS_REQUEST_SELECT + " WHERE c.consent_id = %s", (request_id,))
             record = _access_request_record(cur.fetchone())
     return {"status": "success", "request": record,
-            "blockchain_tx_hash": (anchor or {}).get("tx_hash")}
+            "blockchain_tx_hash": (anchor or {}).get("tx_hash"),
+            "consent_ledger": ledger}
 
 
 @app.post("/api/patient/access-requests/{request_id}/approve")
@@ -4094,7 +4549,12 @@ from app import zkp_service as zkp  # noqa: E402
 
 def _persist_assessment(cur, window, risk, level, contributions, source,
                         hours: int) -> Optional[str]:
-    """Store one risk assessment, and raise an alert when it is not LOW."""
+    """Store one risk assessment, and raise an alert when it is not LOW.
+
+    Alerts are deduplicated per actor and level for a day: scheduled analysis
+    re-scores everyone every half hour, and one open alert is what a reviewer
+    needs, not forty-eight. HIGH opens an incident only with a fresh alert.
+    """
     import json
     from datetime import timedelta as _td
     end = datetime.now(timezone.utc)
@@ -4113,39 +4573,29 @@ def _persist_assessment(cur, window, risk, level, contributions, source,
 
     narrative = aisec.narrate(level, contributions)
     response = aisec.RESPONSE_BY_LEVEL[level]
-    cur.execute(
-        """INSERT INTO SecurityAlerts (assessment_id, actor_id, severity, title, summary, response)
-           VALUES (%s,%s,%s,%s,%s,%s) RETURNING id""",
-        (assessment_id, window.actor_id, level,
-         f"{level} risk behaviour — {window.actor_public_id or 'unknown actor'}",
-         narrative, response),
-    )
-    alert_id = cur.fetchone()["id"]
+    alert_id, created = secresp.raise_alert_once(
+        cur, severity=level, source=source, actor_id=window.actor_id,
+        assessment_id=str(assessment_id),
+        title=f"{level} risk behaviour — {window.actor_public_id or 'unknown actor'}",
+        summary=narrative, response=response, dedupe_minutes=24 * 60)
 
     # HIGH risk opens a compliance record (§25). MEDIUM stays an alert: opening
     # an incident for every mild deviation would bury the serious ones.
-    if level == "HIGH":
-        cur.execute("SELECT COUNT(*) AS n FROM SecurityIncidents")
-        ref = f"INC-{datetime.now().year}-{cur.fetchone()['n'] + 1:05d}"
-        cur.execute(
-            """INSERT INTO SecurityIncidents (incident_ref, alert_id, actor_id, event_type,
-                                              affected_resource, risk_level, detection_source,
-                                              explanation, response, audit_reference)
-               VALUES (%s,%s,%s,'ANOMALOUS_ACCESS_PATTERN',%s,%s,%s,%s,%s,%s)""",
-            (ref, alert_id, window.actor_id,
-             f"{int(window.features.get('distinct_patients', 0))} patient records",
-             level, source, narrative, response, str(assessment_id)),
-        )
+    if level == "HIGH" and created:
+        secresp.open_incident(
+            cur, event_type="ANOMALOUS_ACCESS_PATTERN", risk_level=level,
+            detection_source=source, actor_id=window.actor_id, alert_id=alert_id,
+            affected_resource=f"{int(window.features.get('distinct_patients', 0))} patient records",
+            explanation=narrative, response=response, audit_reference=str(assessment_id))
     return str(assessment_id)
 
 
-@app.post("/api/admin/security/analyze")
-def run_security_analysis(hours: int = Query(24, ge=1, le=720),
-                          session: dict = Depends(require_role("Administrator"))):
-    """Run local anomaly detection over recent activity (§19).
+def _run_security_analysis(hours: int) -> dict:
+    """Score every active actor against their role's baseline.
 
-    Fits a baseline per role, scores every active actor against their own peer
-    group, and records assessments, alerts and incidents.
+    The baseline is the federated model for the role when real institutions
+    built one, otherwise this hospital's own (see risk_engine.select_baseline).
+    Roles with too few actors to define "normal" are reported, not scored.
     """
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
@@ -4157,20 +4607,72 @@ def run_security_analysis(hours: int = Query(24, ge=1, le=720),
             for w in windows:
                 by_role.setdefault(w.actor_role or "Unknown", []).append(w)
 
+            local = aisec.fit_role_baselines(windows)
+            federated, federated_label = risk_engine.usable_federated_model(cur)
+            min_peers = risk_engine.policy()["min_peers"]
+
             summary = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
+            baselines_used: dict[str, str] = {}
+            too_small: list[str] = []
             for role, group in by_role.items():
                 # Comparing a doctor against nurses would flag ordinary role
                 # differences as anomalies, so each role is its own peer group.
-                baseline = aisec.fit_baseline(group)
+                baseline, source, samples = risk_engine.select_baseline(
+                    role, local, federated, min_peers)
+                if baseline is None:
+                    too_small.append(role)
+                    continue
+                baselines_used[role] = f"{source} ({samples} peers)"
                 for w in group:
                     risk, level, contributions = aisec.score(w, baseline)
-                    _persist_assessment(cur, w, risk, level, contributions,
-                                        "LOCAL_ANOMALY", hours)
+                    _persist_assessment(cur, w, risk, level, contributions, source, hours)
                     summary[level] += 1
             conn.commit()
 
-    return {"analysed": len(windows), "window_hours": hours,
-            "peer_groups": list(by_role.keys()), "risk_breakdown": summary}
+    risk_engine.invalidate_baselines()
+    return {"analysed": sum(summary.values()), "window_hours": hours,
+            "peer_groups": list(by_role.keys()), "risk_breakdown": summary,
+            "baselines": baselines_used, "federated_model": federated_label,
+            "groups_too_small_to_score": too_small}
+
+
+@app.post("/api/admin/security/analyze")
+def run_security_analysis(hours: int = Query(24, ge=1, le=720),
+                          session: dict = Depends(require_role("Administrator"))):
+    """Run local anomaly detection over recent activity now (§19).
+
+    It also runs on a schedule; this is the on-demand trigger.
+    """
+    return _run_security_analysis(hours)
+
+
+@app.get("/api/admin/security/policy")
+def get_security_policy(session: dict = Depends(require_role("Administrator"))):
+    """The risk decision policy in force (§23), and where each signal comes from.
+
+    Documented here as well as in code so an administrator can see what a
+    MEDIUM or HIGH score actually does without reading the source.
+    """
+    s_ = federation.settings()
+    return {
+        "risk_policy": risk_engine.policy(),
+        "actions": {
+            "allow": "No action; the access proceeds.",
+            "monitor": "The access proceeds; an alert is raised for review.",
+            "verify": "The access proceeds only after the user re-enters their password.",
+            "block": "The access is refused; an alert and an incident are opened.",
+        },
+        "emergency_max_per_day": max(1, int(os.getenv("EMERGENCY_MAX_PER_DAY", "3"))),
+        "scheduled_analysis_minutes": int(os.getenv("SECURITY_ANALYSIS_INTERVAL_MINUTES", "30") or 0),
+        "federation_participant": {"configured": federation.is_configured(),
+                                   "hub_url": s_["hub_url"], "node_name": s_["node_name"]},
+        "consent_ledger": "on-chain" if _chain_reachable() else "database only (chain unreachable)",
+    }
+
+
+def _chain_reachable() -> bool:
+    from app.chain_client import get_chain_client
+    return get_chain_client() is not None
 
 
 @app.get("/api/admin/security/risk-assessments")
@@ -4222,6 +4724,7 @@ def list_security_alerts(page: int = Query(1, ge=1), per_page: int = Query(20, g
             alerts = [{
                 "id": str(r["id"]), "severity": r["severity"], "title": r["title"],
                 "summary": r["summary"], "response": r["response"],
+                "source": r.get("source") or "LOCAL_ANOMALY",
                 "actor_name": r["full_name"], "actor_public_id": r["actor_public_id"],
                 "acknowledged": r["acknowledged_at"] is not None,
                 "created_at": r["created_at"],
@@ -4252,18 +4755,63 @@ def list_security_incidents(session: dict = Depends(require_role("Administrator"
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                """SELECT i.*, u.full_name, u.user_id AS actor_public_id
-                     FROM SecurityIncidents i LEFT JOIN Users u ON u.id = i.actor_id
-                    ORDER BY (i.status = 'Open') DESC, i.created_at DESC LIMIT 100""")
+                """SELECT i.*, u.full_name, u.user_id AS actor_public_id,
+                          r.user_id AS resolved_by_public_id
+                     FROM SecurityIncidents i
+                     LEFT JOIN Users u ON u.id = i.actor_id
+                     LEFT JOIN Users r ON r.id = i.resolved_by
+                    ORDER BY CASE i.status WHEN 'Open' THEN 0 WHEN 'Investigating' THEN 1 ELSE 2 END,
+                             i.created_at DESC
+                    LIMIT 100""")
             incidents = [{
+                "id": str(r["id"]),
                 "incident_ref": r["incident_ref"], "event_type": r["event_type"],
                 "affected_resource": r["affected_resource"], "risk_level": r["risk_level"],
                 "detection_source": r["detection_source"], "explanation": r["explanation"],
                 "response": r["response"], "status": r["status"],
+                "resolution": r.get("resolution"),
+                "resolved_by": r.get("resolved_by_public_id"),
                 "actor_name": r["full_name"], "actor_public_id": r["actor_public_id"],
-                "audit_reference": r["audit_reference"], "created_at": r["created_at"],
+                "audit_reference": r["audit_reference"],
+                "blockchain_tx_hash": r.get("blockchain_tx_hash"),
+                "created_at": r["created_at"], "updated_at": r.get("updated_at"),
+                "closed_at": r.get("closed_at"),
             } for r in cur.fetchall()]
     return {"total": len(incidents), "incidents": incidents}
+
+
+@app.post("/api/admin/security/incidents/{incident_id}")
+def update_security_incident(incident_id: str, req: IncidentUpdateRequest,
+                             session: dict = Depends(require_role("Administrator"))):
+    """Work an incident: Open → Investigating → Closed (with a resolution).
+
+    A closed incident is never reopened or deleted here; a recurrence opens a
+    new record, so the compliance history only ever grows.
+    """
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT incident_ref, status FROM SecurityIncidents WHERE id = %s",
+                        (incident_id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Incident not found")
+            if row["status"] == "Closed":
+                raise HTTPException(status_code=409, detail="This incident is already closed.")
+            cur.execute(
+                """UPDATE SecurityIncidents
+                      SET status = %s,
+                          resolution = COALESCE(%s, resolution),
+                          resolved_by = CASE WHEN %s = 'Closed' THEN %s ELSE resolved_by END,
+                          closed_at = CASE WHEN %s = 'Closed' THEN CURRENT_TIMESTAMP ELSE closed_at END,
+                          updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s""",
+                (req.status, (req.resolution or "").strip() or None, req.status,
+                 session["user_id"], req.status, incident_id))
+            log_admin_action(conn, session["user_id"], session.get("public_user_id"),
+                             f"SECURITY_INCIDENT_{req.status.upper()}",
+                             details={"incident_ref": row["incident_ref"]})
+            conn.commit()
+    return {"status": "success", "incident_ref": row["incident_ref"], "new_status": req.status}
 
 
 # ─── Federated learning / federated IDS (spec §20–21) ────────────────────────
@@ -4296,7 +4844,11 @@ def run_federated_round(session: dict = Depends(require_role("Administrator"))):
             if not windows:
                 raise HTTPException(status_code=400, detail="No activity to learn from yet.")
 
-            local = aisec.fit_baseline(windows)
+            # Per-role local model: detection compares each actor with their own
+            # role, so the shared model must be per role too (version 2 params).
+            local_baselines = aisec.fit_role_baselines(windows)
+            local_params = aisec.role_parameters(local_baselines)
+            local_samples = len(windows)
             cur.execute("SELECT COALESCE(MAX(round_number), 0) + 1 AS n FROM FederatedRounds")
             rnd = cur.fetchone()["n"]
 
@@ -4307,9 +4859,8 @@ def run_federated_round(session: dict = Depends(require_role("Administrator"))):
                 """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,
                                                 sample_count, local_parameters)
                    VALUES (%s,%s,FALSE,%s,%s)""",
-                (rnd, "This hospital (local)", local.sample_count,
-                 json.dumps(local.to_parameters())))
-            nodes.append(("This hospital (local)", local.sample_count, local.to_parameters()))
+                (rnd, "This hospital (local)", local_samples, json.dumps(local_params)))
+            nodes.append(("This hospital (local)", local_samples, local_params))
 
             # Real peer submissions for this round take precedence. Simulated
             # peers exist to demonstrate the aggregation when nobody has
@@ -4348,29 +4899,38 @@ def run_federated_round(session: dict = Depends(require_role("Administrator"))):
 
             simulated_used = 0 if real_peers else len(SIMULATED_PEERS)
             for name, m_scale, s_scale in (SIMULATED_PEERS if not real_peers else []):
-                params = {
-                    "medians": {k: round(v * m_scale, 4) for k, v in local.medians.items()},
-                    "scales": {k: round(v * s_scale, 4) for k, v in local.scales.items()},
-                    "sample_count": max(1, int(local.sample_count * m_scale)),
+                roles = {
+                    role: {
+                        "medians": {k: round(v * m_scale, 4) for k, v in b.medians.items()},
+                        "scales": {k: round(v * s_scale, 4) for k, v in b.scales.items()},
+                        "sample_count": max(1, int(b.sample_count * m_scale)),
+                    } for role, b in local_baselines.items()
                 }
+                params = {"version": aisec.PARAMETERS_VERSION, "roles": roles}
+                samples = max(1, int(local_samples * m_scale))
                 cur.execute(
                     """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,
                                                     sample_count, local_parameters)
                        VALUES (%s,%s,TRUE,%s,%s)""",
-                    (rnd, name, params["sample_count"], json.dumps(params)))
-                nodes.append((name, params["sample_count"], params))
+                    (rnd, name, samples, json.dumps(params)))
+                nodes.append((name, samples, params))
 
-            global_params = aisec.federated_average(nodes)
+            global_params = aisec.federated_average_roles(nodes)
+            real_nodes = 1 + len(real_peers)
             cur.execute(
                 """INSERT INTO FederatedGlobalModel (round_number, parameters,
-                                                     contributing_nodes, total_samples)
-                   VALUES (%s,%s,%s,%s)""",
+                                                     contributing_nodes, total_samples,
+                                                     real_nodes, simulated_nodes)
+                   VALUES (%s,%s,%s,%s,%s,%s)""",
                 (rnd, json.dumps(global_params), global_params["contributing_nodes"],
-                 global_params["total_samples"]))
+                 global_params["total_samples"], real_nodes, simulated_used))
             log_admin_action(conn, session["user_id"], session.get("public_user_id"),
                              "FEDERATED_ROUND_COMPLETED")
             conn.commit()
 
+    # A model real institutions built replaces the local baseline in detection;
+    # drop the cached one so the next access is scored against it.
+    risk_engine.invalidate_baselines()
     real_peer_count = len(real_peers)
     if real_peer_count:
         disclosure = (
@@ -4395,14 +4955,19 @@ def run_federated_round(session: dict = Depends(require_role("Administrator"))):
         "local_node_is_real": True,
         "real_peer_nodes": real_peer_count,
         "peer_nodes_simulated": simulated_used,
-        "disclosure": disclosure,
+        "used_for_detection": real_peer_count > 0,
+        "disclosure": disclosure + (
+            " This model now replaces the local baseline in detection for the roles it describes."
+            if real_peer_count else
+            " A model that includes simulated peers is never used to score real people."),
         "global_parameters": global_params,
     }
 
 
 @app.get("/api/admin/security/federated/status")
 def federated_status(session: dict = Depends(require_role("Administrator"))):
-    """Federated IDS status: rounds, nodes, and the current global model."""
+    """Federated IDS status: rounds, nodes, the current global model, and
+    which model detection is actually using."""
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""SELECT * FROM FederatedGlobalModel
@@ -4416,21 +4981,96 @@ def federated_status(session: dict = Depends(require_role("Administrator"))):
             nodes = cur.fetchall()
             cur.execute("SELECT COUNT(DISTINCT round_number) AS n FROM FederatedRounds")
             rounds = cur.fetchone()["n"]
+            cur.execute("""SELECT hub_url, hub_round, real_nodes, pulled_at
+                             FROM FederatedHubModels ORDER BY pulled_at DESC LIMIT 1""")
+            hub_model = cur.fetchone()
+            in_use, in_use_label = risk_engine.usable_federated_model(cur)
 
+    real_nodes = (latest or {}).get("real_nodes") or 0
+    simulated = (latest or {}).get("simulated_nodes") or 0
+    if not rounds and not hub_model:
+        state, disclosure = "NOT_YET_RUN", "No federated round has run yet."
+    elif real_nodes >= 2 or hub_model:
+        state = "LIVE_FEDERATION"
+        disclosure = (f"The latest model was built by {real_nodes} real institution(s)"
+                      + (f" and {simulated} simulated node(s)" if simulated else "")
+                      + "." if latest else "A global model was pulled from a federation hub.")
+    else:
+        state = "SIMULATED_PEERS"
+        disclosure = ("Federated aggregation runs for real, but no peer institution has "
+                      "submitted yet, so the other nodes in the latest round are simulated. "
+                      "That model is not used to score anyone.")
+
+    s_ = federation.settings()
     return {
         "rounds_completed": rounds,
         "latest_round": latest["round_number"] if latest else None,
-        "aggregation": "FedAvg",
+        "aggregation": "FedAvg, per role",
         "global_model": latest["parameters"] if latest else None,
+        "real_nodes": real_nodes,
+        "simulated_nodes": simulated,
         "nodes": [{"name": n["node_name"], "simulated": n["is_simulated"],
                    "samples": n["sample_count"]} for n in nodes],
-        "status": "SIMULATED_PEERS" if rounds else "NOT_YET_RUN",
-        "disclosure": (
-            "Federated aggregation is implemented and runs for real; the peer "
-            "institutions are simulated because this is a single-hospital "
-            "deployment. Not a live multi-hospital federation."
-        ),
+        "status": state,
+        "detection_baseline": in_use_label or "local (no real federated model yet)",
+        "participant": {
+            "configured": federation.is_configured(),
+            "hub_url": s_["hub_url"], "node_name": s_["node_name"],
+            "last_pulled": ({"hub_round": hub_model["hub_round"],
+                             "real_nodes": hub_model["real_nodes"],
+                             "pulled_at": hub_model["pulled_at"]} if hub_model else None),
+        },
+        "disclosure": disclosure,
     }
+
+
+# ─── This hospital as a participant in someone else's federation ────────────
+
+@app.post("/api/admin/federated/hub/submit")
+def submit_to_federation_hub(session: dict = Depends(require_role("Administrator"))):
+    """Fit this hospital's per-role model and submit it, signed, to the hub."""
+    if not federation.is_configured():
+        raise HTTPException(status_code=409, detail=(
+            "This hospital is not configured as a federation participant. Set "
+            "FEDERATION_HUB_URL, FEDERATION_NODE_NAME and FEDERATION_SHARED_SECRET."))
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            try:
+                result = federation.submit_local_update(cur)
+            except federation.FederationError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+            log_admin_action(conn, session["user_id"], session.get("public_user_id"),
+                             "FEDERATED_UPDATE_SUBMITTED",
+                             details={"round": result.get("round_number"),
+                                      "roles": result.get("roles")})
+            conn.commit()
+    return {**result, "note": "Only per-role medians and scales were sent. No records, "
+                              "events or identifiers left this hospital."}
+
+
+@app.post("/api/admin/federated/hub/pull")
+def pull_from_federation_hub(session: dict = Depends(require_role("Administrator"))):
+    """Fetch the hub's global model and start scoring with it."""
+    if not federation.is_configured():
+        raise HTTPException(status_code=409, detail=(
+            "This hospital is not configured as a federation participant."))
+    try:
+        model = federation.pull_global_model()
+    except federation.FederationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            federation.store_pulled_model(cur, model)
+            log_admin_action(conn, session["user_id"], session.get("public_user_id"),
+                             "FEDERATED_MODEL_PULLED",
+                             details={"hub_round": model.get("round_number")})
+            conn.commit()
+    risk_engine.invalidate_baselines()
+    roles = sorted(aisec.as_role_parameters(model["parameters"]))
+    return {"status": "success", "hub_round": model.get("round_number"),
+            "contributing_nodes": model.get("contributing_nodes"),
+            "real_nodes": model.get("real_nodes"), "roles": roles,
+            "note": "Detection now uses this global model for the roles it describes."}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4513,10 +5153,10 @@ def _release_imaging_payload(r: dict, imaging_id: str) -> dict:
     except PQCUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail="Image failed its integrity check.") from exc
+        raise _IntegrityFailure(status_code=409, detail="Image failed its integrity check.") from exc
 
     if sha256_hex(image_bytes) != r.get("document_hash"):
-        raise HTTPException(status_code=409, detail="Image digest does not match the recorded hash.")
+        raise _IntegrityFailure(status_code=409, detail="Image digest does not match the recorded hash.")
 
     return {"image_data": image_bytes.decode("utf-8"), "encrypted": True}
 
@@ -4539,14 +5179,19 @@ def get_patient_imaging_image(imaging_id: str, session: dict = Depends(require_r
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                """SELECT ir.*, u.mlkem_private_key_encrypted
+                """SELECT ir.*, u.mlkem_private_key_encrypted,
+                          t.mldsa_public_key AS signer_mldsa_public_key
                      FROM ImagingReports ir JOIN Users u ON u.id = ir.patient_id
+                     LEFT JOIN Users t ON t.id = ir.lab_tech_id
                     WHERE ir.id = %s AND ir.patient_id = %s""",
                 (imaging_id, user_uuid))
             r = cur.fetchone()
             if not r:
                 raise HTTPException(status_code=404, detail="Imaging report not found")
-            payload = _release_imaging_payload(r, imaging_id)
+            payload = _release_verified(conn, session,
+                                        lambda: _release_imaging_payload(r, imaging_id), r,
+                                        resource=f"Imaging {imaging_id}",
+                                        patient_id=str(user_uuid))
             log_admin_action(conn, user_uuid, session.get("public_user_id"),
                              "PATIENT_VIEWED_IMAGING", str(user_uuid), session.get("public_user_id"))
             aisec.record_security_event(
@@ -4571,9 +5216,8 @@ def get_doctor_imaging(patient_id: Optional[str] = None,
             if patient_id:
                 allowed, basis = _doctor_patient_authorization(cur, doctor_uuid, patient_id)
                 if not allowed:
-                    raise HTTPException(
-                        status_code=403,
-                        detail=f"You do not have access to this patient's imaging — {basis}.")
+                    _deny(cur, session, resource="imaging", reason=basis, patient_id=str(patient_id),
+                          detail=f"You do not have access to this patient's imaging — {basis}.")
                 cur.execute(
                     _IMAGING_SELECT + " WHERE ir.patient_id = %s ORDER BY ir.created_at DESC",
                     (patient_id,))
@@ -4607,8 +5251,10 @@ def get_doctor_imaging_image(imaging_id: str, session: dict = Depends(require_ro
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                """SELECT ir.*, u.mlkem_private_key_encrypted
+                """SELECT ir.*, u.mlkem_private_key_encrypted,
+                          t.mldsa_public_key AS signer_mldsa_public_key
                      FROM ImagingReports ir JOIN Users u ON u.id = ir.patient_id
+                     LEFT JOIN Users t ON t.id = ir.lab_tech_id
                     WHERE ir.id = %s""", (imaging_id,))
             r = cur.fetchone()
             if not r:
@@ -4616,19 +5262,21 @@ def get_doctor_imaging_image(imaging_id: str, session: dict = Depends(require_ro
 
             allowed, basis = _doctor_patient_authorization(cur, doctor_uuid, str(r["patient_id"]))
             if not allowed:
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"You do not have access to this patient's imaging — {basis}.")
+                _deny(cur, session, resource="imaging", reason=basis,
+                      patient_id=str(r["patient_id"]),
+                      detail=f"You do not have access to this patient's imaging — {basis}.")
+            decision = _security_gate(cur, session, resource="imaging",
+                                      patient_id=str(r["patient_id"]))
 
-            payload = _release_imaging_payload(r, imaging_id)
+            payload = _release_verified(conn, session,
+                                        lambda: _release_imaging_payload(r, imaging_id), r,
+                                        resource=f"Imaging {imaging_id}",
+                                        patient_id=str(r["patient_id"]))
             log_admin_action(conn, doctor_uuid, session.get("public_user_id"),
                              "DOCTOR_VIEWED_IMAGING", str(r["patient_id"]), None,
-                             details={"basis": basis})
-            aisec.record_security_event(
-                cur, actor_id=doctor_uuid, actor_public_id=session.get("public_user_id"),
-                actor_role="Doctor", event_type="RECORD_ACCESS",
-                subject_patient_id=str(r["patient_id"]), resource="imaging",
-                metadata={"basis": basis})
+                             details={"basis": basis, "risk_level": decision.level})
+            _record_access(cur, session, patient_id=str(r["patient_id"]), resource="imaging",
+                           basis=basis, decision=decision)
             conn.commit()
     return payload
 
@@ -4704,9 +5352,12 @@ def get_patient_adherence(patient_id: str, session: dict = Depends(require_role(
         with conn.cursor(row_factory=dict_row) as cur:
             allowed, basis = _doctor_patient_authorization(cur, doctor_uuid, patient_id)
             if not allowed:
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"You do not have access to this patient's record — {basis}.")
+                _deny(cur, session, resource="adherence", reason=basis, patient_id=str(patient_id),
+                      detail=f"You do not have access to this patient's record — {basis}.")
+            decision = _security_gate(cur, session, resource="adherence",
+                                      patient_id=str(patient_id))
+            _record_access(cur, session, patient_id=str(patient_id), resource="adherence",
+                           basis=basis, decision=decision)
             cur.execute(
                 _ADHERENCE_SELECT + " WHERE ma.patient_id = %s ORDER BY ma.administered_at DESC LIMIT 200",
                 (patient_id,))
@@ -5099,6 +5750,49 @@ def set_federated_peer_active(peer_id: str, action: str,
                              details={"node_name": peer["node_name"]})
             conn.commit()
     return {"node_name": peer["node_name"], "is_active": states[action]}
+
+
+@app.get("/api/federated/global-model")
+def serve_global_model(request: Request):
+    """Distribute the global model to a registered peer (spec §21).
+
+    The "updated local models" step: without it peers could contribute but
+    never benefit. Authenticated like a submission — an HMAC with the peer's
+    shared secret over its name and a timestamp, refused if stale — and only a
+    model built entirely by real institutions is ever handed out.
+    """
+    node = request.headers.get("X-Federation-Node", "")
+    ts = request.headers.get("X-Federation-Timestamp", "")
+    sig = request.headers.get("X-Federation-Signature", "")
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT shared_secret_encrypted, is_active FROM FederatedPeers WHERE node_name = %s",
+                (node,))
+            peer = cur.fetchone()
+            if not peer or not peer["is_active"]:
+                raise HTTPException(status_code=403, detail="Unknown or inactive peer.")
+            if not federation.verify_request_signature(
+                    node, ts, "global-model", decrypt_data(peer["shared_secret_encrypted"]), sig):
+                aisec.record_security_event(
+                    cur, actor_id=None, actor_role=None, event_type="FEDERATED_REQUEST_REJECTED",
+                    resource=node[:120], ip_address=_client_ip(request))
+                conn.commit()
+                raise HTTPException(status_code=401, detail="Signature verification failed.")
+            cur.execute(
+                """SELECT round_number, parameters, contributing_nodes, total_samples, real_nodes
+                     FROM FederatedGlobalModel
+                    WHERE simulated_nodes = 0 AND real_nodes >= 2
+                    ORDER BY round_number DESC LIMIT 1""")
+            model = cur.fetchone()
+    if not model:
+        raise HTTPException(
+            status_code=404,
+            detail="No global model built by real institutions yet. Submit and wait for a round.")
+    return {"round_number": model["round_number"], "parameters": model["parameters"],
+            "contributing_nodes": model["contributing_nodes"],
+            "total_samples": model["total_samples"], "real_nodes": model["real_nodes"],
+            "aggregation": "FedAvg, per role"}
 
 
 @app.post("/api/federated/submit")

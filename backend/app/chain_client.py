@@ -79,18 +79,13 @@ class ChainClient:
             self.address, settings.BLOCKCHAIN_RPC_URL, settings.BLOCKCHAIN_CHAIN_ID,
         )
 
-    def log_data_access(self, actor_public_id: str, action: str, document_hash: str) -> dict[str, Any]:
-        """Send one audit entry on-chain and wait for its receipt.
-
-        Returns the transaction hash, block number and gas used.
-        """
+    def _transact(self, function_call) -> dict[str, Any]:
+        """Sign and send one contract call, then wait for its receipt."""
         # Serialised because nonce selection is read-then-use; two concurrent
         # sends would otherwise pick the same nonce and one would be rejected.
         with _lock:
             nonce = self.web3.eth.get_transaction_count(self.account.address)
-            tx = self.contract.functions.logDataAccess(
-                actor_public_id or "SYSTEM", action, document_hash
-            ).build_transaction({
+            tx = function_call.build_transaction({
                 "from": self.account.address,
                 "nonce": nonce,
                 "chainId": self.settings.BLOCKCHAIN_CHAIN_ID,
@@ -107,6 +102,34 @@ class ChainClient:
             "gas_used": receipt["gasUsed"],
             "status": receipt["status"],
         }
+
+    def log_data_access(self, actor_public_id: str, action: str, document_hash: str) -> dict[str, Any]:
+        """Send one audit entry on-chain and wait for its receipt.
+
+        Returns the transaction hash, block number and gas used.
+        """
+        return self._transact(self.contract.functions.logDataAccess(
+            actor_public_id or "SYSTEM", action, document_hash))
+
+    # ─── Consent (PHR.sol updateConsent / checkConsent) ──────────────────────
+    #
+    # The contract keys consent by two strings. Pseudonymous references are
+    # passed (see consent_ledger.party_ref), never names or internal UUIDs, so
+    # the public ledger links nothing to a person on its own.
+
+    def update_consent(self, patient_ref: str, doctor_ref: str, authorized: bool) -> dict[str, Any]:
+        """Record a grant or withdrawal on-chain (emits ConsentUpdated)."""
+        return self._transact(self.contract.functions.updateConsent(
+            patient_ref, doctor_ref, bool(authorized)))
+
+    def check_consent(self, patient_ref: str, doctor_ref: str) -> bool:
+        """Read the consent state the contract holds. A view call: no transaction."""
+        return bool(self.contract.functions.checkConsent(patient_ref, doctor_ref).call())
+
+    def declare_emergency(self, doctor_ref: str, patient_ref: str, resource_hash: str) -> dict[str, Any]:
+        """Record a break-glass override (emits EmergencyAccessTriggered)."""
+        return self._transact(self.contract.functions.emergencyAccess(
+            doctor_ref, patient_ref, resource_hash))
 
     def audit_trail_count(self) -> int:
         """Total audit entries recorded on-chain."""

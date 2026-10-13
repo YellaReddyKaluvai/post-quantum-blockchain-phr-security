@@ -135,14 +135,14 @@ def test_emergency_access_requires_a_substantive_reason():
     for weak in ["", "   ", "urgent", "need it"]:
         with pytest.raises(ValidationError):
             EmergencyAccessRequest(
-                patient_id="00000000-0000-0000-0000-000000000000", reason=weak
+                patient_id="00000000-0000-0000-0000-000000000000", reason=weak, password="pw"
             )
 
 
 def test_emergency_access_accepts_a_clinical_reason():
     from app.schemas import EmergencyAccessRequest
     req = EmergencyAccessRequest(
-        patient_id="00000000-0000-0000-0000-000000000000",
+        patient_id="00000000-0000-0000-0000-000000000000", password="pw",
         reason="Patient unresponsive in A&E; prior cardiac history needed now.",
     )
     assert req.duration_hours == 4  # time-boxed by default
@@ -154,7 +154,7 @@ def test_emergency_access_duration_is_bounded(hours):
     from app.schemas import EmergencyAccessRequest
     with pytest.raises(ValidationError):
         EmergencyAccessRequest(
-            patient_id="00000000-0000-0000-0000-000000000000",
+            patient_id="00000000-0000-0000-0000-000000000000", password="pw",
             reason="Patient unresponsive in A&E; prior history needed now.",
             duration_hours=hours,
         )
@@ -164,7 +164,7 @@ def test_emergency_access_duration_is_bounded(hours):
 def test_emergency_access_allows_sensible_durations(hours):
     from app.schemas import EmergencyAccessRequest
     req = EmergencyAccessRequest(
-        patient_id="00000000-0000-0000-0000-000000000000",
+        patient_id="00000000-0000-0000-0000-000000000000", password="pw",
         reason="Patient unresponsive in A&E; prior history needed now.",
         duration_hours=hours,
     )
