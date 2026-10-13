@@ -266,7 +266,7 @@ listed as not built.
 | Doctor → Lab → Patient report pipeline | ✅ | 9 structured panels → hospital PDF → AES-256-GCM → ML-KEM → ML-DSA → chain anchor |
 | Imaging studies | ✅ | Encrypted, signed, anchored — and now readable by the patient and by an entitled doctor |
 | Nurse module | ✅ | Vitals, notes and medication rounds all reach the doctor and the patient; a nurse reaches a patient only through a care-team assignment. Existing nurse–patient work is listed for an administrator to review and allocate |
-| Cloud storage (AWS S3) | ✅ | Ciphertext only, verified; doubles as a recovery path if the database copy is lost. **Verified live in CI** against MinIO (`AWS_S3_ENDPOINT_URL` takes any S3-compatible store): the object is exactly the ciphertext, and a report whose database copy is removed is still released from S3 |
+| Cloud storage (AWS S3) | ✅ | Ciphertext only, verified; doubles as a recovery path if the database copy is lost. **Verified live in CI** against SeaweedFS's S3 gateway (`AWS_S3_ENDPOINT_URL` takes any S3-compatible store): the object is exactly the ciphertext, and a report whose database copy is removed is still released from S3 |
 | Patient security notifications | ✅ | A record withheld after failing its integrity or signature check, consent altered against the blockchain, repeated refused attempts at a chart — the patient is told, with the incident reference; only Patient accounts are ever notified |
 | Encryption-key rotation | ✅ | `rotate_encryption_key.py` moves every encrypted column (personal fields, clinical text, post-quantum private keys) to a new key: strict decryption, every value verified, one locked transaction, dry run by default |
 | Blockchain anchoring | ✅ | Real on-chain writes via `PHR.sol` (writes restricted to the backend's key); falls back to a clearly-labelled local anchor. **Verified live in CI** against anvil: consent written on-chain, report digests read back, break-glass through `emergencyAccess()`, a consent row edited in SQL refused as a mismatch |
@@ -331,7 +331,7 @@ is listed honestly rather than quietly dropped.
 | **ZKP prover in the browser** | Proofs needed `demo/zkp_prove.py`. | "Prove consent" on the patient's page; the token stays in the browser |
 | **Patient security notices** | Integrity and signature failures, altered consent and repeated refused access reached only the admin. | The patient whose record is involved is told |
 | **Public `ENCRYPTION_KEY`** | Data written under the example key could not be moved to a new one. | `rotate_encryption_key.py` |
-| **S3 and e-mail in CI** | Never exercised against a real service. | MinIO and Mailpit in the integration run |
+| **S3 and e-mail in CI** | Never exercised against a real service. | SeaweedFS (S3) and Mailpit in the integration run |
 | **Existing nurse relationships** | Not carried into care teams. | Listed for an administrator to review and allocate |
 | **Lab report progress** | The finalize dialog animated "hashing… ML-KEM… ML-DSA" on client-side timers before the request was sent. | It states what runs on the server; the result shows what the server returned |
 
