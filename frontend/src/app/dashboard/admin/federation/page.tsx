@@ -2,8 +2,8 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Network, Plus, Copy, Check, KeyRound, Loader2, Power, PowerOff, Clock, Globe } from "lucide-react";
-import { getFederatedPeers, registerFederatedPeer, setFederatedPeerActive } from "@/lib/session";
+import { Network, Plus, Copy, Check, KeyRound, Loader2, Power, PowerOff, Clock, Globe, RefreshCw } from "lucide-react";
+import { getFederatedPeers, registerFederatedPeer, rotateFederatedPeerSecret, setFederatedPeerActive } from "@/lib/session";
 
 interface Peer {
   id: string;
@@ -12,6 +12,7 @@ interface Peer {
   is_active: boolean;
   submissions: number;
   last_submission_at?: string | null;
+  secret_rotated_at?: string | null;
   created_at?: string | null;
 }
 
@@ -24,6 +25,7 @@ interface PeerList {
 interface IssuedSecret {
   node_name: string;
   shared_secret: string;
+  rotated?: boolean;
 }
 
 export default function AdminFederationPage() {
@@ -86,6 +88,22 @@ export default function AdminFederationPage() {
     }
   };
 
+  const rotate = async (peer: Peer) => {
+    if (!window.confirm(`Issue ${peer.node_name} a new secret? The current one stops working immediately.`)) return;
+    setRowError("");
+    setBusyPeer(peer.id);
+    try {
+      const result = await rotateFederatedPeerSecret(peer.id);
+      setIssued({ node_name: result.node_name, shared_secret: result.shared_secret, rotated: true });
+      setCopied(false);
+      await load();
+    } catch (error) {
+      setRowError(error instanceof Error ? error.message : "Could not rotate that peer's secret");
+    } finally {
+      setBusyPeer(null);
+    }
+  };
+
   const copySecret = async () => {
     if (!issued) return;
     try {
@@ -132,7 +150,9 @@ export default function AdminFederationPage() {
           scales — to <code className="font-mono text-xs bg-white px-1 py-0.5 rounded border border-slate-200">/api/federated/submit</code>.
           No record, event or identifier crosses the boundary. Each submission is signed with HMAC-SHA256
           using the secret issued below; an unsigned or wrongly signed submission is refused, and so is
-          one from a suspended peer. Simulated nodes in a round are separate and always labelled as such.
+          one from a suspended peer, one replayed or more than five minutes old, and one for a round that
+          has not opened. A suspended peer&apos;s earlier updates are left out of new rounds. Simulated nodes
+          in a round are separate and always labelled as such.
         </p>
       </div>
 
@@ -193,11 +213,12 @@ export default function AdminFederationPage() {
         {issued && (
           <div className="mt-4 p-4 rounded-xl bg-amber-50 border border-amber-200">
             <p className="text-sm font-bold text-amber-900 flex items-center gap-2 mb-1">
-              <KeyRound className="w-4 h-4" /> Shared secret for {issued.node_name}
+              <KeyRound className="w-4 h-4" /> {issued.rotated ? "New shared secret" : "Shared secret"} for {issued.node_name}
             </p>
             <p className="text-xs text-amber-900 mb-3">
               Shown once. Give it to the peer institution over a secure channel — it is stored encrypted
-              here and cannot be displayed again. If it is lost, register the peer under a new name.
+              here and cannot be displayed again. If it is lost or may have leaked, rotate it.
+              {issued.rotated && " The previous secret has stopped working."}
             </p>
             <div className="flex items-center gap-2">
               <code className="flex-1 font-mono text-xs bg-white border border-amber-200 rounded-lg px-3 py-2 break-all">
@@ -270,22 +291,33 @@ export default function AdminFederationPage() {
                       ? `${peer.submissions} submission${peer.submissions > 1 ? "s" : ""}, last ${
                           peer.last_submission_at ? new Date(peer.last_submission_at).toLocaleString() : "—"}`
                       : "Has not submitted yet"}
+                    {peer.secret_rotated_at && ` · secret rotated ${new Date(peer.secret_rotated_at).toLocaleString()}`}
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => toggle(peer)}
-                  disabled={busyPeer === peer.id}
-                  className={`px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 border disabled:opacity-50 ${
-                    peer.is_active
-                      ? "bg-white border-rose-200 text-rose-700 hover:bg-rose-50"
-                      : "bg-white border-emerald-200 text-emerald-700 hover:bg-emerald-50"
-                  }`}
-                >
-                  {busyPeer === peer.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    : peer.is_active ? <PowerOff className="w-3.5 h-3.5" /> : <Power className="w-3.5 h-3.5" />}
-                  {peer.is_active ? "Suspend" : "Reinstate"}
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => rotate(peer)}
+                    disabled={busyPeer === peer.id}
+                    className="px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 border bg-white border-amber-200 text-amber-800 hover:bg-amber-50 disabled:opacity-50"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" /> Rotate secret
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => toggle(peer)}
+                    disabled={busyPeer === peer.id}
+                    className={`px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 border disabled:opacity-50 ${
+                      peer.is_active
+                        ? "bg-white border-rose-200 text-rose-700 hover:bg-rose-50"
+                        : "bg-white border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+                    }`}
+                  >
+                    {busyPeer === peer.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      : peer.is_active ? <PowerOff className="w-3.5 h-3.5" /> : <Power className="w-3.5 h-3.5" />}
+                    {peer.is_active ? "Suspend" : "Reinstate"}
+                  </button>
+                </div>
               </div>
             </motion.div>
           ))}
