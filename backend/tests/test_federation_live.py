@@ -235,7 +235,10 @@ def _hub_defences(hospitals, sent, secrets_, node_a, node_c):
     assert status == 409, body
 
     # Correctly signed with A's secret, but for a round that has not opened.
-    forged = dict(sent[-1], round_number=999, timestamp=int(time.time()) + 2)
+    # Newer than anything A has sent (A's timestamps can run a little ahead of the
+    # clock when it submits several times a second), so only the round is wrong.
+    newer = max(int(time.time()), max(s["timestamp"] for s in sent)) + 1
+    forged = dict(sent[-1], round_number=999, timestamp=newer)
     forged["signature"] = aisec.parameters_signature(
         node_a, 999, forged["sample_count"], forged["parameters"], secrets_[node_a],
         forged["timestamp"])
