@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Bell, Check, Trash2, Info, AlertTriangle, CheckCircle, Clock } from "lucide-react";
+import { Bell, Check, Trash2, Info, AlertTriangle, CheckCircle, Clock, ShieldAlert } from "lucide-react";
 import { getPatientNotifications, markNotificationRead, clearNotifications } from "@/lib/session";
 
 interface PatientNotifItem {
@@ -52,13 +52,17 @@ export default function NotificationsPage() {
     }
   };
 
+  // The backend sends specific types (REPORT_READY, EMERGENCY_ACCESS, SECURITY_…);
+  // security events about the patient's own record must not look like routine news.
   const getIcon = (type: string) => {
-    switch (type?.toLowerCase()) {
-      case "alert": return <AlertTriangle className="w-5 h-5 text-amber-500" />;
-      case "success": return <CheckCircle className="w-5 h-5 text-emerald-500" />;
-      case "reminder": return <Clock className="w-5 h-5 text-blue-500" />;
-      default: return <Info className="w-5 h-5 text-cyan-500" />;
+    const t = (type || "").toUpperCase();
+    if (t.startsWith("SECURITY_")) return <ShieldAlert className="w-5 h-5 text-rose-500" />;
+    if (t === "EMERGENCY_ACCESS" || t === "ALERT") return <AlertTriangle className="w-5 h-5 text-amber-500" />;
+    if (["REPORT_READY", "REPORT_REVIEWED", "ACCESS_GRANTED", "SUCCESS"].includes(t)) {
+      return <CheckCircle className="w-5 h-5 text-emerald-500" />;
     }
+    if (t.startsWith("APPOINTMENT") || t === "REMINDER") return <Clock className="w-5 h-5 text-blue-500" />;
+    return <Info className="w-5 h-5 text-cyan-500" />;
   };
 
   if (loading) {

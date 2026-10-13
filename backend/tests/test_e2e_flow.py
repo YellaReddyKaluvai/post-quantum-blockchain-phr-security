@@ -107,6 +107,10 @@ def _events(env, event_type, actor=None):
     return env["db"].execute(q, args).fetchone()["n"]
 
 
+def _patient_notices(c, headers):
+    return {n["notification_type"] for n in c.get("/api/patient/notifications", headers=headers).json()}
+
+
 def test_the_core_flow(env, people):
     c, db = env["client"], env["db"]
     P, D, T, A = people["patient"], people["doctor"], people["tech"], people["admin"]
@@ -212,6 +216,7 @@ def test_the_core_flow(env, people):
     assert r.status_code == 409
     assert db.execute("SELECT COUNT(*) AS n FROM SecurityIncidents "
                       "WHERE event_type = 'INTEGRITY_FAILURE' AND status = 'Open'").fetchone()["n"] >= 1
+    assert "SECURITY_RECORD_WITHHELD" in _patient_notices(c, P)     # §27: the patient is told
     db.execute("UPDATE LabReports SET document_hash = %s WHERE id = %s",
                (original, report["report_id"]))
 
@@ -221,6 +226,7 @@ def test_the_core_flow(env, people):
         assert c.get(f"/api/doctor/patients/{pid}", headers=D).status_code == 403
     assert db.execute("SELECT COUNT(*) AS n FROM SecurityAlerts WHERE source = 'ACCESS_CONTROL' "
                       "AND actor_id = %s", (did,)).fetchone()["n"] >= 1
+    assert "SECURITY_ACCESS_REFUSED" in _patient_notices(c, P)
     # …and the nurse that doctor brought in loses access with them.
     assert c.get(f"/api/nurse/patients/{pid}", headers=N).status_code == 403
 
@@ -238,6 +244,7 @@ def test_the_core_flow(env, people):
         assert c.get(f"/api/doctor/patients/{pid}", headers=D).status_code == 403
         assert db.execute("SELECT COUNT(*) AS n FROM SecurityIncidents "
                           "WHERE event_type = 'CONSENT_LEDGER_MISMATCH'").fetchone()["n"] >= 1
+        assert "SECURITY_CONSENT_ALTERED" in _patient_notices(c, P)
         db.execute("UPDATE Consent SET status = 'Pending', prior_refusal = TRUE "
                    "WHERE patient_id = %s AND subject_user_id = %s", (pid, did))
 
