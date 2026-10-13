@@ -275,14 +275,13 @@ listed as not built.
 | Doctor-authored documents | ✅ | Encrypted, signed and anchored — and readable by the patient they concern, completing the spec's "patient receives authorized access" |
 | Clinical record encryption | ✅ | Diagnoses and prescriptions encrypted at column level; grepping the database for a diagnosis returns nothing |
 | Consent management | ✅ | Revoking a doctor genuinely blocks reads — the same report returns 200 before and 404 after |
-| Smart-contract consent | 🟡 | Decisions written to `PHR.sol` (`updateConsent`, pseudonymous refs); consent-based reads refused if `checkConsent` disagrees with the row. Unit-tested with a fake chain — **not yet run against a live chain** |
+| Smart-contract consent | ✅ | Decisions written to `PHR.sol` (`updateConsent`, pseudonymous refs); consent-based reads refused if the contract's `consentStatus` disagrees with the row. **Verified live in CI** against anvil (see Blockchain anchoring) |
 | Doctor access requests | ✅ | Doctor requests with a stated purpose → patient approves or declines → the backend enforces it. Verified: no request 403, pending 403, rejected 403, approved 200 |
 | AI security layer | ✅ | Anomaly detection (scheduled, and inline at every clinician read), XAI explanations, configurable risk policy with password re-verification, alerts from every security source, incidents worked to closure |
-| Federated learning loop | 🟡 | Per-role FedAvg; a hospital can submit its signed per-role update to a hub and pull the global model back; detection uses a global model only when real institutions built it. Tested against a fake hub — **not yet between two running hospitals** |
 | Zero-knowledge consent proof | ✅ | **Post-quantum**: lattice proof (Fiat–Shamir with aborts, ML-DSA-65 parameters), **made in the doctor's browser** — the token never leaves it. The TypeScript prover and the Python verifier are checked against each other in CI. Consents approved before the switch keep their Schnorr commitment, which still verifies and is reported as *not* post-quantum. See its own section |
 | IPFS publishing | ✅ | Really pinned to a running kubo node; joins the recovery chain behind the database and S3. **Verified live in CI** with two kubo daemons: the stored object is exactly the ciphertext, and replication is confirmed by the replica's own pin list |
-| IPFS replication | 🟡 | Copies on other IPFS nodes and/or Pinning-Service-API providers; only copies a target confirms count. Unit-tested against a scripted HTTP fake — **not yet run against a real second node or pinning service** |
-| Federation peer admin screen | 🟡 | Register a peer (secret shown once), suspend, reinstate. Rendered and exercised against sample data — **not yet against a live backend** |
+| IPFS replication | ✅ | Copies on other IPFS nodes and/or Pinning-Service-API providers; only copies a target confirms count. **Verified live in CI** against a second kubo node; a commercial pinning service is unit-tested against a scripted fake only |
+| Federation peer admin screen | 🟡 | Register a peer (secret shown once), rotate its secret, suspend, reinstate. The API behind it is **verified live in CI** across three hospitals; the screen itself has been exercised only against sample data |
 | Medication adherence | ✅ | Refusals and misses reach the prescriber and the patient, not only a percentage |
 | Emergency break-glass access | ✅ | Password re-verification, daily limit, risk-scored, time-boxed, patient notified immediately, anchored on-chain, compliance incident opened automatically |
 | End-to-end flow (spec §37) | ✅ | `tests/test_e2e_flow.py` drives access request → consent → nurse care team → lab request → signed, encrypted report → patient release → tamper detection → withdrawal → break-glass → incidents and audit, against real Postgres and real liboqs. CI runs it twice: database-only, and with the chain, IPFS and a second hospital live |
@@ -346,7 +345,7 @@ is listed honestly rather than quietly dropped.
 
 | Area | Status |
 |---|---|
-| **A federation of independent institutions** | The protocol runs live between two backends in CI. An actual federation needs other hospitals to deploy and register; nothing here pretends they exist. |
+| **A federation of independent institutions** | The protocol runs live between three backends in CI. An actual federation needs other hospitals to deploy and register; nothing here pretends they exist. |
 | **Standardised post-quantum ZKP** | The lattice proof uses ML-DSA-65's parameters and assumptions, but the construction itself (Lyubashevsky's, uncompressed) is not a NIST standard and has not been independently reviewed. |
 
 > On AI: the security layer performs **behavioural anomaly detection**, not
