@@ -20,6 +20,9 @@ class Settings(BaseModel):
     SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
     SMTP_USER: str = os.getenv("SMTP_USER", "")
     SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
+    # STARTTLS before login. Leave on for any real mail server; only a local
+    # test server (e.g. Mailpit in CI) that offers no TLS needs it off.
+    SMTP_STARTTLS: bool = os.getenv("SMTP_STARTTLS", "true").lower() != "false"
     ADMIN_EMAIL: str = os.getenv("ADMIN_EMAIL", "admin@hospital.com")
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")
     
@@ -31,6 +34,8 @@ class Settings(BaseModel):
     AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY", "mock_aws_secret_key_quantumcare_pqc")
     AWS_REGION: str = os.getenv("AWS_REGION", "ap-south-1")
     AWS_S3_BUCKET: str = os.getenv("AWS_S3_BUCKET", "quantumcare-pqc-phr-storage")
+    # An S3-compatible endpoint (MinIO, Ceph, …) instead of AWS. Blank = AWS.
+    AWS_S3_ENDPOINT_URL: str = os.getenv("AWS_S3_ENDPOINT_URL", "")
     # No IPFS gateway or pinning settings: nothing is published to the IPFS
     # network. The system computes an IPFS-style CIDv0 purely as a content
     # address for the encrypted document (see storage_service), which needs no

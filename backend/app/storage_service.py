@@ -88,10 +88,14 @@ def _get_client():
                 aws_access_key_id=s.AWS_ACCESS_KEY_ID,
                 aws_secret_access_key=s.AWS_SECRET_ACCESS_KEY,
                 region_name=s.AWS_REGION,
+                # An S3-compatible store (MinIO, Ceph) when set; AWS otherwise.
+                endpoint_url=s.AWS_S3_ENDPOINT_URL or None,
                 # Fail fast: a hung upload must not stall a clinical action.
                 config=Config(
                     connect_timeout=5, read_timeout=15,
                     retries={"max_attempts": 3, "mode": "standard"},
+                    # Self-hosted stores rarely serve bucket subdomains.
+                    s3={"addressing_style": "path"} if s.AWS_S3_ENDPOINT_URL else None,
                 ),
             )
         except Exception as exc:
