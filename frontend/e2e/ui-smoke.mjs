@@ -14,7 +14,7 @@
 //      and the token itself is nowhere in browser storage.
 //
 // Env: UI_URL (default http://localhost:3000), API_URL (default http://localhost:8001),
-//      UI_ADMIN_ID, UI_ADMIN_PASSWORD, UI_DOCTOR_ID, UI_PATIENT_UUID, UI_PASSWORD.
+//      UI_ADMIN_ID, UI_ADMIN_PASSWORD, UI_DOCTOR_ID, UI_PATIENT_UUIDS (three, comma-separated).
 //      Run it from a directory where `playwright` is installed.
 import { chromium } from "playwright";
 
@@ -23,7 +23,9 @@ const API = process.env.API_URL || "http://localhost:8001";
 const ADMIN = process.env.UI_ADMIN_ID;
 const PASSWORD = process.env.UI_ADMIN_PASSWORD;
 const DOCTOR = process.env.UI_DOCTOR_ID;
-const PATIENT = process.env.UI_PATIENT_UUID;
+// One patient per scenario: a consent token is delivered once and only once, so
+// a scenario that collects one cannot reuse another's.
+const PATIENTS = (process.env.UI_PATIENT_UUIDS || "").split(",").filter(Boolean);
 
 let failures = 0;
 const check = (ok, what) => {
@@ -37,13 +39,13 @@ const check = (ok, what) => {
  * WebAuthn PRF extension is what yields the key, so if this build of Chromium
  * cannot offer PRF the checks say so instead of passing quietly.
  */
-async function signInAsDoctor(page) {
+async function signInAsDoctor(page, patientId) {
   await page.goto(`${UI}/login`);
   await page.fill('input[placeholder="PAT-2026-000001"]', DOCTOR);
   await page.fill('input[type="password"]', PASSWORD);
   await page.press('input[type="password"]', "Enter");
   await page.waitForURL(/\/dashboard\/doctor/);
-  await page.goto(`${UI}/dashboard/doctor/patients/${PATIENT}`);
+  await page.goto(`${UI}/dashboard/doctor/patients/${patientId}`);
 }
 
 async function passkeyChecks(browser) {
@@ -69,7 +71,7 @@ async function passkeyChecks(browser) {
   }
 
   try {
-    await signInAsDoctor(page);
+    await signInAsDoctor(page, PATIENTS[0]);
     const passkeyOption = page.getByTestId("protect-with-passkey");
     await passkeyOption.waitFor();
     check(true, "the passkey option is offered where the device has an authenticator");
@@ -115,7 +117,7 @@ async function passkeyChecks(browser) {
     await plainCdp.send("WebAuthn.addVirtualAuthenticator", { options: {
       protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true,
       isUserVerified: true, automaticPresenceSimulation: true } });          // no PRF
-    await signInAsDoctor(plainPage);
+    await signInAsDoctor(plainPage, PATIENTS[1]);
     await plainPage.getByTestId("protect-with-passkey").click();
     await plainPage.getByRole("button", { name: "Collect consent token" }).click();
     const refusal = plainPage.locator("p[role=alert]");
@@ -126,7 +128,9 @@ async function passkeyChecks(browser) {
       () => Object.keys(localStorage).filter((k) => k.startsWith("quantumcare.zkp.")).length === 0),
       "and nothing half-protected is stored");
 
-    // The passphrase path is untouched by any of this.
+    // The passphrase path is untouched by any of this — on a third consent,
+    // since the second scenario's token was never collected but this one is.
+    await signInAsDoctor(plainPage, PATIENTS[2]);
     await plainPage.getByTestId("protect-with-passphrase").click();
     await plainPage.fill("#zkp-pass", "fallback-phrase");
     await plainPage.fill("#zkp-pass2", "fallback-phrase");
@@ -221,8 +225,8 @@ async function passkeyChecks(browser) {
     check(replay.status() === 401, `the logged-out cookie, replayed, is refused (HTTP ${replay.status()})`);
     await fresh.close();
     // ── 5. A consent token protected by a passkey ────────────────────────────
-    if (DOCTOR && PATIENT) await passkeyChecks(browser);
-    else console.log("skip  passkey checks (UI_DOCTOR_ID / UI_PATIENT_UUID not set)");
+    if (DOCTOR && PATIENTS.length >= 3) await passkeyChecks(browser);
+    else console.log("skip  passkey checks (UI_DOCTOR_ID / three UI_PATIENT_UUIDS not set)");
   } catch (error) {
     console.error(error);
     await page.screenshot({ path: "/tmp/ui-smoke-failure.png", fullPage: true }).catch(() => {});
