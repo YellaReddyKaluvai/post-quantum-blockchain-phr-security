@@ -221,7 +221,8 @@ export default function AdminFederationPage() {
               {issued.rotated && " The previous secret has stopped working."}
             </p>
             <div className="flex items-center gap-2">
-              <code className="flex-1 font-mono text-xs bg-white border border-amber-200 rounded-lg px-3 py-2 break-all">
+              <code data-testid="issued-secret"
+                    className="flex-1 font-mono text-xs bg-white border border-amber-200 rounded-lg px-3 py-2 break-all">
                 {issued.shared_secret}
               </code>
               <button
