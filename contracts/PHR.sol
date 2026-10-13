@@ -22,6 +22,12 @@ contract PHR_Security {
 
     // patientUUID => mapping(doctorUUID => isAuthorized)
     mapping(string => mapping(string => bool)) private consentRegistry;
+
+    // The same decisions with "never decided" kept apart from "withdrawn", so a
+    // reader can tell a revocation from the absence of any record. A bool
+    // cannot: both read as false.
+    enum ConsentState { None, Granted, Revoked }
+    mapping(string => mapping(string => ConsentState)) private consentStates;
     
     // Ordered list of all immutable audit events
     AuditLog[] public globalAuditTrail;
@@ -32,6 +38,10 @@ contract PHR_Security {
     event EmergencyAccessTriggered(string indexed doctorUUID, string indexed patientUUID, uint256 timestamp);
 
     // --- Modifiers ---
+    // Every write goes through the hospital backend's key (the deployer). The
+    // modifier existed but was applied to nothing, so any address could rewrite
+    // consent or append audit entries — and a ledger anyone can write cannot
+    // vouch for the database it is meant to check.
     modifier onlyAdmin() {
         require(msg.sender == admin, "Admin only");
         _;
@@ -49,10 +59,11 @@ contract PHR_Security {
      * @param doctorUUID The UUID of the doctor receiving consent.
      * @param _isAuthorized True to grant, False to revoke.
      */
-    function updateConsent(string memory patientUUID, string memory doctorUUID, bool _isAuthorized) public {
-        // In a real dApp, msg.sender would be verified against a mapping of patient wallets.
-        // For API abstraction, we assume the backend validates JWTs before calling this script.
+    function updateConsent(string memory patientUUID, string memory doctorUUID, bool _isAuthorized) public onlyAdmin {
+        // The backend verifies the patient's own session before calling; the
+        // contract accepts the decision only from the backend's key.
         consentRegistry[patientUUID][doctorUUID] = _isAuthorized;
+        consentStates[patientUUID][doctorUUID] = _isAuthorized ? ConsentState.Granted : ConsentState.Revoked;
         
         emit ConsentUpdated(patientUUID, doctorUUID, _isAuthorized, block.timestamp);
         
@@ -68,9 +79,16 @@ contract PHR_Security {
     }
 
     /**
+     * @dev 0 = never decided, 1 = granted, 2 = withdrawn or declined.
+     */
+    function consentStatus(string memory patientUUID, string memory doctorUUID) public view returns (uint8) {
+        return uint8(consentStates[patientUUID][doctorUUID]);
+    }
+
+    /**
      * @dev Adds an immutable record to the blockchain. Called by the backend whenever a record is accessed.
      */
-    function logDataAccess(string memory userUUID, string memory actionType, string memory resourceHash) public {
+    function logDataAccess(string memory userUUID, string memory actionType, string memory resourceHash) public onlyAdmin {
         _logAudit(userUUID, actionType, resourceHash);
     }
 
@@ -78,7 +96,7 @@ contract PHR_Security {
      * @dev "Break-Glass" Emergency Access Protocol.
      * Logs a high-priority, immutable event alerting the patient and admins of emergency data access.
      */
-    function emergencyAccess(string memory emergencyDoctorUUID, string memory patientUUID, string memory resourceHash) public {
+    function emergencyAccess(string memory emergencyDoctorUUID, string memory patientUUID, string memory resourceHash) public onlyAdmin {
         // Trigger high-priority event
         emit EmergencyAccessTriggered(emergencyDoctorUUID, patientUUID, block.timestamp);
         

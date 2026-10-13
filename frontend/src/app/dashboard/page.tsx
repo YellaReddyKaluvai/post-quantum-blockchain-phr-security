@@ -2,6 +2,8 @@
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { normalizeRole, dashboardRouteMap } from "@/lib/iam";
+import { ROLE_COOKIE } from "@/lib/session";
 
 function readCookie(name: string) {
   if (typeof document === "undefined") return null;
@@ -13,13 +15,10 @@ export default function DashboardPage() {
   const router = useRouter();
 
   useEffect(() => {
-    const role = readCookie("aegis_role") || localStorage.getItem("aegis_role") || "Patient";
-    const normalized = role.toLowerCase();
-    if (normalized.includes("doctor")) router.replace("/dashboard/doctor");
-    else if (normalized.includes("laboratory")) router.replace("/dashboard/laboratory");
-    else if (normalized.includes("admin")) router.replace("/dashboard/admin");
-    else if (normalized.includes("security")) router.replace("/dashboard/security");
-    else router.replace("/dashboard/patient");
+    const stored = readCookie(ROLE_COOKIE) || localStorage.getItem(ROLE_COOKIE);
+    const role = normalizeRole(stored);
+    // Without a recognised role there is no dashboard to land on — send them to log in.
+    router.replace(role ? dashboardRouteMap[role] : "/login");
   }, [router]);
 
   return null;

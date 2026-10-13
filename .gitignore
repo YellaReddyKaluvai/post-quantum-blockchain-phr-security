@@ -1,0 +1,28 @@
+node_modules/
+.next/
+out/
+build/
+.env
+__pycache__/
+*.pyc
+*.pyo
+venv/
+env/
+.venv/
+.DS_Store
+.env.local
+
+# Foundry build output (regenerate with `forge build`)
+cache/
+contracts/out/
+
+# Local editor/tooling config (machine-specific paths)
+.claude/
+
+# Generated demo dataset credentials (regenerate with generate_dataset.py)
+backend/dataset_credentials.csv
+
+# Keys generated on first start when none is configured (see app/config.py)
+backend/.secret_key
+backend/.ledger_key
+db_backups/

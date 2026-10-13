@@ -40,7 +40,7 @@ export default function RoleDashboard({ role, title, description, children }: Pr
                   </div>
                   <div>
                     <p className="text-xs font-black uppercase tracking-[0.35em] text-teal-600">{role}</p>
-                    <h2 className="text-xl font-black text-cyan-950">Aegis</h2>
+                    <h2 className="text-xl font-black text-cyan-950">QuantumCare</h2>
                   </div>
                 </div>
 

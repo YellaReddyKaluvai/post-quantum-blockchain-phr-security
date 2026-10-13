@@ -1,7 +1,8 @@
 "use client";
 
-import React, { createContext, useContext, useMemo, useState } from "react";
+import React, { createContext, useContext, useMemo, useState, useEffect } from "react";
 import { normalizeRole, type AppRole, rolePermissions, dashboardRouteMap } from "@/lib/iam";
+import { TOKEN_COOKIE, ROLE_COOKIE, USER_ID_COOKIE } from "@/lib/session";
 
 type AuthState = {
   isAuthenticated: boolean;
@@ -22,31 +23,25 @@ function readCookie(name: string) {
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [role, setRole] = useState<AppRole | null>(() => {
-    const cookieRole = normalizeRole(readCookie("aegis_role"));
-    if (cookieRole) return cookieRole;
-    if (typeof window !== "undefined") {
-      return normalizeRole(localStorage.getItem("aegis_role"));
-    }
-    return null;
-  });
-  const [permissions, setPermissions] = useState<string[]>(() => (role ? rolePermissions[role] : []));
-  const [userId, setUserId] = useState<string | null>(() => {
-    const cookieUserId = readCookie("aegis_user_id");
-    if (cookieUserId) return cookieUserId;
-    if (typeof window !== "undefined") {
-      return localStorage.getItem("aegis_user_id");
-    }
-    return null;
-  });
-  const [accessToken, setAccessToken] = useState<string | null>(() => {
-    const token = readCookie("aegis_access_token");
-    if (token) return token;
-    if (typeof window !== "undefined") {
-      return localStorage.getItem("aegis_access_token");
-    }
-    return null;
-  });
+  const [role, setRole] = useState<AppRole | null>(null);
+  const [permissions, setPermissions] = useState<string[]>([]);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [isMounted, setIsMounted] = useState(false);
+
+  useEffect(() => {
+    // Read from cookies or localStorage only after mount (client-side)
+    const cookieRole = normalizeRole(readCookie(ROLE_COOKIE) || localStorage.getItem(ROLE_COOKIE));
+
+    // Defer to avoid synchronous cascading render warnings
+    queueMicrotask(() => {
+      setRole(cookieRole);
+      setPermissions(cookieRole ? rolePermissions[cookieRole] : []);
+      setUserId(readCookie(USER_ID_COOKIE) || localStorage.getItem(USER_ID_COOKIE));
+      setAccessToken(readCookie(TOKEN_COOKIE) || localStorage.getItem(TOKEN_COOKIE));
+      setIsMounted(true);
+    });
+  }, []);
 
   const value = useMemo<AuthState>(() => ({
     isAuthenticated: Boolean(role && accessToken),
@@ -67,6 +62,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setAccessToken(null);
     },
   }), [accessToken, permissions, role, userId]);
+
+  // Avoid hydration mismatch by not rendering until client-side auth state is loaded
+  if (!isMounted) return null;
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

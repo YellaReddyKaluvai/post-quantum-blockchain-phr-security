@@ -1,6 +1,11 @@
-from datetime import datetime
-from typing import Any, Optional
-from pydantic import BaseModel, EmailStr, Field
+from datetime import datetime, date
+from typing import Any, Literal, Optional
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+
+# Roles a member of the public may request during self-registration.
+# 'Administrator' is deliberately excluded: admin accounts are provisioned
+# out-of-band (seed_admin.py), never through the public registration form.
+SELF_REGISTERABLE_ROLES = {"Patient", "Doctor", "Nurse", "Lab Technician"}
 
 class RegistrationRequest(BaseModel):
     full_name: str
@@ -12,6 +17,31 @@ class RegistrationRequest(BaseModel):
     date_of_birth: str # Format: YYYY-MM-DD
     blood_group: Optional[str] = None
     specialization: Optional[str] = None
+
+    @field_validator("role")
+    @classmethod
+    def role_must_be_self_registerable(cls, v: str) -> str:
+        normalized = v.strip().title() if v else v
+        # 'Lab Technician'.title() is already correct; guard the rest explicitly.
+        if normalized not in SELF_REGISTERABLE_ROLES:
+            raise ValueError(
+                "Invalid role. Choose one of: " + ", ".join(sorted(SELF_REGISTERABLE_ROLES))
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def enforce_role_specific_fields(self):
+        # Specialization is a clinical field that only applies to Doctors.
+        if self.role != "Doctor":
+            self.specialization = None
+        elif not (self.specialization or "").strip():
+            raise ValueError("Specialization is required for the Doctor role.")
+
+        # Blood group is only collected for Patients.
+        if self.role != "Patient":
+            self.blood_group = None
+
+        return self
 
 class LoginRequest(BaseModel):
     user_id: str
@@ -47,6 +77,7 @@ class AdminActionRequest(BaseModel):
 class AdminActionResponse(BaseModel):
     message: str
     user_id: Optional[str] = None
+    email_sent: Optional[bool] = None
 
 # Kept from previous schema for existing integrations
 class ConsentActionRequest(BaseModel):
@@ -70,3 +101,808 @@ class AuditLogRequest(BaseModel):
     resource_id: str | None = None
     success: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+class RejectRequest(BaseModel):
+    reason: Optional[str] = None
+
+class DashboardStats(BaseModel):
+    total_users: int
+    total_patients: int
+    total_doctors: int
+    total_nurses: int
+    total_lab_technicians: int
+    pending_requests: int
+    approved_users: int
+    rejected_users: int
+    disabled_users: int
+    active_sessions: int
+    pqc_keys_generated: int
+
+class UserDetail(BaseModel):
+    id: str
+    user_id: Optional[str] = None
+    full_name: str
+    email: str
+    role: str
+    gender: str
+    date_of_birth: Optional[str] = None
+    blood_group: Optional[str] = None
+    specialization: Optional[str] = None
+    status: str
+    rejection_reason: Optional[str] = None
+    has_mlkem_keys: bool = False
+    has_mldsa_keys: bool = False
+    created_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+
+class AuditLogEntry(BaseModel):
+    id: str
+    admin_user_id: Optional[str] = None
+    action: str
+    target_public_user_id: Optional[str] = None
+    details: Optional[dict] = None
+    created_at: Optional[datetime] = None
+
+class SecurityStats(BaseModel):
+    failed_login_attempts_24h: int
+    disabled_accounts: int
+    active_sessions: int
+    total_pqc_keypairs: int
+    active_crypto_identities: int
+
+class PatientProfile(BaseModel):
+    id: str
+    user_id: Optional[str] = None
+    full_name: str
+    email: str
+    role: str
+    gender: str
+    date_of_birth: Optional[str] = None
+    blood_group: Optional[str] = None
+    status: str
+    created_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+
+# The patient dashboard groups its cards into sections; the response is nested
+# to match those cards one-for-one so the UI never has to reshape the payload.
+class PatientInfoSection(BaseModel):
+    name: str
+    user_id: Optional[str] = None
+    blood_group: Optional[str] = None
+    assigned_doctor: Optional[str] = None
+
+
+class MedicalSummarySection(BaseModel):
+    latest_diagnosis: Optional[str] = None
+    current_treatment: Optional[str] = None
+    latest_prescription: Optional[str] = None
+
+
+class ReportsSummarySection(BaseModel):
+    total: int = 0
+    pending: int = 0
+    latest_report: Optional[str] = None
+    latest_report_date: Optional[datetime] = None
+
+
+class AppointmentsSummarySection(BaseModel):
+    upcoming_date: Optional[date] = None
+    upcoming_time: Optional[str] = None
+    upcoming_doctor: Optional[str] = None
+    upcoming_department: Optional[str] = None
+    previous_visit_date: Optional[date] = None
+    previous_doctor: Optional[str] = None
+
+
+class PatientActivityItem(BaseModel):
+    title: Optional[str] = None
+    # 'description' mirrors the notification body; the dashboard timeline renders
+    # this field directly.
+    description: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class PatientDashboardSummary(BaseModel):
+    full_name: str
+    patient_info: PatientInfoSection
+    medical_summary: MedicalSummarySection
+    reports_summary: ReportsSummarySection
+    appointments_summary: AppointmentsSummarySection
+    recent_activities: list[PatientActivityItem] = []
+
+class DiagnosisRecord(BaseModel):
+    id: str
+    title: str
+    description: Optional[str] = None
+    symptoms: Optional[str] = None
+    doctor_notes: Optional[str] = None
+    recommended_tests: Optional[str] = None
+    visit_date: Optional[date] = None
+    doctor_name: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+class LabReportItem(BaseModel):
+    id: str
+    report_name: str
+    report_type: str
+    report_id_public: Optional[str] = None
+    findings: Optional[str] = None
+    normal_range: Optional[str] = None
+    status: str
+    uploaded_by_name: Optional[str] = None
+    patient_name: Optional[str] = None
+    patient_user_id: Optional[str] = None
+    upload_date: Optional[datetime] = None
+    # Audit provenance. Absent values are meaningful — they mean the report
+    # genuinely was not anchored or has no cloud copy — so the UI must render
+    # them as such rather than substituting a plausible-looking placeholder.
+    document_hash: Optional[str] = None
+    blockchain_tx_hash: Optional[str] = None
+    anchored_on: Optional[str] = None
+    ipfs_cid: Optional[str] = None
+    s3_key: Optional[str] = None
+    kem_algorithm: Optional[str] = None
+    signature_algorithm: Optional[str] = None
+
+class PrescriptionRecord(BaseModel):
+    id: str
+    medicine_name: str
+    dosage: str
+    frequency: str
+    duration: str
+    instructions: Optional[str] = None
+    prescribed_date: Optional[date] = None
+    doctor_name: Optional[str] = None
+
+class ConsultationRecord(BaseModel):
+    id: str
+    consultation_date: Optional[date] = None
+    symptoms: Optional[str] = None
+    diagnosis_summary: Optional[str] = None
+    doctor_notes: Optional[str] = None
+    doctor_name: Optional[str] = None
+    doctor_specialization: Optional[str] = None
+
+class AppointmentRecord(BaseModel):
+    id: str
+    doctor_name: Optional[str] = None
+    department: Optional[str] = None
+    appointment_date: Optional[date] = None
+    appointment_time: Optional[str] = None
+    status: str
+    notes: Optional[str] = None
+
+class AvailableDoctorItem(BaseModel):
+    id: str
+    full_name: str
+    specialization: Optional[str] = None
+
+class CreateAppointmentRequest(BaseModel):
+    doctor_id: str
+    department: str
+    appointment_date: date
+    appointment_time: str
+    notes: Optional[str] = None
+
+    @field_validator("appointment_date")
+    @classmethod
+    def date_not_in_past(cls, v: date) -> date:
+        if v < date.today():
+            raise ValueError("Appointment date cannot be in the past.")
+        return v
+
+class NotificationItem(BaseModel):
+    id: str
+    notification_type: str
+    title: str
+    body: str
+    read_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+class PatientSecurityInfo(BaseModel):
+    user_id: Optional[str] = None
+    account_status: str
+    last_login: Optional[datetime] = None
+    last_login_ip: Optional[str] = None
+    active_sessions: int = 0
+    pqc_protection_enabled: bool = False
+    account_created: Optional[datetime] = None
+
+class DoctorProfile(BaseModel):
+    id: str
+    user_id: Optional[str] = None
+    full_name: str
+    email: str
+    role: str
+    gender: str
+    specialization: Optional[str] = None
+    status: str
+    created_at: Optional[datetime] = None
+
+class DoctorDashboardSummary(BaseModel):
+    total_assigned_patients: int = 0
+    todays_appointments: int = 0
+    pending_reports: int = 0
+    recent_diagnoses: int = 0
+    recent_activities: list = []
+
+class DoctorPatientListItem(BaseModel):
+    id: str
+    user_id: Optional[str] = None
+    full_name: str
+    gender: str
+    blood_group: Optional[str] = None
+    last_visit_date: Optional[date] = None
+    status: str
+
+class CreateDiagnosisRequest(BaseModel):
+    title: str
+    description: Optional[str] = None
+    symptoms: Optional[str] = None
+    doctor_notes: Optional[str] = None
+    recommended_tests: Optional[str] = None
+    visit_date: date
+
+class CreatePrescriptionRequest(BaseModel):
+    medicine_name: str
+    dosage: str
+    frequency: str
+    duration: str
+    instructions: Optional[str] = None
+    prescribed_date: date
+
+class CreateConsultationRequest(BaseModel):
+    consultation_date: date
+    symptoms: Optional[str] = None
+    diagnosis_summary: Optional[str] = None
+    doctor_notes: Optional[str] = None
+
+class MedicalDocumentItem(BaseModel):
+    id: str
+    document_name: str
+    document_type: str
+    patient_name: Optional[str] = None
+    upload_date: Optional[datetime] = None
+    status: str
+
+class CreateDocumentRequest(BaseModel):
+    patient_id: str
+    document_name: str
+    document_type: str
+    content: Optional[str] = None
+    status: str = "Final"
+
+class DoctorAppointmentItem(BaseModel):
+    id: str
+    patient_name: Optional[str] = None
+    patient_id_public: Optional[str] = None
+    department: Optional[str] = None
+    appointment_date: Optional[date] = None
+    appointment_time: Optional[str] = None
+    status: str
+    notes: Optional[str] = None
+
+class LabTechProfile(BaseModel):
+    id: str
+    user_id: Optional[str] = None
+    full_name: str
+    email: str
+    role: str
+    gender: str
+    department: Optional[str] = "Central Laboratory"
+    reports_generated: int = 0
+    status: str
+    created_at: Optional[datetime] = None
+
+class LabTechDashboardSummary(BaseModel):
+    tests_assigned_today: int = 0
+    reports_generated_today: int = 0
+    pending_test_requests: int = 0
+    reports_shared: int = 0
+    reports_awaiting_review: int = 0
+    recent_activities: list = []
+
+class LabTestRequestItem(BaseModel):
+    id: str
+    patient_id: str
+    patient_name: Optional[str] = None
+    patient_user_id: Optional[str] = None
+    doctor_id: Optional[str] = None
+    doctor_name: Optional[str] = None
+    doctor_user_id: Optional[str] = None
+    test_name: str
+    panel_code: Optional[str] = None
+    priority: str
+    status: str
+    clinical_notes: Optional[str] = None
+    requested_date: Optional[datetime] = None
+    report_id: Optional[str] = None          # set once a report is finalised
+    report_no: Optional[str] = None
+
+class CreateLabTestRequest(BaseModel):
+    patient_id: str
+    panel_code: Optional[str] = None   # which report form the technician should open
+    test_name: Optional[str] = None    # defaults to the panel's name when omitted
+    priority: str = "Routine"
+    clinical_notes: Optional[str] = None
+
+    @model_validator(mode="after")
+    def require_panel_or_test_name(self):
+        if not (self.panel_code or self.test_name):
+            raise ValueError("Either panel_code or test_name must be supplied.")
+        return self
+
+class CreateStructuredLabReportRequest(BaseModel):
+    """Finalisation payload for a laboratory report.
+
+    ``request_id`` binds the report to the doctor's original test request,
+    which is what fixes the patient and referring doctor. ``patient_id`` is
+    accepted only for direct (walk-in) reports raised without a request.
+    """
+    request_id: Optional[str] = None
+    patient_id: Optional[str] = None
+    panel_code: str
+    values: dict[str, Any] = {}
+    remarks: Optional[str] = None
+    collected_at: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def require_a_subject(self):
+        if not (self.request_id or self.patient_id):
+            raise ValueError("Either request_id or patient_id must be supplied.")
+        return self
+
+
+class LabPanelSummary(BaseModel):
+    code: str
+    name: str
+    short_name: str
+    category: str
+    layout: str
+    specimen: str
+
+
+class FinalizedReportResponse(BaseModel):
+    status: str
+    report_id: str
+    report_no: str
+    accession: str
+    panel_code: str
+    patient_user_id: Optional[str] = None
+    document_hash: str
+    signature_algorithm: Optional[str] = None
+    kem_algorithm: Optional[str] = None
+    blockchain_tx_hash: Optional[str] = None
+    anchored_on: Optional[str] = None
+    ipfs_cid: Optional[str] = None
+    s3_key: Optional[str] = None
+    notified: list[str] = []
+
+
+class ReportVerification(BaseModel):
+    report_id: str
+    report_no: Optional[str] = None
+    document_hash: Optional[str] = None
+    hash_matches: bool
+    signature_valid: bool
+    # True/False when an on-chain anchor was actually read back and compared;
+    # None when the report was only locally anchored or the chain is
+    # unreachable — "unknown" must never be presented as "verified".
+    blockchain_verified: Optional[bool] = None
+    signature_algorithm: Optional[str] = None
+    kem_algorithm: Optional[str] = None
+    signed_by: Optional[str] = None
+    blockchain_tx_hash: Optional[str] = None
+    anchored_on: Optional[str] = None
+    verified_at: datetime
+    detail: str
+
+class CreateImagingReportRequest(BaseModel):
+    patient_id: str
+    scan_region: str
+    exam_type: str  # MRI, X-Ray, CT Scan, Ultrasound
+    clinical_history: Optional[str] = None
+    findings: Optional[str] = None
+    impression: Optional[str] = None
+    recommendations: Optional[str] = None
+    image_data: Optional[str] = None
+
+class ImagingReportItem(BaseModel):
+    id: str
+    patient_name: Optional[str] = None
+    patient_user_id: Optional[str] = None
+    scan_region: str
+    exam_type: str
+    clinical_history: Optional[str] = None
+    findings: Optional[str] = None
+    impression: Optional[str] = None
+    recommendations: Optional[str] = None
+    # The image itself is never included in list responses: it is encrypted at
+    # rest and decrypting every study just to render a list would be both
+    # wasteful and an unnecessary exposure. Fetch it per-study from
+    # /api/lab-tech/imaging/{id}/image instead.
+    has_image: bool = False
+    document_hash: Optional[str] = None
+    kem_algorithm: Optional[str] = None
+    signature_algorithm: Optional[str] = None
+    blockchain_tx_hash: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+# ─── Nurse module ─────────────────────────────────────────────────────────────
+
+class NurseProfile(BaseModel):
+    id: str
+    user_id: Optional[str] = None
+    full_name: str
+    email: str
+    role: str
+    gender: str
+    ward: str = "General Ward"
+    status: str
+    created_at: Optional[datetime] = None
+
+
+class NurseDashboardSummary(BaseModel):
+    patients_attended_today: int = 0
+    vitals_recorded_today: int = 0
+    notes_added_today: int = 0
+    medications_administered_today: int = 0
+    recent_activities: list[PatientActivityItem] = []
+
+
+class NursePatientListItem(BaseModel):
+    id: str
+    user_id: Optional[str] = None
+    full_name: str
+    gender: str
+    blood_group: Optional[str] = None
+    last_recorded_at: Optional[datetime] = None
+    status: str
+    # Why this nurse may open the chart: the care-team assignment behind it.
+    assigned_by_name: Optional[str] = None
+    assignment_expires_at: Optional[datetime] = None
+    assignment_reason: Optional[str] = None
+
+
+class CareTeamAssignRequest(BaseModel):
+    """Add a nurse to a patient's care team."""
+    nurse_id: str = Field(min_length=1, max_length=64)        # internal id or public user id
+    patient_id: Optional[str] = Field(default=None, max_length=64)   # admin form only
+    reason: str = Field(min_length=10, max_length=300)
+    # Time-boxed by default; a ward allocation may run longer (max 30 days).
+    duration_hours: Optional[int] = Field(default=72, ge=1, le=720)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_must_be_substantive(cls, v: str) -> str:
+        cleaned = " ".join(v.split())
+        if len(cleaned) < 10 or len(cleaned.split()) < 2:
+            raise ValueError("Give the clinical reason for the assignment — a short phrase at least.")
+        return cleaned
+
+
+class CareTeamMember(BaseModel):
+    id: str
+    patient_id: str
+    patient_user_id: Optional[str] = None
+    patient_name: Optional[str] = None
+    nurse_id: str
+    nurse_user_id: Optional[str] = None
+    nurse_name: Optional[str] = None
+    assigned_by_name: Optional[str] = None
+    assigned_by_role: str
+    reason: str
+    created_at: datetime
+    expires_at: Optional[datetime] = None
+
+
+class PatientVitalsRecord(BaseModel):
+    id: str
+    temperature_celsius: Optional[float] = None
+    blood_pressure_systolic: Optional[int] = None
+    blood_pressure_diastolic: Optional[int] = None
+    heart_rate: Optional[int] = None
+    spo2: Optional[int] = None
+    respiratory_rate: Optional[int] = None
+    weight_kg: Optional[float] = None
+    height_cm: Optional[float] = None
+    notes: Optional[str] = None
+    recorded_at: Optional[datetime] = None
+    nurse_name: Optional[str] = None
+
+
+# Bounds catch fat-finger entry (e.g. "990" instead of "99" for SpO2) at the
+# point of capture, since these numbers can directly steer clinical decisions.
+class CreateVitalsRequest(BaseModel):
+    temperature_celsius: Optional[float] = Field(default=None, ge=25.0, le=45.0)
+    blood_pressure_systolic: Optional[int] = Field(default=None, ge=40, le=300)
+    blood_pressure_diastolic: Optional[int] = Field(default=None, ge=20, le=200)
+    heart_rate: Optional[int] = Field(default=None, ge=20, le=300)
+    spo2: Optional[int] = Field(default=None, ge=0, le=100)
+    respiratory_rate: Optional[int] = Field(default=None, ge=4, le=80)
+    weight_kg: Optional[float] = Field(default=None, gt=0, le=500)
+    height_cm: Optional[float] = Field(default=None, gt=0, le=300)
+    notes: Optional[str] = None
+
+    @model_validator(mode="after")
+    def at_least_one_reading(self):
+        fields = (
+            self.temperature_celsius, self.blood_pressure_systolic, self.blood_pressure_diastolic,
+            self.heart_rate, self.spo2, self.respiratory_rate, self.weight_kg, self.height_cm,
+        )
+        if all(v is None for v in fields):
+            raise ValueError("At least one vital reading must be provided.")
+        return self
+
+
+class NursingNoteRecord(BaseModel):
+    id: str
+    note_type: str
+    content: str
+    created_at: Optional[datetime] = None
+    nurse_name: Optional[str] = None
+
+
+class CreateNursingNoteRequest(BaseModel):
+    note_type: str = "Observation"
+    content: str = Field(min_length=1)
+
+    @field_validator("note_type")
+    @classmethod
+    def valid_note_type(cls, v: str) -> str:
+        allowed = {"Observation", "Care", "Incident"}
+        if v not in allowed:
+            raise ValueError(f"note_type must be one of {sorted(allowed)}")
+        return v
+
+
+class ActivePrescriptionForNurse(BaseModel):
+    id: str
+    medicine_name: str
+    dosage: str
+    frequency: str
+    duration: str
+    instructions: Optional[str] = None
+    prescribed_date: Optional[date] = None
+    last_administered_at: Optional[datetime] = None
+    last_administered_status: Optional[str] = None
+
+
+class MedicationAdministrationRecord(BaseModel):
+    id: str
+    prescription_id: str
+    medicine_name: str
+    dosage: str
+    status: str
+    remarks: Optional[str] = None
+    administered_at: Optional[datetime] = None
+    nurse_name: Optional[str] = None
+
+
+class CreateMedicationAdministrationRequest(BaseModel):
+    status: str = "Administered"
+    remarks: Optional[str] = None
+
+    @field_validator("status")
+    @classmethod
+    def valid_status(cls, v: str) -> str:
+        allowed = {"Administered", "Refused", "Held", "Missed"}
+        if v not in allowed:
+            raise ValueError(f"status must be one of {sorted(allowed)}")
+        return v
+
+
+class NursePatientDetail(BaseModel):
+    profile: NursePatientListItem
+    vitals_history: list[PatientVitalsRecord] = []
+    nursing_notes: list[NursingNoteRecord] = []
+    active_prescriptions: list[ActivePrescriptionForNurse] = []
+
+
+# ─── Consent & emergency access ──────────────────────────────────────────────
+
+class ConsentEntry(BaseModel):
+    """One clinician's standing access to a patient's records."""
+    doctor_id: str
+    doctor_user_id: Optional[str] = None
+    doctor_name: str
+    specialization: Optional[str] = None
+    # How the relationship arose, so a patient can see why this clinician
+    # appears at all rather than being asked to trust a bare list.
+    relationship: str
+    status: str                      # Authorized | Revoked
+    revoked_at: Optional[datetime] = None
+    emergency_override_until: Optional[datetime] = None
+
+
+class RevokeConsentRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+class EmergencyAccessRequest(BaseModel):
+    patient_id: str
+    reason: str = Field(min_length=10)
+    duration_hours: int = Field(default=4, ge=1, le=24)
+    # Identity verification (spec §9, §30). Break-glass overrides a patient's
+    # decision, so it is not enough to hold a session token — which may be
+    # stolen or left open on a ward terminal. The declarer re-enters their
+    # password, and the backend checks it before anything is granted.
+    password: str = Field(min_length=1, max_length=256)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_must_be_substantive(cls, v: str) -> str:
+        # Break-glass access is permanently recorded and reviewed. A blank or
+        # throwaway justification defeats the point of recording it.
+        if len(v.strip()) < 10:
+            raise ValueError("Give a clinical reason of at least 10 characters.")
+        return v.strip()
+
+
+class EmergencyAccessRecord(BaseModel):
+    id: str
+    patient_id: str
+    patient_name: Optional[str] = None
+    patient_user_id: Optional[str] = None
+    requester_id: str
+    requester_name: Optional[str] = None
+    requester_user_id: Optional[str] = None
+    reason: str
+    status: str
+    blockchain_tx_hash: Optional[str] = None
+    created_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    is_active: bool = False
+
+
+class PatientDocumentItem(BaseModel):
+    """A doctor-authored document, as the patient it concerns sees it."""
+    id: str
+    document_name: str
+    document_type: str
+    doctor_name: Optional[str] = None
+    doctor_specialization: Optional[str] = None
+    status: str
+    created_at: Optional[datetime] = None
+    # The body is never in the list response; it is encrypted at rest and
+    # decrypted only when the patient opens that specific document.
+    has_content: bool = False
+    document_hash: Optional[str] = None
+    kem_algorithm: Optional[str] = None
+    signature_algorithm: Optional[str] = None
+    blockchain_tx_hash: Optional[str] = None
+
+
+# ─── Doctor access requests (spec §6) ────────────────────────────────────────
+
+class CreateAccessRequest(BaseModel):
+    """A doctor asking a patient for permission to read their record."""
+    patient_id: str
+    purpose: str = Field(..., min_length=15, max_length=500)
+    requested_resource: str = Field(default="Full medical record", max_length=120)
+
+    @field_validator("purpose")
+    @classmethod
+    def purpose_must_be_substantive(cls, v: str) -> str:
+        # The patient reads this to decide. "need it" tells them nothing, and a
+        # consent decision made on no information is not informed consent.
+        cleaned = " ".join(v.split())
+        if len(cleaned) < 15 or len(cleaned.split()) < 3:
+            raise ValueError(
+                "State a clinical reason the patient can weigh — at least a short sentence."
+            )
+        return cleaned
+
+
+class AccessRequestDecision(BaseModel):
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+class AccessRequestRecord(BaseModel):
+    request_id: str
+    doctor_id: str
+    doctor_user_id: Optional[str] = None
+    doctor_name: Optional[str] = None
+    specialization: Optional[str] = None
+    patient_id: str
+    patient_user_id: Optional[str] = None
+    patient_name: Optional[str] = None
+    requested_resource: Optional[str] = None
+    purpose: Optional[str] = None
+    status: str
+    requested_at: Optional[datetime] = None
+    decided_at: Optional[datetime] = None
+    decision_note: Optional[str] = None
+
+
+class ZkpProofRequest(BaseModel):
+    """A consent proof, in one of two shapes.
+
+    * ``mlwe-v1`` (post-quantum, issued for every new consent): ``proof`` is the
+      base64 lattice proof, 7 072 bytes decoded.
+    * ``schnorr-v1`` (legacy): ``t`` and ``s``, both hex. A request with no
+      ``scheme`` is read as Schnorr so clients written before the switch work.
+    """
+    challenge: str = Field(..., min_length=8, max_length=64)
+    scheme: Literal["mlwe-v1", "schnorr-v1"] = "schnorr-v1"
+    proof: Optional[str] = Field(default=None, min_length=1, max_length=10_000)
+    t: Optional[str] = Field(default=None, min_length=1, max_length=1024)
+    s: Optional[str] = Field(default=None, min_length=1, max_length=1024)
+
+    @model_validator(mode="after")
+    def _fields_match_scheme(self):
+        if self.scheme == "mlwe-v1" and not self.proof:
+            raise ValueError("A post-quantum proof needs the 'proof' field.")
+        if self.scheme == "schnorr-v1" and not (self.t and self.s):
+            raise ValueError("A Schnorr proof needs both 't' and 's'.")
+        return self
+
+    def as_proof(self) -> dict:
+        if self.scheme == "mlwe-v1":
+            return {"scheme": self.scheme, "proof": self.proof}
+        return {"scheme": self.scheme, "t": self.t, "s": self.s}
+
+
+class RegisterPeerRequest(BaseModel):
+    """Register a real remote institution as a federation peer."""
+    node_name: str = Field(..., min_length=3, max_length=120)
+    contact_url: Optional[str] = Field(default=None, max_length=500)
+
+
+class PeerSubmissionRequest(BaseModel):
+    """A peer institution's locally-fitted model parameters.
+
+    Carries no records, no identifiers and no events — only the medians and
+    scales describing what normal looks like at that institution.
+    """
+    node_name: str = Field(..., min_length=3, max_length=120)
+    round_number: int = Field(..., ge=1)
+    sample_count: int = Field(..., ge=1, le=10_000_000)
+    parameters: dict = Field(...)
+    # Unix seconds, covered by the signature: the hub refuses a stale one, or one
+    # not newer than the last it accepted from this peer (replay).
+    timestamp: int = Field(..., ge=0)
+    signature: str = Field(..., min_length=64, max_length=64)
+
+
+class StepUpRequest(BaseModel):
+    """Password re-entry demanded by the risk policy (spec §23 'additional verification')."""
+    password: str = Field(min_length=1, max_length=256)
+
+
+class IncidentUpdateRequest(BaseModel):
+    """Move an incident through its lifecycle (spec §25)."""
+    status: Literal["Investigating", "Closed"]
+    resolution: Optional[str] = Field(default=None, max_length=2000)
+    # The investigator's finding. It becomes a training label for the federated
+    # threat classifier; "inconclusive" (or none) teaches it nothing.
+    verdict: Optional[Literal["confirmed_threat", "false_positive", "inconclusive"]] = None
+
+    @model_validator(mode="after")
+    def _closing_needs_a_resolution(self):
+        # A closed incident with no stated outcome is not a compliance record,
+        # it is a deletion with extra steps.
+        if self.status == "Closed" and not (self.resolution and self.resolution.strip()):
+            raise ValueError("Closing an incident requires a resolution.")
+        return self
+
+
+class FederationParticipationRequest(BaseModel):
+    """Join another hospital's federation (it issued the secret at registration)."""
+    hub_url: str = Field(min_length=8, max_length=300)
+    node_name: str = Field(min_length=2, max_length=120)
+    shared_secret: str = Field(min_length=16, max_length=200)
+
+    @field_validator("hub_url")
+    @classmethod
+    def http_url(cls, v: str) -> str:
+        v = v.strip()
+        if not (v.startswith("https://") or v.startswith("http://")) or " " in v:
+            raise ValueError("Enter the hub's address, e.g. https://hub.example-hospital.org")
+        return v
+
+    @field_validator("node_name", "shared_secret")
+    @classmethod
+    def trimmed(cls, v: str) -> str:
+        return v.strip()

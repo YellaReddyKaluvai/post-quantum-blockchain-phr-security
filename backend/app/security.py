@@ -11,10 +11,13 @@ import base64
 import os
 
 from app.config import get_settings
-from app.rbac import get_permissions_for_role
+from app.rbac import get_permissions_for_role, has_permission
 
 bearer_scheme = HTTPBearer(auto_error=False)
 ph = PasswordHasher()
+
+# Name of the HTTP-only cookie carrying the QuantumCare session token.
+SESSION_COOKIE_NAME = "quantumcare_token"
 
 def hash_password(password: str) -> str:
     return ph.hash(password)
@@ -25,9 +28,9 @@ def verify_password(password: str, hashed: str) -> bool:
     except VerifyMismatchError:
         return False
 
-def get_encryption_key() -> bytes:
-    settings = get_settings()
-    key = settings.ENCRYPTION_KEY.encode('utf-8')
+def get_encryption_key(key_text: str | None = None) -> bytes:
+    """The AES-256 key: ``key_text`` if given (key rotation), else ENCRYPTION_KEY."""
+    key = (key_text if key_text is not None else get_settings().ENCRYPTION_KEY).encode('utf-8')
     # ensure it's 32 bytes for AES-256
     if len(key) < 32:
         key = key.ljust(32, b'0')
@@ -35,10 +38,10 @@ def get_encryption_key() -> bytes:
         key = key[:32]
     return key
 
-def encrypt_data(data: str) -> str:
+def encrypt_data(data: str, key_text: str | None = None) -> str:
     if not data:
         return data
-    key = get_encryption_key()
+    key = get_encryption_key(key_text)
     cipher = AES.new(key, AES.MODE_CBC)
     ct_bytes = cipher.encrypt(pad(data.encode('utf-8'), AES.block_size))
     iv = base64.b64encode(cipher.iv).decode('utf-8')
@@ -58,6 +61,36 @@ def decrypt_data(data: str) -> str:
         return pt_bytes.decode('utf-8')
     except Exception:
         return data
+
+def looks_encrypted(data: str | None) -> bool:
+    """True when ``data`` has the shape encrypt_data produces: base64(16-byte IV):base64(blocks)."""
+    if not data or data.count(':') != 1:
+        return False
+    iv, ct = data.split(':', 1)
+    try:
+        iv_bytes = base64.b64decode(iv, validate=True)
+        ct_bytes = base64.b64decode(ct, validate=True)
+    except Exception:
+        return False
+    return len(iv_bytes) == 16 and len(ct_bytes) > 0 and len(ct_bytes) % 16 == 0
+
+
+def decrypt_data_strict(data: str, key_text: str) -> str:
+    """Decrypt with exactly this key, raising ValueError on any failure.
+
+    ``decrypt_data`` returns its input when it cannot decrypt, which keeps old
+    plaintext rows readable but cannot tell "not encrypted" from "encrypted
+    under another key". Key rotation must tell them apart, so it uses this.
+    """
+    if not looks_encrypted(data):
+        raise ValueError("not an encrypt_data value")
+    iv, ct = data.split(':', 1)
+    cipher = AES.new(get_encryption_key(key_text), AES.MODE_CBC, base64.b64decode(iv))
+    try:
+        return unpad(cipher.decrypt(base64.b64decode(ct)), AES.block_size).decode('utf-8')
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ValueError("does not decrypt under this key") from exc
+
 
 def create_session_token(payload: dict[str, Any], minutes: int | None = None) -> tuple[str, datetime]:
     settings = get_settings()
@@ -81,7 +114,7 @@ def verify_session_token(token: str) -> dict[str, Any]:
 def _extract_token(request: Request, credentials: HTTPAuthorizationCredentials | None) -> str | None:
     if credentials is not None:
         return credentials.credentials
-    return request.cookies.get("aegis_access_token")
+    return request.cookies.get(SESSION_COOKIE_NAME)
 
 def get_current_session(
     request: Request,
@@ -109,7 +142,10 @@ def require_role(*allowed_roles: str):
 
 def require_permission(permission: str):
     def _dependency(session: dict[str, Any] = Depends(get_current_session)) -> dict[str, Any]:
-        if permission not in session.get("permissions", []):
+        # Checked against the role fresh via rbac, not the token's own
+        # "permissions" claim: a session token must never be the thing that
+        # decides what it is allowed to do, only who it belongs to.
+        if not has_permission(session.get("role", ""), permission):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden: insufficient permission.")
         return session
 

@@ -2,16 +2,28 @@
 
 import React, { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ShieldCheck, Mail, Lock, User, ArrowRight, ArrowLeft, Loader2, CheckCircle2 } from "lucide-react";
+import { ShieldCheck, ArrowRight, ArrowLeft, Loader2, CheckCircle2 } from "lucide-react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { register } from "../../lib/session";
 import RoleSelector from "../../components/RoleSelector";
 import PasswordStrength from "../../components/PasswordStrength";
 import type { AppRole } from "../../lib/iam";
 
+const BLOOD_GROUPS = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"];
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+/** The first problem with step 2, or "" when it is complete. Mirrors the server's checks. */
+function detailsProblem(f: { role: string; full_name: string; email: string; date_of_birth: string; specialization: string }): string {
+  if (f.full_name.trim().length < 2) return "Enter your full name.";
+  if (!EMAIL_RE.test(f.email.trim())) return "Enter a valid email address.";
+  if (!f.date_of_birth) return "Enter your date of birth.";
+  const dob = new Date(f.date_of_birth);
+  if (Number.isNaN(dob.getTime()) || dob > new Date() || dob.getFullYear() < 1900) return "Enter a real date of birth.";
+  if (f.role === "Doctor" && !f.specialization.trim()) return "Doctors must give a specialization.";
+  return "";
+}
+
 export default function SignupPage() {
-  const router = useRouter();
   const [step, setStep] = useState(1);
   const [formData, setFormData] = useState({
     role: "" as AppRole | "",
@@ -35,8 +47,9 @@ export default function SignupPage() {
       return;
     }
     if (step === 2) {
-      if (!formData.full_name || !formData.email || !formData.date_of_birth) {
-        setError("Please fill all required fields.");
+      const problem = detailsProblem(formData);
+      if (problem) {
+        setError(problem);
         return;
       }
     }
@@ -47,6 +60,7 @@ export default function SignupPage() {
 
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;                      // one submission at a time
     setError("");
 
     if (formData.password !== formData.confirm_password) {
@@ -63,15 +77,16 @@ export default function SignupPage() {
     try {
       setLoading(true);
       await register({
-        full_name: formData.full_name,
-        email: formData.email,
+        full_name: formData.full_name.trim(),
+        email: formData.email.trim(),
         password: formData.password,
         confirm_password: formData.confirm_password,
         role: formData.role,
         gender: formData.gender,
         date_of_birth: formData.date_of_birth,
         blood_group: formData.role === "Patient" ? formData.blood_group : null,
-        specialization: formData.role !== "Patient" ? formData.specialization : null
+        // Specialization is a clinical field that only applies to Doctors.
+        specialization: formData.role === "Doctor" ? formData.specialization : null
       });
       setSuccess(true);
     } catch (err: unknown) {
@@ -99,7 +114,7 @@ export default function SignupPage() {
             <ShieldCheck className="w-6 h-6 text-white" />
           </div>
           <span className="text-2xl font-extrabold tracking-wider bg-clip-text text-transparent bg-gradient-to-r from-slate-800 to-slate-600 drop-shadow-sm">
-            AEGIS
+            QuantumCare
           </span>
         </Link>
 
@@ -131,7 +146,7 @@ export default function SignupPage() {
                     <div className={`h-2 w-8 rounded-full ${step >= 3 ? "bg-teal-500" : "bg-slate-200"} transition-colors`} />
                   </div>
                 </div>
-                {error && <div className="p-3 mb-4 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-semibold animate-pulse">{error}</div>}
+                {error && <div role="alert" className="p-3 mb-4 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-semibold">{error}</div>}
               </div>
 
               <AnimatePresence mode="wait">
@@ -140,7 +155,7 @@ export default function SignupPage() {
                     <h3 className="text-sm font-bold text-slate-500 mb-4 uppercase tracking-wider">Select your Role</h3>
                     <RoleSelector selectedRole={formData.role as AppRole} onSelect={(r) => setFormData({...formData, role: r})} />
                     
-                    <button onClick={handleNext} disabled={!formData.role} className="w-full mt-8 bg-gradient-to-r from-cyan-500 to-teal-500 hover:from-cyan-400 hover:to-teal-400 text-white py-4 rounded-2xl font-extrabold transition-all flex items-center justify-center gap-2 disabled:opacity-50">
+                    <button type="button" onClick={handleNext} disabled={!formData.role} className="w-full mt-8 bg-gradient-to-r from-cyan-500 to-teal-500 hover:from-cyan-400 hover:to-teal-400 text-white py-4 rounded-2xl font-extrabold transition-all flex items-center justify-center gap-2 disabled:opacity-50">
                       Next Step <ArrowRight className="w-5 h-5" />
                     </button>
                   </motion.div>
@@ -149,46 +164,49 @@ export default function SignupPage() {
                 {step === 2 && (
                   <motion.div key="step2" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="space-y-4">
                     <div>
-                      <label className={labelClass}>Full Name</label>
-                      <input type="text" required value={formData.full_name} onChange={e => setFormData({...formData, full_name: e.target.value})} className={inputClass} placeholder="Alice Smith" />
+                      <label htmlFor="su-name" className={labelClass}>Full Name</label>
+                      <input id="su-name" type="text" required autoComplete="name" value={formData.full_name} onChange={e => setFormData({...formData, full_name: e.target.value})} className={inputClass} placeholder="Alice Smith" />
                     </div>
                     <div>
-                      <label className={labelClass}>Email Address</label>
-                      <input type="email" required value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} className={inputClass} placeholder="alice@example.com" />
+                      <label htmlFor="su-email" className={labelClass}>Email Address</label>
+                      <input id="su-email" type="email" required autoComplete="email" value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} className={inputClass} placeholder="alice@example.com" />
                     </div>
                     <div className="grid grid-cols-2 gap-4">
                       <div>
-                        <label className={labelClass}>Gender</label>
-                        <select value={formData.gender} onChange={e => setFormData({...formData, gender: e.target.value})} className={inputClass}>
+                        <label htmlFor="su-gender" className={labelClass}>Gender</label>
+                        <select id="su-gender" value={formData.gender} onChange={e => setFormData({...formData, gender: e.target.value})} className={inputClass}>
                           <option>Male</option>
                           <option>Female</option>
                           <option>Other</option>
                         </select>
                       </div>
                       <div>
-                        <label className={labelClass}>Date of Birth</label>
-                        <input type="date" required value={formData.date_of_birth} onChange={e => setFormData({...formData, date_of_birth: e.target.value})} className={inputClass} />
+                        <label htmlFor="su-dob" className={labelClass}>Date of Birth</label>
+                        <input id="su-dob" type="date" required max={new Date().toISOString().split("T")[0]} min="1900-01-01" value={formData.date_of_birth} onChange={e => setFormData({...formData, date_of_birth: e.target.value})} className={inputClass} />
                       </div>
                     </div>
                     
                     {formData.role === "Patient" && (
                       <div>
-                        <label className={labelClass}>Blood Group (Optional)</label>
-                        <input type="text" value={formData.blood_group} onChange={e => setFormData({...formData, blood_group: e.target.value})} className={inputClass} placeholder="O+" />
+                        <label htmlFor="su-blood" className={labelClass}>Blood Group (Optional)</label>
+                        <select id="su-blood" value={formData.blood_group} onChange={e => setFormData({...formData, blood_group: e.target.value})} className={inputClass}>
+                          <option value="">Not known</option>
+                          {BLOOD_GROUPS.map((g) => <option key={g} value={g}>{g}</option>)}
+                        </select>
                       </div>
                     )}
-                    {(formData.role === "Doctor" || formData.role === "Nurse" || formData.role === "Lab Technician") && (
+                    {formData.role === "Doctor" && (
                       <div>
-                        <label className={labelClass}>Specialization</label>
-                        <input type="text" required value={formData.specialization} onChange={e => setFormData({...formData, specialization: e.target.value})} className={inputClass} placeholder="Cardiology" />
+                        <label htmlFor="su-spec" className={labelClass}>Specialization</label>
+                        <input id="su-spec" type="text" required value={formData.specialization} onChange={e => setFormData({...formData, specialization: e.target.value})} className={inputClass} placeholder="Cardiology" />
                       </div>
                     )}
 
                     <div className="flex gap-4 mt-8">
-                      <button onClick={handlePrev} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 py-4 rounded-2xl font-extrabold transition-all flex items-center justify-center gap-2">
+                      <button type="button" onClick={handlePrev} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 py-4 rounded-2xl font-extrabold transition-all flex items-center justify-center gap-2">
                         <ArrowLeft className="w-5 h-5" /> Back
                       </button>
-                      <button onClick={handleNext} className="flex-[2] bg-gradient-to-r from-cyan-500 to-teal-500 hover:from-cyan-400 hover:to-teal-400 text-white py-4 rounded-2xl font-extrabold transition-all flex items-center justify-center gap-2">
+                      <button type="button" onClick={handleNext} className="flex-[2] bg-gradient-to-r from-cyan-500 to-teal-500 hover:from-cyan-400 hover:to-teal-400 text-white py-4 rounded-2xl font-extrabold transition-all flex items-center justify-center gap-2">
                         Next Step <ArrowRight className="w-5 h-5" />
                       </button>
                     </div>
@@ -198,21 +216,21 @@ export default function SignupPage() {
                 {step === 3 && (
                   <motion.form key="step3" onSubmit={handleSignup} initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="space-y-4">
                     <div>
-                      <label className={labelClass}>Master Password</label>
-                      <input type="password" required value={formData.password} onChange={e => setFormData({...formData, password: e.target.value})} className={inputClass} placeholder="••••••••" />
+                      <label htmlFor="su-password" className={labelClass}>Master Password</label>
+                      <input id="su-password" type="password" required minLength={8} autoComplete="new-password" value={formData.password} onChange={e => setFormData({...formData, password: e.target.value})} className={inputClass} placeholder="••••••••" />
                       <PasswordStrength password={formData.password} />
                     </div>
                     <div>
-                      <label className={labelClass}>Confirm Password</label>
-                      <input type="password" required value={formData.confirm_password} onChange={e => setFormData({...formData, confirm_password: e.target.value})} className={inputClass} placeholder="••••••••" />
+                      <label htmlFor="su-confirm" className={labelClass}>Confirm Password</label>
+                      <input id="su-confirm" type="password" required minLength={8} autoComplete="new-password" value={formData.confirm_password} onChange={e => setFormData({...formData, confirm_password: e.target.value})} className={inputClass} placeholder="••••••••" />
                     </div>
 
                     <div className="flex gap-4 mt-8">
                       <button type="button" onClick={handlePrev} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 py-4 rounded-2xl font-extrabold transition-all flex items-center justify-center gap-2">
                         <ArrowLeft className="w-5 h-5" /> Back
                       </button>
-                      <button type="submit" disabled={loading} className="flex-[2] bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-white py-4 rounded-2xl font-extrabold transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-200">
-                        {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : "Complete Registration"}
+                      <button type="submit" disabled={loading} className="flex-[2] bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 disabled:opacity-60 text-white py-4 rounded-2xl font-extrabold transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-200">
+                        {loading ? <><Loader2 className="w-5 h-5 animate-spin" /> Submitting…</> : "Complete Registration"}
                       </button>
                     </div>
                   </motion.form>
