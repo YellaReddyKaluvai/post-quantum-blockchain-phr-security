@@ -46,6 +46,10 @@ class FakeCursor:
     def fetchone(self):
         return self.rows.pop(0) if self.rows else None
 
+    def fetchall(self):
+        """Scripted as one list in the row queue."""
+        return (self.rows.pop(0) if self.rows else None) or []
+
     def statements(self, fragment):
         return [sql for sql, _ in self.executed if fragment in sql]
 
@@ -171,12 +175,42 @@ def test_one_refusal_is_recorded_but_does_not_alert():
 
 
 def test_repeated_refusals_raise_an_alert():
-    cur = FakeCursor([{"n": secresp.DENIAL_ALERT_THRESHOLD}, None, {"id": "alert-1"}])
+    # count · no open alert · new alert id · patients refused in the window ·
+    # actor's name · patient-account check · no recent identical notice
+    cur = FakeCursor([{"n": secresp.DENIAL_ALERT_THRESHOLD}, None, {"id": "alert-1"},
+                      [{"pid": "p1"}], {"full_name": "Rao", "role": "Doctor"}, {"?": 1}, None])
     alert = secresp.access_denied(cur, actor_id="d1", actor_public_id="DOC-1", actor_role="Doctor",
-                                  resource="patient_chart", reason="no consent")
+                                  resource="patient_chart", reason="no consent", patient_id="p1")
     assert alert == "alert-1"
     sql, params = next((q, p) for q, p in cur.executed if "INSERT INTO SecurityAlerts" in q)
     assert params[2] == "MEDIUM" and params[-1] == secresp.SOURCE_ACCESS_CONTROL
+    # …and the patient whose chart was probed is told, by name of who tried.
+    _, note = next((q, p) for q, p in cur.executed if "INSERT INTO Notifications" in q)
+    assert note[0] == "p1" and note[1] == "SECURITY_ACCESS_REFUSED" and "Dr. Rao" in note[3]
+
+
+def test_a_security_notice_only_ever_reaches_a_patient_account():
+    """§27: never notify the wrong person — an id that is not a patient is refused."""
+    cur = FakeCursor([None])
+    assert not secresp.notify_patient(cur, patient_id="doctor-id", kind="SECURITY_X",
+                                      title="t", body="b")
+    assert not cur.statements("INSERT INTO Notifications")
+
+
+def test_the_same_security_notice_is_not_repeated_within_a_day():
+    cur = FakeCursor([{"?": 1}, {"?": 1}])          # is a patient · already told today
+    assert not secresp.notify_patient(cur, patient_id="p1", kind="SECURITY_X", title="t", body="b")
+    assert not cur.statements("INSERT INTO Notifications")
+
+
+def test_an_integrity_failure_tells_the_records_patient_with_the_incident_ref():
+    # no open incident · alert id · incident number · patient check · not yet told
+    cur = FakeCursor([None, {"id": "al1"}, {"n": 41}, {"?": 1}, None])
+    ref = secresp.integrity_failure(cur, resource="LabReport LR-1", detail="digest differs",
+                                    patient_id="p1")
+    _, note = next((q, p) for q, p in cur.executed if "INSERT INTO Notifications" in q)
+    assert note[0] == "p1" and note[1] == "SECURITY_RECORD_WITHHELD" and ref in note[3]
+    assert ref.endswith("00042")
 
 
 def test_an_open_alert_is_reused_not_duplicated():
