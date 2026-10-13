@@ -824,3 +824,31 @@ ALTER TABLE FederatedRounds ALTER COLUMN node_name TYPE VARCHAR(120);
 -- before detection here uses it. Rows from before this check count as adopted.
 ALTER TABLE FederatedGlobalModel ADD COLUMN IF NOT EXISTS adopted BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE FederatedGlobalModel ADD COLUMN IF NOT EXISTS evaluation JSONB;
+
+-- ─── Session revocation ──────────────────────────────────────────────────────
+-- Each session token carries a jti; logout marks its row inactive and every
+-- request checks it, so a logged-out (or stolen) token stops working at once.
+ALTER TABLE Sessions ADD COLUMN IF NOT EXISTS jti VARCHAR(64);
+CREATE INDEX IF NOT EXISTS idx_sessions_jti ON Sessions(jti);
+
+-- ─── Differential-privacy ledger ─────────────────────────────────────────────
+-- Every classifier update this hospital released (as a participant, or into its
+-- own round as hub), with its zCDP cost rho. Summed, it is the privacy loss
+-- across all rounds. rho is NULL for a release made without noise.
+CREATE TABLE IF NOT EXISTS FederatedPrivacyLedger (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    purpose VARCHAR(20) NOT NULL,
+    epsilon DOUBLE PRECISION,
+    delta DOUBLE PRECISION,
+    sigma DOUBLE PRECISION,
+    clip DOUBLE PRECISION NOT NULL,
+    rho DOUBLE PRECISION,
+    labels INTEGER NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─── Late anchoring ──────────────────────────────────────────────────────────
+-- A locally simulated anchor later written on-chain keeps its original hash and
+-- when it was re-anchored: it proves the digest existed by that block, not earlier.
+ALTER TABLE DocumentAnchors ADD COLUMN IF NOT EXISTS original_tx_hash VARCHAR(66);
+ALTER TABLE DocumentAnchors ADD COLUMN IF NOT EXISTS reanchored_at TIMESTAMPTZ;

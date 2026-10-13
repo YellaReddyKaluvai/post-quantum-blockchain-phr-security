@@ -74,6 +74,10 @@ class ChainClient:
         self.account = Account.from_key(settings.BLOCKCHAIN_PRIVATE_KEY)
         self.address = Web3.to_checksum_address(settings.BLOCKCHAIN_CONTRACT_ADDRESS)
         self.contract = self.web3.eth.contract(address=self.address, abi=artifact["abi"])
+        # Only events these contracts emitted are this hospital's anchors.
+        self.trusted_addresses = {self.address.lower()} | {
+            a.strip().lower() for a in settings.BLOCKCHAIN_PREVIOUS_CONTRACT_ADDRESSES.split(",")
+            if a.strip()}
 
         if self.web3.eth.get_code(self.address) in (b"", b"0x"):
             raise ValueError(
@@ -91,8 +95,8 @@ class ChainClient:
             self.supports_consent_status = False
             logger.error(
                 "PHR.sol at %s predates consentStatus(); on-chain consent cannot be verified "
-                "until it is redeployed (restart the chain and run start.sh, or "
-                "deploy_contract.py and update BLOCKCHAIN_CONTRACT_ADDRESS).", self.address)
+                "until it is replaced: run migrate_contract.py, which deploys the current "
+                "contract and carries consent over from this one's own state.", self.address)
 
         logger.info(
             "Chain client ready: %s @ %s (chain %s)",
@@ -126,6 +130,17 @@ class ChainClient:
             "gas_used": receipt["gasUsed"],
             "status": receipt["status"],
         }
+
+    def audit_events(self, receipt) -> list:
+        """The AuditLogged events in a transaction receipt — from our contracts only.
+
+        Decoding by ABI alone would accept the same event emitted by any
+        contract, so a database row pointed at a look-alike contract's
+        transaction would "verify". Logs from other addresses are dropped first.
+        """
+        logs = [log for log in receipt["logs"]
+                if str(log["address"]).lower() in self.trusted_addresses]
+        return list(self.contract.events.AuditLogged().process_receipt({**dict(receipt), "logs": logs}))
 
     def log_data_access(self, actor_public_id: str, action: str, document_hash: str) -> dict[str, Any]:
         """Send one audit entry on-chain and wait for its receipt.

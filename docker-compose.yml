@@ -45,6 +45,10 @@ services:
       # Optional external infrastructure. Absent is a supported state.
       BLOCKCHAIN_RPC_URL: ${BLOCKCHAIN_RPC_URL:-}
       IPFS_API_URL: ${IPFS_API_URL:-}
+      # Frontends allowed to call the API with the HttpOnly session cookie.
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      SESSION_COOKIE_SAMESITE: ${SESSION_COOKIE_SAMESITE:-lax}
     ports:
       - "8000:8000"
     restart: unless-stopped

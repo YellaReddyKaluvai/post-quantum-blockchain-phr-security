@@ -51,6 +51,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import time
 import urllib.error
@@ -230,7 +231,55 @@ def dp_epsilon() -> Optional[float]:
     return value if value and value > 0 else None
 
 
-def train_for_submission(cur, base: Optional[fl.Classifier]) -> tuple[Optional[dict], dict]:
+ACCOUNTING_DELTA = 1e-5
+
+
+def dp_total_budget() -> Optional[float]:
+    """FEDERATION_DP_TOTAL_EPSILON: the most privacy loss, over all rounds, this
+    hospital will spend on releasing classifier updates; unset = no cap."""
+    raw = (os.getenv("FEDERATION_DP_TOTAL_EPSILON") or "").strip()
+    try:
+        value = float(raw) if raw else None
+    except ValueError:
+        logger.error("FEDERATION_DP_TOTAL_EPSILON=%r is not a number; no budget is enforced", raw)
+        return None
+    return value if value and value > 0 else None
+
+
+def privacy_spent(cur) -> dict[str, Any]:
+    """What every classifier release so far has cost, composed across rounds (zCDP).
+
+    A release made without noise has no finite cost: it is counted, and while
+    any exists no overall guarantee is claimed.
+    """
+    cur.execute("""SELECT COUNT(*) FILTER (WHERE rho IS NOT NULL) AS noised,
+                          COUNT(*) FILTER (WHERE rho IS NULL) AS unnoised,
+                          COALESCE(SUM(rho), 0) AS rho
+                     FROM FederatedPrivacyLedger""")
+    row = cur.fetchone()
+    if isinstance(row, dict):
+        row = (row["noised"], row["unnoised"], row["rho"])
+    noised, unnoised, rho = row or (0, 0, 0)
+    noised, unnoised, rho = int(noised or 0), int(unnoised or 0), float(rho or 0)
+    budget = dp_total_budget()
+    epsilon = fl.epsilon_from_rho(rho, ACCOUNTING_DELTA)
+    return {"releases_noised": noised, "releases_without_noise": unnoised, "rho": round(rho, 6),
+            "epsilon_total": None if unnoised else round(epsilon, 4), "delta": ACCOUNTING_DELTA,
+            "budget_epsilon": budget,
+            "budget_remaining": (round(max(0.0, budget - epsilon), 4) if budget and not unnoised else None),
+            "accounting": "zCDP composition of the Gaussian mechanism (Bun & Steinke 2016)"}
+
+
+def _record_release(cur, purpose: str, privacy: dict, labels: int) -> None:
+    sigma = privacy.get("noise_sigma")
+    rho = fl.release_rho(privacy["clip"], sigma) if sigma else None
+    cur.execute("""INSERT INTO FederatedPrivacyLedger (purpose, epsilon, delta, sigma, clip, rho, labels)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                (purpose, privacy.get("epsilon"), privacy.get("delta"), sigma, privacy["clip"], rho, labels))
+
+
+def train_for_submission(cur, base: Optional[fl.Classifier],
+                         purpose: str = "submission") -> tuple[Optional[dict], dict]:
     """Train the local classifier from ``base`` and prepare it to leave the hospital.
 
     Returns ``(classifier_parameters or None, report)``. Without enough
@@ -246,10 +295,28 @@ def train_for_submission(cur, base: Optional[fl.Classifier]) -> tuple[Optional[d
         report["note"] = (f"Needs {fl.MIN_TRAINING_LABELS} investigated incidents with at least "
                           f"{fl.MIN_PER_CLASS} of each verdict; baselines only this round.")
         return None, report
+    epsilon, budget = dp_epsilon(), dp_total_budget()
+    if budget is not None:
+        spent = privacy_spent(cur)
+        if epsilon is None or spent["releases_without_noise"]:
+            report["note"] = ("A total privacy budget is set, so the classifier is shared only with "
+                              "differential-privacy noise (set FEDERATION_DP_EPSILON); baselines only.")
+            return None, report
+        sigma = fl.DEFAULT_CLIP * math.sqrt(2 * math.log(1.25 / ACCOUNTING_DELTA)) / epsilon
+        after = fl.epsilon_from_rho(spent["rho"] + fl.release_rho(fl.DEFAULT_CLIP, sigma), ACCOUNTING_DELTA)
+        if after > budget:
+            report["note"] = (f"Privacy budget reached: another release would bring the total to "
+                              f"ε={after:.2f} (budget {budget}); baselines only.")
+            report["privacy_spent"] = spent
+            return None, report
     local = fl.train(examples, init=base)
-    sent, privacy = fl.privatize(local, base, clip=fl.DEFAULT_CLIP, epsilon=dp_epsilon())
+    sent, privacy = fl.privatize(local, base, clip=fl.DEFAULT_CLIP, epsilon=epsilon,
+                                 delta=ACCOUNTING_DELTA)
+    # Counted when prepared, even if the submission then fails: over-counting is the safe side.
+    _record_release(cur, purpose, privacy, len(examples))
     report.update({"trained": True, "local_fit": fl.evaluate(local, examples),
-                   "started_from": "global model" if base else "zero", "privacy": privacy})
+                   "started_from": "global model" if base else "zero", "privacy": privacy,
+                   "privacy_spent": privacy_spent(cur)})
     return sent.to_parameters(), report
 
 

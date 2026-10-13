@@ -23,10 +23,14 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  const accessToken = readCookie(request, "quantumcare_token");
+  // Navigation only: the real session is the backend's HttpOnly cookie, which
+  // may live on the API's host rather than this one, and every API call is
+  // authorised there. These cookies just avoid rendering a dashboard shell to
+  // someone who never signed in.
+  const session = readCookie(request, "quantumcare_session") ?? readCookie(request, "quantumcare_token");
   const role = readCookie(request, "quantumcare_role");
 
-  if (!accessToken || !role) {
+  if (!session || !role) {
     return NextResponse.redirect(new URL("/login", request.url));
   }
 
