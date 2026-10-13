@@ -4,11 +4,13 @@ import json
 import logging
 import math
 import os
+import time
 from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response, status, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from datetime import datetime, date, timedelta, timezone
 from typing import Optional
+from uuid import UUID
 import psycopg
 from psycopg.rows import dict_row
 
@@ -5185,6 +5187,15 @@ SIMULATED_PEERS = [
 LOCAL_NODE = "This hospital (local)"
 
 
+PEER_UPDATE_MAX_AGE_DAYS = 7     # an update older than this is not carried into a new round
+
+
+def _open_round(cur) -> int:
+    """The round the next aggregation will produce: the latest global model's + 1."""
+    cur.execute("SELECT COALESCE(MAX(round_number), 0) + 1 AS n FROM FederatedGlobalModel")
+    return int(cur.fetchone()["n"])
+
+
 def _latest_global_classifier(cur) -> Optional[fed_clf.Classifier]:
     cur.execute("SELECT parameters FROM FederatedGlobalModel ORDER BY round_number DESC LIMIT 1")
     row = cur.fetchone()
@@ -5201,6 +5212,15 @@ def _federated_round(cur) -> dict:
     classifiers. Simulated peers, used only before anyone has federated, add
     baselines but never classifier weights — there is nothing they could have
     learned from.
+
+    Each active peer contributes its newest update from the last
+    PEER_UPDATE_MAX_AGE_DAYS days, whichever round it was filed against; a
+    suspended peer contributes nothing to new rounds. An update carried into
+    this round keeps its original date, so it ages out instead of being
+    refreshed forever. The result is then evaluated on this hospital's own data
+    exactly as a participant evaluates a pulled model, and detection here uses
+    it only if it passes (``adopted``); peers receive it either way and judge
+    it on their own data.
     """
     import json
     windows = aisec.extract_windows(cur, hours=720)
@@ -5212,42 +5232,40 @@ def _federated_round(cur) -> dict:
     local_classifier, local_training = federation.train_for_submission(cur, previous)
     local_params = aisec.role_parameters(local_baselines, local_classifier)
     local_samples = len(windows)
-    cur.execute("SELECT COALESCE(MAX(round_number), 0) + 1 AS n FROM FederatedRounds")
-    rnd = cur.fetchone()["n"]
+    rnd = _open_round(cur)
 
     nodes: list[tuple[str, int, dict]] = []
     cur.execute(
         """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,
                                         sample_count, local_parameters)
-           VALUES (%s,%s,FALSE,%s,%s)""",
+           VALUES (%s,%s,FALSE,%s,%s)
+           ON CONFLICT (round_number, node_name) DO UPDATE
+             SET sample_count = EXCLUDED.sample_count,
+                 local_parameters = EXCLUDED.local_parameters,
+                 created_at = CURRENT_TIMESTAMP""",
         (rnd, LOCAL_NODE, local_samples, json.dumps(local_params)))
     nodes.append((LOCAL_NODE, local_samples, local_params))
 
-    # Real peer submissions: those filed against this round, else each peer's
-    # most recent one from the last week (a peer cannot know the round number
-    # this node is about to open).
+    # Real peers: each active peer's newest update from the last week.
     cur.execute(
-        """SELECT node_name, sample_count, local_parameters
-             FROM FederatedRounds
-            WHERE round_number = %s AND is_simulated = FALSE AND node_name <> %s""",
-        (rnd, LOCAL_NODE))
+        """SELECT DISTINCT ON (r.node_name) r.node_name, r.round_number, r.sample_count,
+                  r.local_parameters, r.created_at
+             FROM FederatedRounds r
+             JOIN FederatedPeers p ON p.node_name = r.node_name AND p.is_active
+            WHERE r.is_simulated = FALSE AND r.node_name <> %s AND r.round_number <= %s
+              AND r.created_at > CURRENT_TIMESTAMP - make_interval(days => %s)
+            ORDER BY r.node_name, r.created_at DESC""",
+        (LOCAL_NODE, rnd, PEER_UPDATE_MAX_AGE_DAYS))
     real_peers = cur.fetchall()
-    if not real_peers:
-        cur.execute(
-            """SELECT DISTINCT ON (node_name) node_name, sample_count, local_parameters
-                 FROM FederatedRounds
-                WHERE is_simulated = FALSE AND node_name <> %s
-                  AND created_at > CURRENT_TIMESTAMP - INTERVAL '7 days'
-                ORDER BY node_name, round_number DESC""", (LOCAL_NODE,))
-        real_peers = cur.fetchall()
-        for peer in real_peers:
+    for peer in real_peers:
+        if peer["round_number"] != rnd:
             cur.execute(
                 """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,
-                                                sample_count, local_parameters)
-                   VALUES (%s, %s, FALSE, %s, %s)
+                                                sample_count, local_parameters, created_at)
+                   VALUES (%s, %s, FALSE, %s, %s, %s)
                    ON CONFLICT (round_number, node_name) DO NOTHING""",
                 (rnd, peer["node_name"], peer["sample_count"],
-                 psycopg.types.json.Json(peer["local_parameters"])))
+                 psycopg.types.json.Json(peer["local_parameters"]), peer["created_at"]))
     for peer in real_peers:
         nodes.append((peer["node_name"], peer["sample_count"], peer["local_parameters"]))
 
@@ -5269,7 +5287,8 @@ def _federated_round(cur) -> dict:
             (rnd, name, samples, json.dumps(params)))
         nodes.append((name, samples, params))
 
-    global_params = aisec.federated_average_roles(nodes)
+    baseline_report: dict = {}
+    global_params = aisec.federated_average_roles(nodes, baseline_report)
 
     # The trained classifier: real nodes only, robust FedAvg.
     classifier_nodes = [(name, fed_clf.Classifier.from_parameters(p["classifier"]))
@@ -5282,16 +5301,24 @@ def _federated_round(cur) -> dict:
     report = {"classifier_nodes": [n for n, _ in classifier_nodes],
               "classifier_excluded": aggregation["excluded"],
               "classifier_capped": aggregation["capped"],
+              "baselines_capped": baseline_report.get("capped", {}),
+              "baselines_excluded": baseline_report.get("excluded", {}),
               "local_training": local_training}
+
+    # The hub's own adoption gate: the same local evaluation a participant runs.
+    evaluation = federation.evaluate_global_model(cur, global_params) if real_peers else None
+    adopted = bool(evaluation and evaluation["adopt"])
 
     real_nodes = 1 + len(real_peers)
     cur.execute(
         """INSERT INTO FederatedGlobalModel (round_number, parameters,
                                              contributing_nodes, total_samples,
-                                             real_nodes, simulated_nodes, aggregation_report)
-           VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                                             real_nodes, simulated_nodes, aggregation_report,
+                                             adopted, evaluation)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         (rnd, json.dumps(global_params), global_params["contributing_nodes"],
-         global_params["total_samples"], real_nodes, simulated_used, json.dumps(report)))
+         global_params["total_samples"], real_nodes, simulated_used, json.dumps(report),
+         adopted, json.dumps(evaluation) if evaluation else None))
     risk_engine.invalidate_baselines()
 
     real_peer_count = len(real_peers)
@@ -5315,11 +5342,16 @@ def _federated_round(cur) -> dict:
         "local_node_is_real": True,
         "real_peer_nodes": real_peer_count,
         "peer_nodes_simulated": simulated_used,
-        "used_for_detection": real_peer_count > 0,
+        "used_for_detection": adopted,
+        "evaluation": evaluation,
         "classifier": ({**global_clf.to_parameters(), **report} if global_clf
                        else {"trained": False, **report}),
         "disclosure": disclosure + (
-            " This model now replaces the local baseline in detection for the roles it describes."
+            " It passed evaluation on this hospital's own data and is now used in detection."
+            if adopted else
+            (" It would make detection here worse (" + "; ".join(evaluation["reasons"])
+             + "), so detection keeps the previous model; peers still receive it and judge it "
+               "on their own data.")
             if real_peer_count else
             " A model that includes simulated peers is never used to score real people."),
         "global_parameters": global_params,
@@ -5330,10 +5362,11 @@ def _round_due(cur) -> bool:
     """A scheduled round is due when enough real peers have submitted since the last one."""
     minimum = max(1, int(os.getenv("FEDERATION_MIN_PEERS", "1") or 1))
     cur.execute(
-        """SELECT COUNT(DISTINCT node_name) AS n FROM FederatedRounds
-            WHERE is_simulated = FALSE AND node_name <> %s
-              AND created_at > COALESCE((SELECT MAX(created_at) FROM FederatedGlobalModel),
-                                        'epoch'::timestamptz)""", (LOCAL_NODE,))
+        """SELECT COUNT(DISTINCT r.node_name) AS n FROM FederatedRounds r
+             JOIN FederatedPeers p ON p.node_name = r.node_name AND p.is_active
+            WHERE r.is_simulated = FALSE AND r.node_name <> %s
+              AND r.created_at > COALESCE((SELECT MAX(created_at) FROM FederatedGlobalModel),
+                                          'epoch'::timestamptz)""", (LOCAL_NODE,))
     return cur.fetchone()["n"] >= minimum
 
 
@@ -5419,7 +5452,8 @@ def get_federation_participation(session: dict = Depends(require_role("Administr
             "secret_set": bool(s_["secret"]), "updated_at": row.get("updated_at"),
             "last_sync_at": row.get("last_sync_at"), "last_sync_result": row.get("last_sync_result"),
             "sync_interval_minutes": int(os.getenv("FEDERATION_SYNC_INTERVAL_MINUTES", "0") or 0),
-            "dp_epsilon": federation.dp_epsilon()}
+            "dp_epsilon": federation.dp_epsilon(),
+            "transport_warning": federation.transport_warning(s_["hub_url"])}
 
 
 @app.put("/api/admin/federated/participation")
@@ -5479,7 +5513,7 @@ def list_federated_models(session: dict = Depends(require_role("Administrator"))
 
 
 @app.post("/api/admin/federated/models/{model_id}/activate")
-def activate_federated_model(model_id: str, session: dict = Depends(require_role("Administrator"))):
+def activate_federated_model(model_id: UUID, session: dict = Depends(require_role("Administrator"))):
     """Use this global model for detection — including one its evaluation refused,
     which is an administrator's decision to make and is recorded as such."""
     with get_db() as conn:
@@ -5548,14 +5582,20 @@ def federated_status(session: dict = Depends(require_role("Administrator"))):
             cur.execute("""SELECT * FROM FederatedGlobalModel
                             ORDER BY round_number DESC LIMIT 1""")
             latest = cur.fetchone()
+            # Nodes of the latest completed round; submissions to the open one are pending.
             cur.execute("""SELECT node_name, is_simulated, sample_count, round_number
                              FROM FederatedRounds
                             WHERE round_number = COALESCE(
-                                (SELECT MAX(round_number) FROM FederatedRounds), 0)
+                                (SELECT MAX(round_number) FROM FederatedGlobalModel), 0)
                             ORDER BY is_simulated, node_name""")
             nodes = cur.fetchall()
-            cur.execute("SELECT COUNT(DISTINCT round_number) AS n FROM FederatedRounds")
+            cur.execute("SELECT COUNT(*) AS n FROM FederatedGlobalModel")
             rounds = cur.fetchone()["n"]
+            open_round = _open_round(cur)
+            cur.execute("""SELECT COUNT(DISTINCT r.node_name) AS n FROM FederatedRounds r
+                             JOIN FederatedPeers p ON p.node_name = r.node_name AND p.is_active
+                            WHERE r.round_number = %s AND NOT r.is_simulated""", (open_round,))
+            pending = cur.fetchone()["n"]
             cur.execute("""SELECT hub_url, hub_round, real_nodes, pulled_at, adopted, active,
                                   evaluation
                              FROM FederatedHubModels ORDER BY pulled_at DESC LIMIT 1""")
@@ -5594,6 +5634,11 @@ def federated_status(session: dict = Depends(require_role("Administrator"))):
         "detection_classifier": classifier_label,
         "classifier": (classifier_in_use.to_parameters() if classifier_in_use else None),
         "aggregation_report": (latest or {}).get("aggregation_report"),
+        # The hub's own adoption gate for the latest round (None: simulated-only round).
+        "latest_round_adopted": (latest or {}).get("adopted") if real_nodes >= 2 else None,
+        "latest_round_evaluation": (latest or {}).get("evaluation"),
+        "open_round": open_round,
+        "pending_peer_submissions": pending,
         "participant": {
             "configured": bool(s_["hub_url"] and s_["node_name"] and s_["secret"]),
             "source": s_["source"],
@@ -6276,6 +6321,8 @@ def register_federated_peer(req: RegisterPeerRequest,
     The secret is shown once and stored encrypted, in the same shape as
     ML-KEM private keys and ZKP consent tokens.
     """
+    if req.node_name.strip().lower() == LOCAL_NODE.lower():
+        raise HTTPException(status_code=400, detail="That name is reserved for this hospital's own node.")
     secret = secrets.token_hex(32)
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
@@ -6307,7 +6354,7 @@ def list_federated_peers(session: dict = Depends(require_role("Administrator")))
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """SELECT id, node_name, contact_url, is_active, submissions,
-                          last_submission_at, created_at
+                          last_submission_at, secret_rotated_at, created_at
                      FROM FederatedPeers ORDER BY node_name""")
             peers = [{**r, "id": str(r["id"])} for r in cur.fetchall()]
     return {
@@ -6319,8 +6366,34 @@ def list_federated_peers(session: dict = Depends(require_role("Administrator")))
     }
 
 
+@app.post("/api/admin/federated/peers/{peer_id}/rotate-secret")
+def rotate_federated_peer_secret(peer_id: UUID,
+                                 session: dict = Depends(require_role("Administrator"))):
+    """Issue a peer a new shared secret; the old one stops working at once.
+
+    For a secret that was lost or may have leaked. Like registration, the new
+    secret is shown once and stored encrypted. The peer's history is kept.
+    """
+    secret = secrets.token_hex(32)
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """UPDATE FederatedPeers SET shared_secret_encrypted = %s,
+                          secret_rotated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s RETURNING node_name""", (encrypt_data(secret), peer_id))
+            peer = cur.fetchone()
+            if not peer:
+                raise HTTPException(status_code=404, detail="Peer not found.")
+            log_admin_action(conn, session["user_id"], session.get("public_user_id"),
+                             "FEDERATED_PEER_SECRET_ROTATED", details={"node_name": peer["node_name"]})
+            conn.commit()
+    return {"node_name": peer["node_name"], "shared_secret": secret, "delivered_once": True,
+            "notice": "The previous secret no longer works. Give this one to the peer over a "
+                      "secure channel; it will not be shown again."}
+
+
 @app.post("/api/admin/federated/peers/{peer_id}/{action}")
-def set_federated_peer_active(peer_id: str, action: str,
+def set_federated_peer_active(peer_id: UUID, action: str,
                               session: dict = Depends(require_role("Administrator"))):
     """Suspend or reinstate a peer.
 
@@ -6366,8 +6439,8 @@ def serve_global_model(request: Request):
             peer = cur.fetchone()
             if not peer or not peer["is_active"]:
                 raise HTTPException(status_code=403, detail="Unknown or inactive peer.")
-            if not federation.verify_request_signature(
-                    node, ts, "global-model", decrypt_data(peer["shared_secret_encrypted"]), sig):
+            secret = decrypt_data(peer["shared_secret_encrypted"])
+            if not federation.verify_request_signature(node, ts, "global-model", secret, sig):
                 aisec.record_security_event(
                     cur, actor_id=None, actor_role=None, event_type="FEDERATED_REQUEST_REJECTED",
                     resource=node[:120], ip_address=_client_ip(request))
@@ -6379,14 +6452,18 @@ def serve_global_model(request: Request):
                     WHERE simulated_nodes = 0 AND real_nodes >= 2
                     ORDER BY round_number DESC LIMIT 1""")
             model = cur.fetchone()
+            open_round = _open_round(cur)
     if not model:
         raise HTTPException(
             status_code=404,
             detail="No global model built by real institutions yet. Submit and wait for a round.")
-    return {"round_number": model["round_number"], "parameters": model["parameters"],
+    body = {"round_number": model["round_number"], "parameters": model["parameters"],
             "contributing_nodes": model["contributing_nodes"],
             "total_samples": model["total_samples"], "real_nodes": model["real_nodes"],
-            "aggregation": "FedAvg, per role"}
+            "aggregation": "FedAvg, per role", "open_round": open_round}
+    # Bound to this peer and this request: altered or replayed, it fails at the peer.
+    body["signature"] = federation.model_signature(node, int(ts), body, secret)
+    return body
 
 
 @app.post("/api/federated/submit")
@@ -6400,7 +6477,8 @@ def receive_peer_parameters(req: PeerSubmissionRequest, request: Request = None)
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "SELECT id, shared_secret_encrypted, is_active FROM FederatedPeers WHERE node_name = %s",
+                """SELECT id, shared_secret_encrypted, is_active, last_submission_ts
+                     FROM FederatedPeers WHERE node_name = %s FOR UPDATE""",
                 (req.node_name,))
             peer = cur.fetchone()
             if not peer or not peer["is_active"]:
@@ -6409,7 +6487,7 @@ def receive_peer_parameters(req: PeerSubmissionRequest, request: Request = None)
             secret = decrypt_data(peer["shared_secret_encrypted"])
             if not aisec.verify_parameters_signature(
                     req.node_name, req.round_number, req.sample_count,
-                    req.parameters, secret, req.signature):
+                    req.parameters, secret, req.signature, req.timestamp):
                 logger.warning("Rejected federated submission from %s: bad signature", req.node_name)
                 aisec.record_security_event(
                     cur, actor_id=None, actor_role=None,
@@ -6419,10 +6497,34 @@ def receive_peer_parameters(req: PeerSubmissionRequest, request: Request = None)
                 conn.commit()
                 raise HTTPException(status_code=401, detail="Signature verification failed.")
 
+            # Signed, but is it fresh? A captured submission replayed later would
+            # keep a withdrawn update alive and trigger rounds on its own.
+            stale = abs(time.time() - req.timestamp) > federation.MAX_CLOCK_SKEW_SECONDS
+            if stale or req.timestamp <= (peer["last_submission_ts"] or 0):
+                aisec.record_security_event(
+                    cur, actor_id=None, actor_role=None,
+                    event_type="FEDERATED_SUBMISSION_REPLAYED", resource=req.node_name,
+                    ip_address=request.client.host if request and request.client else None)
+                conn.commit()
+                raise HTTPException(status_code=409, detail=(
+                    "Submission is stale or was already received (check the peer's clock)."))
+
             if not aisec.sane_parameters(req.parameters):
                 raise HTTPException(
                     status_code=400,
                     detail="Parameters are outside plausible bounds and were not accepted.")
+            role_actors = sum(int(flat.get("sample_count", 0) or 0)
+                              for flat in aisec.as_role_parameters(req.parameters).values())
+            if role_actors > req.sample_count:
+                raise HTTPException(status_code=400, detail=(
+                    "The per-role actor counts add up to more than the submission's sample count."))
+
+            # A round that has not opened yet cannot be submitted to — otherwise
+            # one peer could push the round numbering, or pre-empt every later round.
+            open_round = _open_round(cur)
+            if req.round_number > open_round:
+                raise HTTPException(status_code=400, detail=(
+                    f"Round {req.round_number} is not open; the open round is {open_round}."))
 
             cur.execute(
                 """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,
@@ -6437,8 +6539,9 @@ def receive_peer_parameters(req: PeerSubmissionRequest, request: Request = None)
             cur.execute(
                 """UPDATE FederatedPeers
                       SET submissions = submissions + 1,
-                          last_submission_at = CURRENT_TIMESTAMP
-                    WHERE id = %s""", (peer["id"],))
+                          last_submission_at = CURRENT_TIMESTAMP,
+                          last_submission_ts = %s
+                    WHERE id = %s""", (req.timestamp, peer["id"]))
             conn.commit()
 
     return {"accepted": True, "round": req.round_number, "node": req.node_name,

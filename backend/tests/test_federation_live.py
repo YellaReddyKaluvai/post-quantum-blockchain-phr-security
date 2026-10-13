@@ -14,7 +14,9 @@ sends. The run follows the spec's picture exactly:
     …a second round, each hospital training from the global weights.
 
 A and C join through the admin API (participation stored in their databases),
-not environment variables. CI starts B and C as containers
+not environment variables. Then the hub's defences, against the real servers:
+a captured submission replayed, a submission to a round not yet open, a peer
+secret rotated, and a suspended peer left out of the next round. CI starts B and C as containers
 (.github/workflows/deploy.yml). Opt-in, like the end-to-end flow:
 
     RUN_E2E=1 FED_HUB_URL=… FED_HUB_DATABASE_URL=… FED_C_URL=… FED_C_DATABASE_URL=…
@@ -23,6 +25,7 @@ not environment variables. CI starts B and C as containers
 import json
 import os
 import random
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -122,11 +125,22 @@ def hospitals():
                "c": c_url, "c_token": _login(c_url, f"ADM-C-{tag}"), "tag": tag}
 
 
-def test_three_hospitals_train_a_shared_threat_model(hospitals):
+def test_three_hospitals_train_a_shared_threat_model(hospitals, monkeypatch):
+    from app import federation
     a, A, hub, B, c, C, tag = (hospitals["a"], hospitals["a_auth"], hospitals["hub"],
                                hospitals["hub_token"], hospitals["c"], hospitals["c_token"],
                                hospitals["tag"])
     node_a, node_c = f"hospital-a-{tag}", f"hospital-c-{tag}"
+
+    # Keep a copy of what A sends, to replay it later as an eavesdropper could.
+    sent, real_http = [], federation._http
+
+    def recording(method, url, *, body=None, headers=None, timeout=30):
+        if url.endswith("/api/federated/submit") and body:
+            sent.append(json.loads(body))
+        return real_http(method, url, body=body, headers=headers, timeout=timeout)
+
+    monkeypatch.setattr(federation, "_http", recording)
 
     # Not a participant yet; then a participant the hub has never heard of.
     assert a.post("/api/admin/federated/hub/submit", headers=A).status_code == 409
@@ -167,6 +181,8 @@ def test_three_hospitals_train_a_shared_threat_model(hospitals):
         assert result["real_peer_nodes"] == 2 and result["peer_nodes_simulated"] == 0
         assert set(result["classifier"]["classifier_nodes"]) >= {node_a, node_c}
         assert result["classifier"]["rounds"] == round_no
+        assert result["evaluation"] is not None              # B judged it on its own data
+        assert sent[-1]["round_number"] == result["round"]   # filed against the open round
 
         # Distribution: A and C pull; A evaluates it on its own incidents and adopts it.
         r = a.post("/api/admin/federated/hub/pull", headers=A)
@@ -204,3 +220,52 @@ def test_three_hospitals_train_a_shared_threat_model(hospitals):
                             "LIMIT 1").fetchone()["parameters"]
     text = json.dumps(stored)
     assert "medians" in text and node_a not in text and node_c not in text and "@" not in text
+
+    _hub_defences(hospitals, sent, secrets_, node_a, node_c)
+
+
+def _hub_defences(hospitals, sent, secrets_, node_a, node_c):
+    """The hub's refusals, exercised against the running hub B."""
+    from app import ai_security as aisec
+    a, A, hub, B, c, C = (hospitals["a"], hospitals["a_auth"], hospitals["hub"],
+                          hospitals["hub_token"], hospitals["c"], hospitals["c_token"])
+
+    # A captured submission, replayed verbatim: refused, and recorded as an event.
+    status, body = _http(hub, "POST", "/api/federated/submit", body=sent[-1])
+    assert status == 409, body
+
+    # Correctly signed with A's secret, but for a round that has not opened.
+    forged = dict(sent[-1], round_number=999, timestamp=int(time.time()) + 2)
+    forged["signature"] = aisec.parameters_signature(
+        node_a, 999, forged["sample_count"], forged["parameters"], secrets_[node_a],
+        forged["timestamp"])
+    status, body = _http(hub, "POST", "/api/federated/submit", body=forged)
+    assert status == 400 and "not open" in body["detail"], body
+
+    status, listed = _http(hub, "GET", "/api/admin/federated/peers", B)
+    peer_id = {p["node_name"]: p["id"] for p in listed["peers"]}
+
+    # Rotating C's secret cuts the old one off at once; the new one works.
+    status, rotated = _http(hub, "POST", f"/api/admin/federated/peers/{peer_id[node_c]}/rotate-secret", B)
+    assert status == 200 and rotated["shared_secret"] != secrets_[node_c]
+    status, body = _http(c, "POST", "/api/admin/federated/hub/pull", C)
+    assert status == 502 and "401" in body["detail"], body
+    status, _ = _http(c, "PUT", "/api/admin/federated/participation", C,
+                      {"hub_url": hub, "node_name": node_c, "shared_secret": rotated["shared_secret"]})
+    assert status == 200
+    status, body = _http(c, "POST", "/api/admin/federated/hub/pull", C)
+    assert status == 200, body
+
+    # A suspended peer can neither submit nor shape the next round with what it sent before.
+    status, _ = _http(hub, "POST", f"/api/admin/federated/peers/{peer_id[node_a]}/deactivate", B)
+    assert status == 200
+    assert a.post("/api/admin/federated/hub/submit", headers=A).status_code == 502
+    status, result = _http(hub, "POST", "/api/admin/security/federated/round", B)
+    assert status == 200, result
+    assert result["real_peer_nodes"] == 1
+    assert node_a not in result["classifier"]["classifier_nodes"]
+    status, _ = _http(hub, "POST", f"/api/admin/federated/peers/{peer_id[node_a]}/activate", B)
+    assert status == 200
+
+    status, fed = _http(hub, "GET", "/api/admin/security/federated/status", B)
+    assert status == 200 and isinstance(fed["latest_round_adopted"], bool), fed

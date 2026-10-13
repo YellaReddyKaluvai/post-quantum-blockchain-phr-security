@@ -812,3 +812,15 @@ CREATE TABLE IF NOT EXISTS FederationParticipation (
     last_sync_at TIMESTAMPTZ,
     last_sync_result JSONB
 );
+
+-- ─── Federation hardening ────────────────────────────────────────────────────
+-- A peer's submission carries a signed timestamp; the hub keeps the newest it
+-- accepted from each peer and refuses anything not newer (replay).
+ALTER TABLE FederatedPeers ADD COLUMN IF NOT EXISTS last_submission_ts BIGINT;
+ALTER TABLE FederatedPeers ADD COLUMN IF NOT EXISTS secret_rotated_at TIMESTAMPTZ;
+-- Peer names may be up to 120 characters (FederatedPeers); rounds must hold them.
+ALTER TABLE FederatedRounds ALTER COLUMN node_name TYPE VARCHAR(120);
+-- The hub evaluates its own global model on local data, as a participant does,
+-- before detection here uses it. Rows from before this check count as adopted.
+ALTER TABLE FederatedGlobalModel ADD COLUMN IF NOT EXISTS adopted BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE FederatedGlobalModel ADD COLUMN IF NOT EXISTS evaluation JSONB;
