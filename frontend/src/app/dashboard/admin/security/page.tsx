@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { Shield, ShieldAlert, Users, KeyRound, Activity, AlertTriangle, Loader2, Link2, Cloud, Boxes, RefreshCw } from "lucide-react";
-import { getSecurityStats, getBlockchainStatus, getStorageStatus, getIpfsStatus, syncIpfsReplication } from "@/lib/session";
+import { getSecurityStats, getBlockchainStatus, getStorageStatus, getIpfsStatus, syncIpfsReplication, reanchorLocalAnchors } from "@/lib/session";
 
 interface SecurityStats {
   failed_login_attempts_24h: number;
@@ -21,7 +21,7 @@ interface BlockchainStatus {
   contract_address?: string | null;
   latest_block?: number;
   onchain_audit_entries?: number;
-  anchors: { total: number; on_chain: number; simulated: number };
+  anchors: { total: number; on_chain: number; simulated: number; anchored_late?: number };
 }
 
 interface StorageStatus {
@@ -70,6 +70,25 @@ export default function SecurityPage() {
   const [ipfs, setIpfs] = useState<IpfsStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [reanchoring, setReanchoring] = useState(false);
+  const [reanchorNote, setReanchorNote] = useState("");
+
+  const reanchor = async () => {
+    if (reanchoring) return;
+    setReanchoring(true);
+    setReanchorNote("");
+    try {
+      const r = await reanchorLocalAnchors();
+      setReanchorNote(r.chain_available
+        ? `${r.anchored} anchor(s) written on-chain, ${r.remaining_local ?? 0} still local. ${r.note}`
+        : r.note);
+      setChain(await getBlockchainStatus());
+    } catch (e) {
+      setReanchorNote(e instanceof Error ? e.message : "Could not anchor on-chain");
+    } finally {
+      setReanchoring(false);
+    }
+  };
 
   useEffect(() => {
     const fetchAll = async () => {
@@ -244,12 +263,32 @@ export default function SecurityPage() {
                     {chain.anchors.simulated}
                   </span></p>
               </div>
-              {chain.anchors.simulated > 0 && (
-                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-xl p-2.5 mt-2">
-                  Simulated anchors were recorded while no chain was reachable. They are
-                  tamper-evident locally but carry no on-chain proof.
-                </p>
+              {!!chain.anchors.anchored_late && (
+                <p className="flex justify-between"><span className="text-slate-500">Anchored late</span>
+                  <span className="font-bold text-slate-800 tabular-nums">{chain.anchors.anchored_late}</span></p>
               )}
+              {chain.anchors.simulated > 0 && (
+                <div className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-xl p-2.5 mt-2 space-y-2">
+                  <p>
+                    Simulated anchors were recorded while no chain was reachable. They are
+                    tamper-evident locally but carry no on-chain proof.
+                  </p>
+                  {chain.connected && (
+                    <>
+                      <p>
+                        They can be written on-chain now. Each will prove its digest existed by
+                        today&apos;s block — not at its original time — and is recorded as a late anchor.
+                      </p>
+                      <button type="button" onClick={reanchor} disabled={reanchoring}
+                        className="px-3 py-1.5 rounded-lg bg-amber-600 text-white font-bold hover:bg-amber-700 disabled:opacity-50 flex items-center gap-1.5">
+                        {reanchoring ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />}
+                        Anchor on-chain now
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+              {reanchorNote && <p role="status" className="text-xs text-slate-600 mt-2">{reanchorNote}</p>}
               {chain.contract_address && (
                 <p className="text-[11px] font-mono text-slate-400 break-all pt-2">{chain.contract_address}</p>
               )}
