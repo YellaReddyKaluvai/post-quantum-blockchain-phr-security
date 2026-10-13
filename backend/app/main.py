@@ -60,7 +60,7 @@ from app.crypto_service import (
 )
 from app.email_service import send_and_log_email, retry_failed_email, send_admin_notification
 from app.user_id_service import generate_user_id, generate_report_number
-from app.rbac import get_permissions_for_role, normalize_role
+from app.rbac import get_permissions_for_role, is_role_allowed_for_dashboard
 from app.storage_service import (
     store_encrypted_document, download_file_from_s3, storage_status, StorageError,
     ipfs_status, fetch_from_ipfs, is_ipfs_configured, IPFSError,
@@ -301,7 +301,7 @@ def get_me(session: dict = Depends(get_current_session)):
     return session
 
 @app.get("/api/admin/registrations/pending")
-def get_pending_registrations(session: dict = Depends(require_role("Administrator"))):
+def get_pending_registrations(session: dict = Depends(require_permission("registrations:manage"))):
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("SELECT * FROM Users WHERE status = 'Pending' ORDER BY created_at DESC")
@@ -324,7 +324,7 @@ def get_pending_registrations(session: dict = Depends(require_role("Administrato
     return results
 
 @app.get("/api/admin/registrations")
-def get_all_registrations(session: dict = Depends(require_role("Administrator"))):
+def get_all_registrations(session: dict = Depends(require_permission("registrations:manage"))):
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("SELECT * FROM Users ORDER BY created_at DESC")
@@ -347,7 +347,7 @@ def get_all_registrations(session: dict = Depends(require_role("Administrator"))
     return results
 
 @app.post("/api/admin/registrations/{user_uuid}/approve", response_model=AdminActionResponse)
-def approve_registration(user_uuid: str, request: Request, session: dict = Depends(require_role("Administrator"))):
+def approve_registration(user_uuid: str, request: Request, session: dict = Depends(require_permission("registrations:manage"))):
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("SELECT * FROM Users WHERE id = %s", (user_uuid,))
@@ -412,7 +412,7 @@ def reject_registration(
     user_uuid: str,
     request: Request,
     body: RejectRequest = Body(default=RejectRequest()),
-    session: dict = Depends(require_role("Administrator"))
+    session: dict = Depends(require_permission("registrations:manage"))
 ):
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
@@ -464,8 +464,7 @@ def reject_registration(
 
 @app.get("/api/dashboard/{dashboard_role}")
 def dashboard_gate(dashboard_role: str, session: dict = Depends(get_current_session)):
-    allowed_role = normalize_role(session["role"])
-    if dashboard_role.lower() not in {allowed_role.lower().replace(" ", ""), allowed_role.lower().replace(" ", "-")}:
+    if not is_role_allowed_for_dashboard(session["role"], dashboard_role.lower()):
         raise HTTPException(status_code=403, detail="Forbidden.")
     return {"status": "success", "dashboard_role": dashboard_role, "session": session}
 
@@ -613,7 +612,7 @@ def list_users(
 
 
 @app.get("/api/admin/users/{user_uuid}")
-def get_user_detail(user_uuid: str, session: dict = Depends(require_role("Administrator"))):
+def get_user_detail(user_uuid: str, session: dict = Depends(require_permission("users:manage"))):
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("SELECT * FROM Users WHERE id = %s", (user_uuid,))
@@ -642,7 +641,7 @@ def get_user_detail(user_uuid: str, session: dict = Depends(require_role("Admini
 
 
 @app.post("/api/admin/users/{user_uuid}/disable")
-def disable_user(user_uuid: str, request: Request, session: dict = Depends(require_role("Administrator"))):
+def disable_user(user_uuid: str, request: Request, session: dict = Depends(require_permission("users:disable"))):
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("SELECT id, user_id, status, role FROM Users WHERE id = %s", (user_uuid,))
@@ -666,7 +665,7 @@ def disable_user(user_uuid: str, request: Request, session: dict = Depends(requi
 
 
 @app.post("/api/admin/users/{user_uuid}/enable")
-def enable_user(user_uuid: str, request: Request, session: dict = Depends(require_role("Administrator"))):
+def enable_user(user_uuid: str, request: Request, session: dict = Depends(require_permission("users:enable"))):
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("SELECT id, user_id, status, role FROM Users WHERE id = %s", (user_uuid,))
@@ -694,7 +693,7 @@ def get_audit_logs(
     action: Optional[str] = None,
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=20, ge=1, le=100),
-    session: dict = Depends(require_role("Administrator"))
+    session: dict = Depends(require_permission("audit:read"))
 ):
     conditions = []
     params = []
@@ -746,7 +745,7 @@ def get_audit_logs(
 
 
 @app.get("/api/admin/security/stats")
-def get_security_stats(session: dict = Depends(require_role("Administrator"))):
+def get_security_stats(session: dict = Depends(require_permission("security:view"))):
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             # Failed login attempts in last 24 hours
@@ -782,7 +781,7 @@ def get_security_stats(session: dict = Depends(require_role("Administrator"))):
 
 
 @app.get("/api/admin/users/{user_uuid}/emails")
-def get_user_emails(user_uuid: str, session: dict = Depends(require_role("Administrator"))):
+def get_user_emails(user_uuid: str, session: dict = Depends(require_permission("users:manage"))):
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
@@ -811,7 +810,7 @@ def get_user_emails(user_uuid: str, session: dict = Depends(require_role("Admini
 
 
 @app.post("/api/admin/emails/{notification_id}/resend")
-def resend_failed_email_endpoint(notification_id: str, session: dict = Depends(require_role("Administrator"))):
+def resend_failed_email_endpoint(notification_id: str, session: dict = Depends(require_permission("users:manage"))):
     with get_db() as conn:
         res = retry_failed_email(conn, notification_id)
         
@@ -822,7 +821,7 @@ def resend_failed_email_endpoint(notification_id: str, session: dict = Depends(r
 
 
 @app.get("/api/admin/emergency-access")
-def list_all_emergency_access(session: dict = Depends(require_role("Administrator"))):
+def list_all_emergency_access(session: dict = Depends(require_permission("audit:read"))):
     """Every break-glass declaration, for review.
 
     Emergency access is not prevented at the point of use, so this listing is
@@ -4456,7 +4455,7 @@ def end_patient_care_team(patient_id: str, assignment_id: str,
 
 @app.get("/api/admin/care-team", response_model=list[CareTeamMember])
 def list_care_teams(q: str = Query("", max_length=80),
-                    session: dict = Depends(require_role("Administrator"))):
+                    session: dict = Depends(require_permission("users:manage"))):
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             term = q.strip()
@@ -4470,7 +4469,7 @@ def list_care_teams(q: str = Query("", max_length=80),
 
 @app.get("/api/admin/care-team/suggestions")
 def care_team_suggestions(days: int = Query(90, ge=1, le=365),
-                          session: dict = Depends(require_role("Administrator"))):
+                          session: dict = Depends(require_permission("users:manage"))):
     """Nurses' recent patients that have no care-team assignment — for review.
 
     Before care teams, any nurse could open any chart, so a working nurse may
@@ -4508,7 +4507,7 @@ def care_team_suggestions(days: int = Query(90, ge=1, le=365),
 
 @app.post("/api/admin/care-team", response_model=CareTeamMember)
 def admin_assign_care_team(req: CareTeamAssignRequest,
-                           session: dict = Depends(require_role("Administrator"))):
+                           session: dict = Depends(require_permission("users:manage"))):
     """Ward allocation: an administrator assigns a nurse to a patient."""
     if not req.patient_id:
         raise HTTPException(status_code=422, detail="patient_id is required.")
@@ -4523,7 +4522,7 @@ def admin_assign_care_team(req: CareTeamAssignRequest,
 
 
 @app.post("/api/admin/care-team/{assignment_id}/end")
-def admin_end_care_team(assignment_id: str, session: dict = Depends(require_role("Administrator"))):
+def admin_end_care_team(assignment_id: str, session: dict = Depends(require_permission("users:manage"))):
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(_CARE_TEAM_SELECT + " AND a.id = %s", (assignment_id,))
@@ -4950,7 +4949,7 @@ def _run_security_analysis(hours: int) -> dict:
 
 @app.post("/api/admin/security/analyze")
 def run_security_analysis(hours: int = Query(24, ge=1, le=720),
-                          session: dict = Depends(require_role("Administrator"))):
+                          session: dict = Depends(require_permission("security:view"))):
     """Run local anomaly detection over recent activity now (§19).
 
     It also runs on a schedule; this is the on-demand trigger.
@@ -4959,7 +4958,7 @@ def run_security_analysis(hours: int = Query(24, ge=1, le=720),
 
 
 @app.get("/api/admin/security/policy")
-def get_security_policy(session: dict = Depends(require_role("Administrator"))):
+def get_security_policy(session: dict = Depends(require_permission("security:view"))):
     """The risk decision policy in force (§23), and where each signal comes from.
 
     Documented here as well as in code so an administrator can see what a
@@ -4996,7 +4995,7 @@ def _consent_ledger_state() -> str:
 @app.get("/api/admin/security/risk-assessments")
 def list_risk_assessments(level: Optional[str] = Query(None, pattern="^(LOW|MEDIUM|HIGH)$"),
                           page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100),
-                          session: dict = Depends(require_role("Administrator"))):
+                          session: dict = Depends(require_permission("security:view"))):
     """Scored actors with their Explainable AI attributions (§22)."""
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
@@ -5028,7 +5027,7 @@ def list_risk_assessments(level: Optional[str] = Query(None, pattern="^(LOW|MEDI
 
 @app.get("/api/admin/security/alerts")
 def list_security_alerts(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100),
-                         session: dict = Depends(require_role("Administrator"))):
+                         session: dict = Depends(require_permission("security:view"))):
     """Alert & response queue (§24)."""
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
@@ -5051,7 +5050,7 @@ def list_security_alerts(page: int = Query(1, ge=1), per_page: int = Query(20, g
 
 
 @app.post("/api/admin/security/alerts/{alert_id}/acknowledge")
-def acknowledge_alert(alert_id: str, session: dict = Depends(require_role("Administrator"))):
+def acknowledge_alert(alert_id: str, session: dict = Depends(require_permission("security:view"))):
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -5068,7 +5067,7 @@ def acknowledge_alert(alert_id: str, session: dict = Depends(require_role("Admin
 
 
 @app.get("/api/admin/security/incidents")
-def list_security_incidents(session: dict = Depends(require_role("Administrator"))):
+def list_security_incidents(session: dict = Depends(require_permission("security:view"))):
     """Incident and compliance records (§25)."""
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
@@ -5100,7 +5099,7 @@ def list_security_incidents(session: dict = Depends(require_role("Administrator"
 
 @app.post("/api/admin/security/incidents/{incident_id}")
 def update_security_incident(incident_id: str, req: IncidentUpdateRequest,
-                             session: dict = Depends(require_role("Administrator"))):
+                             session: dict = Depends(require_permission("security:view"))):
     """Work an incident: Open → Investigating → Closed (with a resolution).
 
     A closed incident is never reopened or deleted here; a recurrence opens a
@@ -5574,7 +5573,7 @@ def federated_classifier_status(session: dict = Depends(require_role("Administra
 
 
 @app.get("/api/admin/security/federated/status")
-def federated_status(session: dict = Depends(require_role("Administrator"))):
+def federated_status(session: dict = Depends(require_permission("security:view"))):
     """Federated IDS status: rounds, nodes, the current global model, and
     which model detection is actually using."""
     with get_db() as conn:
