@@ -4931,14 +4931,19 @@ def get_security_policy(session: dict = Depends(require_role("Administrator"))):
         "scheduled_analysis_minutes": int(os.getenv("SECURITY_ANALYSIS_INTERVAL_MINUTES", "30") or 0),
         "federation_participant": {"configured": federation.is_configured(),
                                    "hub_url": s_["hub_url"], "node_name": s_["node_name"]},
-        "consent_ledger": "on-chain" if _chain_reachable() else "database only (chain unreachable)",
+        "consent_ledger": _consent_ledger_state(),
         "configuration_warnings": configuration_warnings(get_settings()),
     }
 
 
-def _chain_reachable() -> bool:
+def _consent_ledger_state() -> str:
     from app.chain_client import get_chain_client
-    return get_chain_client() is not None
+    client = get_chain_client()
+    if client is None:
+        return "database only (chain unreachable)"
+    if not getattr(client, "supports_consent_status", True):
+        return "contract outdated — redeploy PHR.sol; consent is not being verified on-chain"
+    return "on-chain"
 
 
 @app.get("/api/admin/security/risk-assessments")
