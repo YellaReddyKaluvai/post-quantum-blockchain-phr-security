@@ -25,14 +25,21 @@ from app.config import get_settings
 from app.chain_client import load_contract_artifact
 
 
+def with_margin(estimate: int) -> int:
+    """Gas for a transaction: the node's estimate plus a quarter. A fixed figure
+    either wastes nothing or runs out — and storage-heavy calls run out."""
+    return int(estimate * 1.25) + 10_000
+
+
 def deploy(web3, account, settings, artifact) -> str:
     """Deploy PHR_Security; return its address. Raises RuntimeError on a revert."""
     contract = web3.eth.contract(abi=artifact["abi"], bytecode=artifact["bytecode"]["object"])
-    tx = contract.constructor().build_transaction({
+    constructor = contract.constructor()
+    tx = constructor.build_transaction({
         "from": account.address,
         "nonce": web3.eth.get_transaction_count(account.address),
         "chainId": settings.BLOCKCHAIN_CHAIN_ID,
-        "gas": 2_000_000,
+        "gas": with_margin(constructor.estimate_gas({"from": account.address})),
         "gasPrice": web3.eth.gas_price,
     })
     signed = account.sign_transaction(tx)
