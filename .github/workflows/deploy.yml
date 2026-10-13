@@ -14,16 +14,20 @@ jobs:
         working-directory: ./frontend
     steps:
     - uses: actions/checkout@v4
-    - name: Use Node.js 20.x
+    # 22.x runs the TypeScript ZKP module directly in the vector check below.
+    - name: Use Node.js 22.x
       uses: actions/setup-node@v4
       with:
-        node-version: 20.x
+        node-version: 22.x
         cache: 'npm'
         cache-dependency-path: './frontend/package-lock.json'
     - name: Install dependencies
       run: npm ci
     - name: Run Linter
       run: npm run lint
+    # The browser prover must agree byte for byte with the Python verifier.
+    - name: Check the browser ZKP prover against the server's vectors
+      run: node scripts/check-zkp.mjs
     - name: Build Next.js
       run: npm run build
     - name: Build Frontend Docker Image (Dry Run)
@@ -31,9 +35,49 @@ jobs:
 
   build-backend:
     runs-on: ubuntu-latest
+    # Disposable services for the end-to-end tests: a database, two independent
+    # IPFS nodes so replication runs between real daemons, and a mail server
+    # whose API lets a test read back what was actually delivered.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: pqc_hospital
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      ipfs:
+        image: ipfs/kubo:v0.29.0
+        ports:
+          - 5001:5001
+      ipfs-replica:
+        image: ipfs/kubo:v0.29.0
+        ports:
+          - 5002:5001
+      mailpit:
+        image: axllent/mailpit:latest
+        env:
+          MP_SMTP_AUTH_ACCEPT_ANY: "true"
+          MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+        ports:
+          - 1025:1025
+          - 8025:8025
     defaults:
       run:
         working-directory: ./backend
+    env:
+      DB_ROOT: postgresql://postgres:postgres@127.0.0.1:5432
+      IMAGE: post-quantum-phr-backend:latest
+      # Throwaway credentials for the S3 container below; nothing real.
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_USER: quantumcare-ci
+      S3_SECRET: quantumcare-ci-secret
+      S3_BUCKET: quantumcare-ci
     steps:
     - uses: actions/checkout@v4
     - name: Set up Python
@@ -45,4 +89,117 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
     - name: Build Backend Docker Image (Dry Run)
-      run: docker build . -t post-quantum-phr-backend:latest
+      run: docker build . -t $IMAGE
+    # Inside the image liboqs is real, so the post-quantum tests that skip on a
+    # developer machine without it run here — and the end-to-end flow runs
+    # against a real Postgres: access request → consent → lab request → signed,
+    # encrypted report → patient release → alerts, incidents and audit.
+    # The frontend is mounted read-only so the RBAC parity test can compare the
+    # backend matrix with frontend/src/lib/iam.ts.
+    - name: Test inside the image (unit + end-to-end, real liboqs and Postgres)
+      run: >-
+        docker run --rm --network host
+        -v ${{ github.workspace }}/frontend:/frontend:ro
+        -e DATABASE_URL=$DB_ROOT/pqc_hospital
+        -e RUN_E2E=1
+        -e BLOCKCHAIN_ENABLED=false
+        -e SECURITY_ANALYSIS_INTERVAL_MINUTES=0
+        $IMAGE
+        python -m pytest -p no:cacheprovider -rs
+
+    # ── The same flow with the integrations live ─────────────────────────────
+    - name: Install Foundry
+      uses: foundry-rs/foundry-toolchain@v1
+    - name: Compile and test the contract
+      working-directory: .
+      run: |
+        forge build
+        forge test -vv
+    - name: Start a local chain and deploy PHR.sol
+      working-directory: .
+      run: |
+        nohup anvil --silent > /tmp/anvil.log 2>&1 &
+        for i in $(seq 1 30); do cast block-number --rpc-url http://127.0.0.1:8545 >/dev/null 2>&1 && break; sleep 1; done
+        # anvil's first dev account, derived from its published test mnemonic —
+        # the same account the backend signs with by default.
+        KEY=$(cast wallet private-key --mnemonic "test test test test test test test test test test test junk")
+        forge create contracts/PHR.sol:PHR_Security --rpc-url http://127.0.0.1:8545 \
+          --private-key "$KEY" --broadcast | tee /tmp/deploy.log
+        ADDRESS=$(grep -oE 'Deployed to: 0x[0-9a-fA-F]{40}' /tmp/deploy.log | awk '{print $3}')
+        test -n "$ADDRESS"
+        echo "CONTRACT_ADDRESS=$ADDRESS" >> "$GITHUB_ENV"
+    # Federated learning needs more than one hospital: B is the hub, C a second
+    # participant (A is the test process). Each is a separate server with its
+    # own database; they share nothing but the federation protocol.
+    - name: Start hospitals B (federation hub) and C (participant)
+      run: |
+        docker run --rm --network host $IMAGE python -c "import psycopg; c = psycopg.connect('$DB_ROOT/postgres', autocommit=True); [c.execute('CREATE DATABASE ' + d) for d in ('pqc_integrations', 'hospital_b', 'hospital_c')]"
+        for h in b:8001 c:8002; do
+          docker run -d --name hospital-${h%%:*} --network host \
+            -e DATABASE_URL=$DB_ROOT/hospital_${h%%:*} -e BLOCKCHAIN_ENABLED=false \
+            -e SECURITY_ANALYSIS_INTERVAL_MINUTES=0 \
+            $IMAGE uvicorn app.main:app --host 127.0.0.1 --port ${h##*:}
+        done
+        for port in 8001 8002; do
+          for i in $(seq 1 60); do curl -fs http://127.0.0.1:$port/api/health >/dev/null && break; sleep 1; done
+          curl -fsS http://127.0.0.1:$port/api/health; echo
+        done
+    # SeaweedFS: an open-source object store with an S3 gateway. (MinIO's
+    # images are no longer published.) With no identities configured its S3
+    # API accepts any signed request, which is all a disposable CI store needs.
+    - name: Start S3-compatible storage (SeaweedFS) with a bucket
+      run: |
+        docker run -d --name s3 --network host chrislusf/seaweedfs:latest server -dir=/data -s3 -s3.port=9000 -ip=127.0.0.1 -ip.bind=127.0.0.1 -master.volumeSizeLimitMB=256
+        for i in $(seq 1 90); do
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/)" != "000" ] && break; sleep 1
+        done
+        docker run --rm --network host $IMAGE python -c "import boto3; s3 = boto3.client('s3', endpoint_url='$S3_ENDPOINT', aws_access_key_id='$S3_USER', aws_secret_access_key='$S3_SECRET', region_name='us-east-1'); s3.create_bucket(Bucket='$S3_BUCKET'); s3.put_object(Bucket='$S3_BUCKET', Key='ci-probe', Body=b'ok'); assert s3.get_object(Bucket='$S3_BUCKET', Key='ci-probe')['Body'].read() == b'ok'; print('S3 store ready')"
+    - name: Wait for both IPFS nodes
+      run: |
+        for port in 5001 5002; do
+          for i in $(seq 1 60); do curl -fs -X POST http://127.0.0.1:$port/api/v0/id >/dev/null && break; sleep 1; done
+          curl -fsS -X POST http://127.0.0.1:$port/api/v0/id | head -c 200; echo
+        done
+    # On-chain consent, anchoring and break-glass against the deployed contract;
+    # the encrypted report published to IPFS and replicated to the second node,
+    # stored in S3 and recovered from it; approval e-mail delivered over SMTP;
+    # and federated learning across three hospitals over HTTP.
+    - name: End-to-end with the chain, IPFS, S3, e-mail and three hospitals
+      run: >-
+        docker run --rm --network host
+        -v ${{ github.workspace }}/contracts:/contracts:ro
+        -e DATABASE_URL=$DB_ROOT/pqc_integrations
+        -e RUN_E2E=1
+        -e SECURITY_ANALYSIS_INTERVAL_MINUTES=0
+        -e BLOCKCHAIN_ENABLED=true
+        -e BLOCKCHAIN_RPC_URL=http://127.0.0.1:8545
+        -e BLOCKCHAIN_CONTRACT_ADDRESS=$CONTRACT_ADDRESS
+        -e IPFS_API_URL=http://127.0.0.1:5001
+        -e IPFS_REPLICA_NODES=http://127.0.0.1:5002
+        -e FED_HUB_URL=http://127.0.0.1:8001
+        -e FED_HUB_DATABASE_URL=$DB_ROOT/hospital_b
+        -e FED_C_URL=http://127.0.0.1:8002
+        -e FED_C_DATABASE_URL=$DB_ROOT/hospital_c
+        -e AWS_S3_ENDPOINT_URL=$S3_ENDPOINT
+        -e AWS_ACCESS_KEY_ID=$S3_USER
+        -e AWS_SECRET_ACCESS_KEY=$S3_SECRET
+        -e AWS_S3_BUCKET=$S3_BUCKET
+        -e AWS_REGION=us-east-1
+        -e AWS_S3_SERVER_SIDE_ENCRYPTION=none
+        -e SMTP_HOST=127.0.0.1
+        -e SMTP_PORT=1025
+        -e SMTP_USER=ci-mailer@e2e.example.com
+        -e SMTP_PASSWORD=quantumcare-ci
+        -e SMTP_STARTTLS=false
+        -e ADMIN_EMAIL=admin@e2e.example.com
+        -e MAILPIT_API_URL=http://127.0.0.1:8025
+        $IMAGE
+        python -m pytest -p no:cacheprovider -rs
+        tests/test_e2e_flow.py tests/test_ipfs.py tests/test_federation_live.py
+    - name: Hub and chain logs
+      if: failure()
+      run: |
+        docker logs hospital-b 2>&1 | tail -80 || true
+        docker logs hospital-c 2>&1 | tail -40 || true
+        docker logs s3 2>&1 | tail -30 || true
+        tail -40 /tmp/anvil.log || true

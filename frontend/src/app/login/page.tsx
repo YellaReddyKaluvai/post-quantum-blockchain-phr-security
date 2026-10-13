@@ -1,37 +1,51 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, Suspense } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ShieldCheck, User, Lock, ArrowRight, Loader2 } from "lucide-react";
+import { ShieldCheck, User, Lock, ArrowRight, Loader2, Clock } from "lucide-react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { login, setAuthCookies } from "../../lib/session";
+import { normalizeRole, dashboardRouteMap } from "../../lib/iam";
 import { useAuth } from "../../context/AuthContext";
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { setSession } = useAuth();
   const [userId, setUserId] = useState("");
   const [password, setPassword] = useState("");
-  
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  const sessionExpired = searchParams.get("reason") === "expired";
+  const returnTo = searchParams.get("from");
+
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;                      // one sign-in attempt at a time
     setError("");
-    if (userId && password) {
+    const id = userId.trim();
+    if (id && password) {
       setLoading(true);
       try {
-        const result = await login(userId, password);
-        setAuthCookies(result.access_token, result.role, userId);
+        const result = await login(id, password);
+        setAuthCookies(result.access_token, result.role, result.public_user_id || id);
         setSession({
           role: result.role,
-          userId: userId,
+          userId: result.public_user_id || id,
           accessToken: result.access_token,
         });
-        const normalizedRoleHyphen = result.role.toLowerCase().replace(/\s+/g, "-");
-        router.push(`/dashboard/${normalizedRoleHyphen}`);
+        const appRole = normalizeRole(result.role);
+        const dashPath = appRole ? dashboardRouteMap[appRole] : "/login";
+        // Return them to the page the expired session interrupted, but only if
+        // their role is actually allowed there — a stale `from` must never
+        // become a way around the role routing.
+        const allowedPrefix = appRole ? dashboardRouteMap[appRole] : null;
+        const canReturn =
+          returnTo && allowedPrefix && returnTo.startsWith(allowedPrefix);
+        router.push(canReturn ? returnTo : dashPath);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : "Network Error");
       } finally {
@@ -62,7 +76,7 @@ export default function LoginPage() {
             <ShieldCheck className="w-6 h-6 text-white" />
           </div>
           <span className="text-2xl font-extrabold tracking-wider bg-clip-text text-transparent bg-gradient-to-r from-slate-800 to-slate-600 drop-shadow-sm">
-            AEGIS
+            QuantumCare
           </span>
         </Link>
 
@@ -87,21 +101,30 @@ export default function LoginPage() {
                 <p className="text-slate-500 text-sm mt-2 font-medium">Authenticate to access your secure portal.</p>
               </div>
 
-              {error && <div className="mb-5 p-3.5 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-semibold">{error}</div>}
+              {sessionExpired && !error && (
+                <div className="mb-5 p-3.5 rounded-xl bg-amber-50 border border-amber-100 text-amber-800 text-xs font-semibold flex items-start gap-2.5">
+                  <Clock className="w-4 h-4 flex-shrink-0 mt-px" />
+                  <span>
+                    Your session timed out for security. Sign in again
+                    {returnTo ? " to pick up where you left off." : "."}
+                  </span>
+                </div>
+              )}
+              {error && <div role="alert" className="mb-5 p-3.5 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-semibold">{error}</div>}
 
               <form onSubmit={handleLoginSubmit} className="space-y-5 mt-6">
                 <div>
-                  <label className={labelClass}>User ID</label>
+                  <label htmlFor="login-id" className={labelClass}>User ID</label>
                   <div className="relative group">
                     <User className="absolute left-4 top-1/2 -translate-y-1/2 w-[20px] h-[20px] text-teal-500 group-focus-within:text-cyan-500 group-focus-within:drop-shadow-sm transition-colors" />
-                    <input type="text" required value={userId} onChange={e => setUserId(e.target.value)} className={inputClass} placeholder="P-123456" />
+                    <input id="login-id" type="text" required autoComplete="username" value={userId} onChange={e => setUserId(e.target.value)} className={inputClass} placeholder="PAT-2026-000001" />
                   </div>
                 </div>
                 <div>
-                  <label className={labelClass}>Password</label>
+                  <label htmlFor="login-password" className={labelClass}>Password</label>
                   <div className="relative group">
                     <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-[20px] h-[20px] text-teal-500 group-focus-within:text-cyan-500 group-focus-within:drop-shadow-sm transition-colors" />
-                    <input type="password" required value={password} onChange={e => setPassword(e.target.value)} className={inputClass} placeholder="••••••••••••" />
+                    <input id="login-password" type="password" required autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} className={inputClass} placeholder="••••••••••••" />
                   </div>
                 </div>
 
@@ -123,5 +146,13 @@ export default function LoginPage() {
         </p>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={null}>
+      <LoginForm />
+    </Suspense>
   );
 }

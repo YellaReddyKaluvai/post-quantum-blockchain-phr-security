@@ -23,8 +23,16 @@ ROLE_DEFINITIONS = {
             "session:logout",
         },
     },
-    "Laboratory Staff": {
-        "dashboard": ["laboratory"],
+    "Nurse": {
+        "dashboard": ["nurse"],
+        "permissions": {
+            "patients:view:assigned",
+            "records:upload:vitals",
+            "session:logout",
+        },
+    },
+    "Lab Technician": {
+        "dashboard": ["lab-technician"],
         "permissions": {
             "records:upload:lab",
             "records:read:assigned",
@@ -40,22 +48,16 @@ ROLE_DEFINITIONS = {
             "audit:read",
             "system:configure",
             "keys:rotate",
-            "session:logout",
-        },
-    },
-    "AI Security Analyst": {
-        "dashboard": ["security"],
-        "permissions": {
-            "ai:read:anomalies",
-            "ai:read:explainability",
-            "ai:read:federated",
-            "audit:read",
+            "registrations:manage",
+            "security:view",
+            "users:disable",
+            "users:enable",
             "session:logout",
         },
     },
 }
 
-FUTURE_ROLES = ["Insurance Provider", "Pharmacist", "Hospital Receptionist", "Researcher"]
+FUTURE_ROLES = []
 
 
 def normalize_role(role: str) -> str:

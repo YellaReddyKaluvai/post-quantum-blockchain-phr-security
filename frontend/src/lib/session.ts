@@ -1,36 +1,33 @@
 const backendBaseUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 
-export interface RegistrationPayload {
-  full_name: string;
-  email: string;
-  password: string;
-  confirm_password: string;
-  role: string;
-  gender: string;
-  date_of_birth: string;
-  blood_group?: string | null;
-  specialization?: string | null;
+// FastAPI returns `detail` as a plain string for HTTPException, but as an
+// array of {msg, loc} objects for Pydantic validation (422) errors. Always
+// route through this so a validation failure never renders as
+// "[object Object]" in the UI.
+function extractErrorDetail(err: unknown, fallback: string): string {
+  const detail = (err as { detail?: unknown } | null)?.detail;
+  if (typeof detail === "string") return detail;
+  // The security layer answers with {code, message, …} (e.g. RISK_BLOCKED).
+  if (detail && typeof detail === "object" && !Array.isArray(detail) && "message" in detail) {
+    return String((detail as { message: unknown }).message);
+  }
+  if (Array.isArray(detail) && detail.length > 0) {
+    return detail.map((d) => (typeof d === "object" && d && "msg" in d ? String((d as { msg: unknown }).msg) : String(d))).join("; ");
+  }
+  return fallback;
 }
 
-export interface PendingRegistration {
-  id: string;
-  full_name: string;
-  email: string;
-  role: string;
-  date_of_birth?: string | null;
-  blood_group?: string | null;
-  specialization?: string | null;
-}
-
-interface ApproveRegistrationResponse {
-  user_id: string;
-}
+// Cookie names shared with the backend (see backend/app/security.py SESSION_COOKIE_NAME)
+// and the Next.js middleware. Keep these three in sync when renaming.
+export const TOKEN_COOKIE = "quantumcare_token";
+export const ROLE_COOKIE = "quantumcare_role";
+export const USER_ID_COOKIE = "quantumcare_user_id";
 
 export function setAuthCookies(accessToken: string, role: string, userId: string) {
   const secure = typeof window !== "undefined" && window.location.protocol === "https:" ? "; Secure" : "";
-  document.cookie = `aegis_access_token=${accessToken}; Path=/; SameSite=Lax${secure}`;
-  document.cookie = `aegis_role=${encodeURIComponent(role)}; Path=/; SameSite=Lax${secure}`;
-  document.cookie = `aegis_user_id=${encodeURIComponent(userId)}; Path=/; SameSite=Lax${secure}`;
+  document.cookie = `${TOKEN_COOKIE}=${accessToken}; Path=/; SameSite=Lax${secure}`;
+  document.cookie = `${ROLE_COOKIE}=${encodeURIComponent(role)}; Path=/; SameSite=Lax${secure}`;
+  document.cookie = `${USER_ID_COOKIE}=${encodeURIComponent(userId)}; Path=/; SameSite=Lax${secure}`;
 }
 
 export function getCookie(name: string): string | null {
@@ -42,19 +39,121 @@ export function getCookie(name: string): string | null {
 }
 
 export function getAuthToken(): string | null {
-  return getCookie("aegis_access_token");
+  return getCookie(TOKEN_COOKIE);
 }
 
-async function fetchWithAuth(url: string, options: RequestInit = {}) {
+export function clearAuthCookies() {
+  [TOKEN_COOKIE, ROLE_COOKIE, USER_ID_COOKIE].forEach((name) => {
+    document.cookie = `${name}=; Path=/; Max-Age=0; SameSite=Lax`;
+  });
+}
+
+// Sessions expire after 30 minutes. Without this, an expired token surfaced as
+// an empty list or a blank card — indistinguishable from "you have no data" —
+// so the app looked broken rather than logged out. Redirect once, with a note
+// explaining why, and preserve where they were so they land back there.
+let redirectingToLogin = false;
+
+function handleSessionExpired() {
+  if (typeof window === "undefined" || redirectingToLogin) return;
+  redirectingToLogin = true;
+  clearAuthCookies();
+  const from = window.location.pathname + window.location.search;
+  const params = new URLSearchParams({ reason: "expired" });
+  // Only round-trip in-app paths, never an absolute URL from elsewhere.
+  if (from.startsWith("/") && !from.startsWith("//") && !from.startsWith("/login")) {
+    params.set("from", from);
+  }
+  window.location.replace(`/login?${params.toString()}`);
+}
+
+export class SessionExpiredError extends Error {
+  constructor() {
+    super("Your session has expired. Please sign in again.");
+    this.name = "SessionExpiredError";
+  }
+}
+
+// ─── Step-up verification (risk policy "verify") ─────────────────────────────
+//
+// When the backend's risk gate scores the current user MEDIUM/HIGH under a
+// "verify" policy it answers 428 with code STEP_UP_REQUIRED. The user re-enters
+// their password in <StepUpDialog/> (mounted in the root layout), and the
+// original request is retried once. Concurrent 428s share one prompt.
+export const STEP_UP_EVENT = "quantumcare:step-up";
+
+export interface StepUpPrompt {
+  message: string;
+  risk_level?: string;
+  explanation?: string;
+  resolve: (verified: boolean) => void;
+}
+
+let pendingStepUp: Promise<boolean> | null = null;
+
+function requestStepUp(info: { message?: string; risk_level?: string; explanation?: string }): Promise<boolean> {
+  if (typeof window === "undefined") return Promise.resolve(false);
+  // No dialog mounted (e.g. a page outside the app shell): fail closed.
+  if (!(window as unknown as { __quantumcareStepUpReady?: boolean }).__quantumcareStepUpReady) {
+    return Promise.resolve(false);
+  }
+  if (!pendingStepUp) {
+    pendingStepUp = new Promise<boolean>((resolve) => {
+      window.dispatchEvent(new CustomEvent<StepUpPrompt>(STEP_UP_EVENT, {
+        detail: {
+          message: info.message || "Please re-enter your password to continue.",
+          risk_level: info.risk_level, explanation: info.explanation, resolve,
+        },
+      }));
+    }).finally(() => { pendingStepUp = null; });
+  }
+  return pendingStepUp;
+}
+
+async function fetchWithAuth(url: string, options: RequestInit = {}, retried = false): Promise<Response> {
   const token = getAuthToken();
   const headers = new Headers(options.headers || {});
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
-  return fetch(url, { ...options, headers });
+  if (options.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  const response = await fetch(url, { ...options, headers });
+
+  // 401 means the token is gone or expired. 403 is a genuine permission
+  // decision and must NOT be treated as expiry — that would bounce a user to
+  // login for something they simply aren't allowed to do.
+  if (response.status === 401) {
+    handleSessionExpired();
+    throw new SessionExpiredError();
+  }
+
+  if (response.status === 428 && !retried) {
+    const body = await response.clone().json().catch(() => null);
+    const detail = (body as { detail?: { code?: string } } | null)?.detail;
+    if (detail && typeof detail === "object" && detail.code === "STEP_UP_REQUIRED") {
+      const verified = await requestStepUp(detail as { message?: string; risk_level?: string; explanation?: string });
+      if (verified) return fetchWithAuth(url, options, true);
+    }
+  }
+
+  return response;
 }
 
-export async function register(data: RegistrationPayload) {
+export async function stepUpVerify(password: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/auth/step-up`, {
+    method: "POST",
+    body: JSON.stringify({ password }),
+  }, true);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Verification failed"));
+  }
+  return response.json();
+}
+
+export async function register(data: Record<string, unknown>) {
   const response = await fetch(`${backendBaseUrl}/api/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -62,7 +161,7 @@ export async function register(data: RegistrationPayload) {
   });
   if (!response.ok) {
     const err = await response.json().catch(() => null);
-    throw new Error(err?.detail || "Registration failed");
+    throw new Error(extractErrorDetail(err, "Registration failed"));
   }
   return response.json();
 }
@@ -75,7 +174,7 @@ export async function login(user_id: string, password: string) {
   });
   if (!response.ok) {
     const err = await response.json().catch(() => null);
-    throw new Error(err?.detail || "Login failed");
+    throw new Error(extractErrorDetail(err, "Login failed"));
   }
   return response.json();
 }
@@ -86,21 +185,22 @@ export async function logout() {
   } catch (e) {
     console.error("Logout API failed", e);
   }
-  document.cookie = "aegis_access_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;";
-  document.cookie = "aegis_role=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;";
-  document.cookie = "aegis_user_id=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;";
+  const expire = "; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;";
+  for (const name of [TOKEN_COOKIE, ROLE_COOKIE, USER_ID_COOKIE]) {
+    document.cookie = `${name}=${expire}`;
+  }
+  if (typeof localStorage !== "undefined") {
+    localStorage.removeItem(ROLE_COOKIE);
+    localStorage.removeItem(USER_ID_COOKIE);
+    localStorage.removeItem(TOKEN_COOKIE);
+  }
 }
 
-export async function getProfile() {
-  const response = await fetchWithAuth(`${backendBaseUrl}/api/auth/me`);
-  if (!response.ok) throw new Error("Failed to fetch profile");
-  return response.json();
-}
 
 export async function getAdminPending() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/registrations/pending`);
   if (!response.ok) throw new Error("Failed to fetch pending registrations");
-  return response.json() as Promise<PendingRegistration[]>;
+  return response.json();
 }
 
 export async function approveRegistration(id: string) {
@@ -108,13 +208,1158 @@ export async function approveRegistration(id: string) {
     method: "POST",
   });
   if (!response.ok) throw new Error("Failed to approve registration");
-  return response.json() as Promise<ApproveRegistrationResponse>;
+  return response.json();
 }
 
-export async function rejectRegistration(id: string) {
+export async function rejectRegistration(id: string, reason?: string) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/registrations/${id}/reject`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason: reason || null }),
   });
   if (!response.ok) throw new Error("Failed to reject registration");
   return response.json();
+}
+
+export async function getDashboardStats() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/dashboard/stats`);
+  if (!response.ok) throw new Error("Failed to fetch dashboard stats");
+  return response.json();
+}
+
+export async function getRecentActivity() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/dashboard/recent-activity`);
+  if (!response.ok) throw new Error("Failed to fetch recent activity");
+  return response.json();
+}
+
+export async function getAllRegistrations() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/registrations`);
+  if (!response.ok) throw new Error("Failed to fetch registrations");
+  return response.json();
+}
+
+export async function getAllUsers(params: { role?: string; status?: string; search?: string; page?: number; per_page?: number } = {}) {
+  const query = new URLSearchParams();
+  if (params.role) query.set("role", params.role);
+  if (params.status) query.set("status", params.status);
+  if (params.search) query.set("search", params.search);
+  if (params.page) query.set("page", String(params.page));
+  if (params.per_page) query.set("per_page", String(params.per_page));
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/users?${query.toString()}`);
+  if (!response.ok) throw new Error("Failed to fetch users");
+  return response.json();
+}
+
+
+export async function disableUser(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/users/${id}/disable`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to disable user");
+  return response.json();
+}
+
+export async function enableUser(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/users/${id}/enable`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to enable user");
+  return response.json();
+}
+
+export async function getAuditLogs(params: { action?: string; page?: number; per_page?: number } = {}) {
+  const query = new URLSearchParams();
+  if (params.action) query.set("action", params.action);
+  if (params.page) query.set("page", String(params.page));
+  if (params.per_page) query.set("per_page", String(params.per_page));
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/audit-logs?${query.toString()}`);
+  if (!response.ok) throw new Error("Failed to fetch audit logs");
+  return response.json();
+}
+
+export async function getBlockchainStatus() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/blockchain/status`);
+  if (!response.ok) throw new Error("Failed to fetch blockchain status");
+  return response.json();
+}
+
+export async function getStorageStatus() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/storage/status`);
+  if (!response.ok) throw new Error("Failed to fetch storage status");
+  return response.json();
+}
+
+export async function getSecurityStats() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/security/stats`);
+  if (!response.ok) throw new Error("Failed to fetch security stats");
+  return response.json();
+}
+
+export async function getUserEmails(userId: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/users/${userId}/emails`);
+  if (!response.ok) throw new Error("Failed to fetch user email history");
+  return response.json();
+}
+
+export async function resendEmail(notificationId: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/emails/${notificationId}/resend`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to resend email"));
+  }
+  return response.json();
+}
+
+// ─── Patient API Functions ───────────────────────────────────────────────────
+
+export async function getPatientProfile() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/profile`);
+  if (!response.ok) throw new Error("Failed to fetch patient profile");
+  return response.json();
+}
+
+export async function getPatientDashboardSummary() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/dashboard/summary`);
+  if (!response.ok) throw new Error("Failed to fetch dashboard summary");
+  return response.json();
+}
+
+export async function getPatientMedicalRecords() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/medical-records`);
+  if (!response.ok) throw new Error("Failed to fetch medical records");
+  return response.json();
+}
+
+
+export async function getPatientLabReports() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/lab-reports`);
+  if (!response.ok) throw new Error("Failed to fetch lab reports");
+  return response.json();
+}
+
+
+export async function downloadPatientLabReport(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/lab-reports/${id}/download`);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to securely decrypt and download lab report"));
+  }
+  return response.blob();
+}
+
+export async function verifyPatientLabReport(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/lab-reports/${id}/verify`);
+  if (!response.ok) throw new Error("Failed to verify lab report");
+  return response.json();
+}
+
+export async function getPatientPrescriptions() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/prescriptions`);
+  if (!response.ok) throw new Error("Failed to fetch prescriptions");
+  return response.json();
+}
+
+export async function getPatientConsultations() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/consultations`);
+  if (!response.ok) throw new Error("Failed to fetch consultations");
+  return response.json();
+}
+
+export async function getPatientAppointments() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/appointments`);
+  if (!response.ok) throw new Error("Failed to fetch appointments");
+  return response.json();
+}
+
+export async function getPatientConsent() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/consent`);
+  if (!response.ok) throw new Error("Failed to fetch consent list");
+  return response.json();
+}
+
+export async function revokePatientConsent(doctorId: string, reason?: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/consent/${doctorId}/revoke`, {
+    method: "POST",
+    body: JSON.stringify({ reason: reason || null }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to withdraw access"));
+  }
+  return response.json();
+}
+
+export async function grantPatientConsent(doctorId: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/consent/${doctorId}/grant`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to restore access"));
+  }
+  return response.json();
+}
+
+export async function declareEmergencyAccess(data: {
+  patient_id: string;
+  reason: string;
+  duration_hours?: number;
+  /** Identity verification: break-glass requires re-entering the password. */
+  password: string;
+}) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/emergency-access`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to declare emergency access"));
+  }
+  return response.json();
+}
+
+export async function getAdminEmergencyAccess() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/emergency-access`);
+  if (!response.ok) throw new Error("Failed to fetch emergency access log");
+  return response.json();
+}
+
+export async function getPatientVitals() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/vitals`);
+  if (!response.ok) throw new Error("Failed to fetch vitals");
+  return response.json();
+}
+
+export async function getAvailableDoctors() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/doctors`);
+  if (!response.ok) throw new Error("Failed to fetch doctors");
+  return response.json();
+}
+
+export async function createPatientAppointment(data: {
+  doctor_id: string;
+  department: string;
+  appointment_date: string;
+  appointment_time: string;
+  notes?: string;
+}) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/appointments`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to book appointment"));
+  }
+  return response.json();
+}
+
+export async function getPatientNotifications() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/notifications`);
+  if (!response.ok) throw new Error("Failed to fetch notifications");
+  return response.json();
+}
+
+export async function markNotificationRead(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/notifications/${id}/read`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to mark notification as read");
+  return response.json();
+}
+
+export async function clearNotifications() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/notifications/clear`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to clear notifications");
+  return response.json();
+}
+
+export async function getPatientSecurity() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/security`);
+  if (!response.ok) throw new Error("Failed to fetch security info");
+  return response.json();
+}
+
+// ─── Doctor API Functions ────────────────────────────────────────────────────
+
+export async function searchDoctorPatients(query: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/search?q=${encodeURIComponent(query)}`);
+  if (!response.ok) throw new Error("Failed to search patients");
+  return response.json();
+}
+
+export async function getDoctorProfile() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/profile`);
+  if (!response.ok) throw new Error("Failed to fetch doctor profile");
+  return response.json();
+}
+
+export async function getDoctorDashboardSummary() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/dashboard/summary`);
+  if (!response.ok) throw new Error("Failed to fetch dashboard summary");
+  return response.json();
+}
+
+export async function getDoctorPatients() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients`);
+  if (!response.ok) throw new Error("Failed to fetch patients");
+  return response.json();
+}
+
+export async function getDoctorPatientDetail(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${id}`);
+  if (!response.ok) throw new Error("Failed to fetch patient details");
+  return response.json();
+}
+
+function extractErrorMessage(body: unknown, fallback: string): string {
+  const detail = (body as { detail?: unknown } | null)?.detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail) && detail.length > 0) {
+    return detail.map((d: { msg?: string }) => d.msg).filter(Boolean).join("; ") || fallback;
+  }
+  return fallback;
+}
+
+export async function createDiagnosis(patientId: string, data: Record<string, unknown>) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${patientId}/diagnosis`, {
+    method: "POST", body: JSON.stringify(data)
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorMessage(err, "Failed to create diagnosis"));
+  }
+  return response.json();
+}
+
+export async function createPrescription(patientId: string, data: Record<string, unknown>) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${patientId}/prescription`, {
+    method: "POST", body: JSON.stringify(data)
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorMessage(err, "Failed to create prescription"));
+  }
+  return response.json();
+}
+
+export async function createConsultation(patientId: string, data: Record<string, unknown>) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${patientId}/consultation`, {
+    method: "POST", body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to record consultation"));
+  }
+  return response.json();
+}
+
+export async function getPatientDocuments() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/documents`);
+  if (!response.ok) throw new Error("Failed to fetch documents");
+  return response.json();
+}
+
+export async function getPatientDocumentContent(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/documents/${id}/content`);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to open document"));
+  }
+  return response.json();
+}
+
+export async function getDoctorReports() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/reports`);
+  if (!response.ok) throw new Error("Failed to fetch reports");
+  return response.json();
+}
+
+export async function reviewLabReport(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/reports/${id}/review`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to review report");
+  return response.json();
+}
+
+export async function downloadDoctorLabReport(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/reports/${id}/download`);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to securely decrypt and download lab report"));
+  }
+  return response.blob();
+}
+
+export async function downloadLabTechReport(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/reports/${id}/download`);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to decrypt and open the report"));
+  }
+  return response.blob();
+}
+
+export async function verifyDoctorLabReport(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/reports/${id}/verify`);
+  if (!response.ok) throw new Error("Failed to verify lab report");
+  return response.json();
+}
+
+export async function getDoctorLabPanels() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/lab-panels`);
+  if (!response.ok) throw new Error("Failed to fetch investigation panels");
+  return response.json();
+}
+
+export async function getDoctorLabRequests(status?: string) {
+  const query = status ? `?status_filter=${encodeURIComponent(status)}` : "";
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/requests${query}`);
+  if (!response.ok) throw new Error("Failed to fetch lab test requests");
+  return response.json();
+}
+
+export async function requestLabTest(data: {
+  patient_id: string;
+  panel_code: string;
+  test_name?: string;
+  priority?: string;
+  clinical_notes?: string;
+}) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/requests`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to request laboratory test"));
+  }
+  return response.json();
+}
+
+export async function getDoctorDocuments() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/documents`);
+  if (!response.ok) throw new Error("Failed to fetch documents");
+  return response.json();
+}
+
+export async function createMedicalDocument(data: Record<string, unknown>) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/documents`, {
+    method: "POST", body: JSON.stringify(data)
+  });
+  if (!response.ok) throw new Error("Failed to upload document");
+  return response.json();
+}
+
+
+export async function getDoctorAppointments() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/appointments`);
+  if (!response.ok) throw new Error("Failed to fetch appointments");
+  return response.json();
+}
+
+export async function updateAppointmentStatus(id: string, action: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/appointments/${id}/${action}`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to update appointment");
+  return response.json();
+}
+
+export async function getDoctorNotifications() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/notifications`);
+  if (!response.ok) throw new Error("Failed to fetch notifications");
+  return response.json();
+}
+
+export async function markDoctorNotificationRead(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/notifications/${id}/read`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to mark notification as read");
+  return response.json();
+}
+
+export async function clearDoctorNotifications() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/notifications/clear`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to clear notifications");
+  return response.json();
+}
+
+// ─── Lab Technician API Functions ───────────────────────────────────────────
+
+export async function getLabTechProfile() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/profile`);
+  if (!response.ok) throw new Error("Failed to fetch lab tech profile");
+  return response.json();
+}
+
+export async function getLabTechDashboardSummary() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/dashboard/summary`);
+  if (!response.ok) throw new Error("Failed to fetch lab dashboard summary");
+  return response.json();
+}
+
+export async function getLabTestRequests() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/requests`);
+  if (!response.ok) throw new Error("Failed to fetch lab test requests");
+  return response.json();
+}
+
+export async function updateLabTestRequestStatus(id: string, status: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/requests/${id}/status`, {
+    method: "POST",
+    body: JSON.stringify({ status })
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to update test request status"));
+  }
+  return response.json();
+}
+
+export async function getLabTestRequestDetail(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/requests/${id}`);
+  if (!response.ok) throw new Error("Failed to fetch test request detail");
+  return response.json();
+}
+
+
+export async function getLabReportTemplate(panelCode: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/report-templates/${panelCode}`);
+  if (!response.ok) throw new Error("Failed to fetch report template");
+  return response.json();
+}
+
+export async function searchPatientsForLab(query: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/patients/search?q=${encodeURIComponent(query)}`);
+  if (!response.ok) throw new Error("Failed to search patients");
+  return response.json();
+}
+
+export async function createStructuredLabReport(data: {
+  request_id?: string;
+  patient_id?: string;
+  panel_code: string;
+  values: Record<string, unknown>;
+  remarks?: string;
+}) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/reports/create`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to finalize the laboratory report"));
+  }
+  return response.json();
+}
+
+
+export async function getLabTechReports() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/reports`);
+  if (!response.ok) throw new Error("Failed to fetch lab reports");
+  return response.json();
+}
+
+
+export async function uploadImagingReport(data: Record<string, unknown>) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/imaging/upload`, {
+    method: "POST",
+    body: JSON.stringify(data)
+  });
+  if (!response.ok) throw new Error("Failed to upload imaging report");
+  return response.json();
+}
+
+
+export async function getImagingReports() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/imaging`);
+  if (!response.ok) throw new Error("Failed to fetch imaging reports");
+  return response.json();
+}
+
+// Images are encrypted at rest and are not included in the list response, so
+// they are decrypted one at a time, only when actually viewed.
+export async function getImagingImage(id: string): Promise<{ image_data: string; encrypted: boolean }> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/imaging/${id}/image`);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorMessage(err, "Failed to decrypt image"));
+  }
+  return response.json();
+}
+
+export async function getLabTechNotifications() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/notifications`);
+  if (!response.ok) throw new Error("Failed to fetch notifications");
+  return response.json();
+}
+
+export async function markLabNotificationRead(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/notifications/${id}/read`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to mark notification as read");
+  return response.json();
+}
+
+export async function clearLabNotifications() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/lab-tech/notifications/clear`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to clear notifications");
+  return response.json();
+}
+
+// ─── Zero-knowledge consent proof (the token stays in this browser) ─────────
+
+export interface CollectedConsentToken {
+  consent_token: string;
+  commitment: string;
+  scheme: string;
+  post_quantum_secure: boolean;
+}
+
+export async function collectConsentToken(patientId: string): Promise<CollectedConsentToken> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/consent-token/${patientId}`);
+  return jsonOrThrow(response, "Failed to collect the consent token");
+}
+
+export async function requestZkpChallenge(patientId: string): Promise<{ challenge: string; context: string; scheme: string }> {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/doctor/zkp/challenge?patient_id=${encodeURIComponent(patientId)}`, { method: "POST" });
+  return jsonOrThrow(response, "Failed to get a challenge");
+}
+
+export async function submitZkpProof(body: { challenge: string; scheme: string; proof: string }) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/zkp/verify`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return jsonOrThrow(response, "Proof verification failed");
+}
+
+// ─── Care team: which nurses may open a patient's chart ─────────────────────
+
+export interface CareTeamMember {
+  id: string;
+  patient_id: string;
+  patient_user_id?: string | null;
+  patient_name?: string | null;
+  nurse_id: string;
+  nurse_user_id?: string | null;
+  nurse_name?: string | null;
+  assigned_by_name?: string | null;
+  assigned_by_role: string;
+  reason: string;
+  created_at: string;
+  expires_at?: string | null;
+}
+
+export interface CareTeamAssignment {
+  nurse_id: string;
+  reason: string;
+  duration_hours?: number | null;
+  /** Administrator form only. */
+  patient_id?: string;
+}
+
+async function jsonOrThrow(response: Response, fallback: string) {
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, fallback));
+  }
+  return response.json();
+}
+
+export async function searchNurses(query: string): Promise<{ id: string; user_id: string; full_name: string }[]> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/nurses?q=${encodeURIComponent(query)}`);
+  return jsonOrThrow(response, "Failed to search nurses");
+}
+
+export async function getPatientCareTeam(patientId: string): Promise<CareTeamMember[]> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${patientId}/care-team`);
+  return jsonOrThrow(response, "Failed to load the care team");
+}
+
+export async function assignCareTeamNurse(patientId: string, data: CareTeamAssignment): Promise<CareTeamMember> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${patientId}/care-team`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+  return jsonOrThrow(response, "Failed to add the nurse");
+}
+
+export async function endCareTeamAssignment(patientId: string, assignmentId: string) {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/doctor/patients/${patientId}/care-team/${assignmentId}/end`, { method: "POST" });
+  return jsonOrThrow(response, "Failed to remove the nurse");
+}
+
+export async function getAdminCareTeams(query = ""): Promise<CareTeamMember[]> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/care-team?q=${encodeURIComponent(query)}`);
+  return jsonOrThrow(response, "Failed to load care teams");
+}
+
+export async function adminAssignCareTeam(data: CareTeamAssignment & { patient_id: string }): Promise<CareTeamMember> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/care-team`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+  return jsonOrThrow(response, "Failed to assign the nurse");
+}
+
+export interface CareTeamSuggestion {
+  nurse_id: string;
+  nurse_user_id: string;
+  nurse_name: string;
+  patient_id: string;
+  patient_user_id: string;
+  patient_name: string;
+  last_activity: string;
+  entries: number;
+}
+
+export async function getCareTeamSuggestions(days = 90): Promise<CareTeamSuggestion[]> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/care-team/suggestions?days=${days}`);
+  return jsonOrThrow(response, "Failed to load suggestions");
+}
+
+export async function adminEndCareTeam(assignmentId: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/care-team/${assignmentId}/end`, { method: "POST" });
+  return jsonOrThrow(response, "Failed to end the assignment");
+}
+
+export async function getMyCareTeam(): Promise<CareTeamMember[]> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/care-team`);
+  return jsonOrThrow(response, "Failed to load your care team");
+}
+
+// ─── Nurse ────────────────────────────────────────────────────────────────
+
+export async function getNurseProfile() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/profile`);
+  if (!response.ok) throw new Error("Failed to fetch profile");
+  return response.json();
+}
+
+export async function getNurseDashboardSummary() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/dashboard/summary`);
+  if (!response.ok) throw new Error("Failed to fetch dashboard summary");
+  return response.json();
+}
+
+export async function getNursePatients() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients`);
+  if (!response.ok) throw new Error("Failed to fetch patients");
+  return response.json();
+}
+
+export async function searchNursePatients(query: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients/search?q=${encodeURIComponent(query)}`);
+  if (!response.ok) throw new Error("Failed to search patients");
+  return response.json();
+}
+
+export async function getNursePatientDetail(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients/${id}`);
+  // A 403 explains which care-team assignment is missing; show it, not a generic error.
+  return jsonOrThrow(response, "Failed to fetch patient details");
+}
+
+export async function recordPatientVitals(patientId: string, data: Record<string, unknown>) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients/${patientId}/vitals`, {
+    method: "POST", body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorMessage(err, "Failed to record vitals"));
+  }
+  return response.json();
+}
+
+export async function addNursingNote(patientId: string, data: Record<string, unknown>) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients/${patientId}/notes`, {
+    method: "POST", body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorMessage(err, "Failed to add note"));
+  }
+  return response.json();
+}
+
+export async function administerMedication(patientId: string, prescriptionId: string, data: Record<string, unknown>) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients/${patientId}/medications/${prescriptionId}/administer`, {
+    method: "POST", body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorMessage(err, "Failed to record administration"));
+  }
+  return response.json();
+}
+
+export async function getNurseNotifications() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/notifications`);
+  if (!response.ok) throw new Error("Failed to fetch notifications");
+  return response.json();
+}
+
+export async function markNurseNotificationRead(id: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/notifications/${id}/read`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to mark notification as read");
+  return response.json();
+}
+
+export async function clearNurseNotifications() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/notifications/clear`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to clear notifications");
+  return response.json();
+}
+
+
+
+// ─── Doctor access requests ──────────────────────────────────────────────────
+
+export async function requestPatientAccess(payload: {
+  patient_id: string;
+  purpose: string;
+  requested_resource?: string;
+}) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/access-requests`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    // The backend explains *why* (already pending, already consented, purpose
+    // too thin). Surfacing that beats a generic failure the doctor can't act on.
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not send the access request"));
+  }
+  return response.json();
+}
+
+export async function getDoctorAccessRequests() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/access-requests`);
+  if (!response.ok) throw new Error("Failed to load your access requests");
+  return response.json();
+}
+
+export async function getPatientAccessRequests() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/access-requests`);
+  if (!response.ok) throw new Error("Failed to load access requests");
+  return response.json();
+}
+
+export async function decideAccessRequest(
+  requestId: string,
+  decision: "approve" | "reject",
+  note?: string
+) {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/patient/access-requests/${requestId}/${decision}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: note || null }),
+    }
+  );
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not record your decision"));
+  }
+  return response.json();
+}
+
+// ─── Admin: AI security layer ────────────────────────────────────────────────
+
+export async function runSecurityAnalysis(hours = 720) {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/admin/security/analyze?hours=${hours}`,
+    { method: "POST" }
+  );
+  if (!response.ok) throw new Error("Could not run the analysis");
+  return response.json();
+}
+
+export async function getRiskAssessments(level?: string, page = 1) {
+  const query = new URLSearchParams({ page: String(page), per_page: "20" });
+  if (level) query.set("level", level);
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/admin/security/risk-assessments?${query}`
+  );
+  if (!response.ok) throw new Error("Failed to load risk assessments");
+  return response.json();
+}
+
+export async function getSecurityAlerts(page = 1) {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/admin/security/alerts?page=${page}&per_page=20`
+  );
+  if (!response.ok) throw new Error("Failed to load alerts");
+  return response.json();
+}
+
+export async function acknowledgeAlert(alertId: string) {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/admin/security/alerts/${alertId}/acknowledge`,
+    { method: "POST" }
+  );
+  if (!response.ok) throw new Error("Could not acknowledge that alert");
+  return response.json();
+}
+
+export async function getSecurityIncidents() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/security/incidents`);
+  if (!response.ok) throw new Error("Failed to load incidents");
+  return response.json();
+}
+
+export async function getFederatedStatus() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/security/federated/status`);
+  if (!response.ok) throw new Error("Failed to load federated status");
+  return response.json();
+}
+
+export async function runFederatedRound() {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/admin/security/federated/round`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not run a federated round"));
+  }
+  return response.json();
+}
+
+// ─── Incidents, policy, federation as a participant ──────────────────────────
+
+export type IncidentVerdict = "confirmed_threat" | "false_positive" | "inconclusive";
+
+export async function updateSecurityIncident(incidentId: string, status: "Investigating" | "Closed",
+                                             resolution?: string, verdict?: IncidentVerdict) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/security/incidents/${encodeURIComponent(incidentId)}`, {
+    method: "POST",
+    body: JSON.stringify({ status, resolution: resolution || null, verdict: verdict || null }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not update that incident"));
+  }
+  return response.json();
+}
+
+export async function getSecurityPolicy() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/security/policy`);
+  if (!response.ok) throw new Error("Failed to load the security policy");
+  return response.json();
+}
+
+export async function submitToFederationHub() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/hub/submit`, { method: "POST" });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not submit to the federation hub"));
+  }
+  return response.json();
+}
+
+export async function pullFromFederationHub() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/hub/pull`, { method: "POST" });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not pull the global model"));
+  }
+  return response.json();
+}
+
+// ─── Federation peers ────────────────────────────────────────────────────────
+
+export async function getFederatedPeers() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/peers`);
+  if (!response.ok) throw new Error("Failed to load federation peers");
+  return response.json();
+}
+
+export async function registerFederatedPeer(nodeName: string, contactUrl?: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/peers`, {
+    method: "POST",
+    body: JSON.stringify({ node_name: nodeName, contact_url: contactUrl || null }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not register that peer"));
+  }
+  return response.json();
+}
+
+/** Issue a peer a new shared secret; the old one stops working at once. Shown once. */
+export async function rotateFederatedPeerSecret(peerId: string) {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/admin/federated/peers/${encodeURIComponent(peerId)}/rotate-secret`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not rotate that peer's secret"));
+  }
+  return response.json() as Promise<{ node_name: string; shared_secret: string }>;
+}
+
+export async function setFederatedPeerActive(peerId: string, active: boolean) {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/admin/federated/peers/${encodeURIComponent(peerId)}/${active ? "activate" : "deactivate"}`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not update that peer"));
+  }
+  return response.json();
+}
+
+// ─── IPFS publishing and replication ─────────────────────────────────────────
+
+export async function getIpfsStatus() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/ipfs/status`);
+  if (!response.ok) throw new Error("Failed to load IPFS status");
+  return response.json();
+}
+
+export async function syncIpfsReplication() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/ipfs/replication/sync`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not start replication"));
+  }
+  return response.json();
+}
+
+// ─── Imaging ─────────────────────────────────────────────────────────────────
+
+export async function getPatientImaging() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/imaging`);
+  if (!response.ok) throw new Error("Failed to load your scans");
+  return response.json();
+}
+
+export async function getPatientImagingImage(imagingId: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/imaging/${imagingId}/image`);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not open that scan"));
+  }
+  return response.json();
+}
+
+export async function getDoctorImaging(patientId?: string) {
+  const url = patientId
+    ? `${backendBaseUrl}/api/doctor/imaging?patient_id=${encodeURIComponent(patientId)}`
+    : `${backendBaseUrl}/api/doctor/imaging`;
+  const response = await fetchWithAuth(url);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to load imaging"));
+  }
+  return response.json();
+}
+
+export async function getDoctorImagingImage(imagingId: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/imaging/${imagingId}/image`);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not open that scan"));
+  }
+  return response.json();
+}
+
+// ─── Medication adherence ────────────────────────────────────────────────────
+
+export async function getOwnAdherence() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/adherence`);
+  if (!response.ok) throw new Error("Failed to load your medication history");
+  return response.json();
+}
+
+export async function getPatientAdherence(patientId: string) {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/doctor/patients/${patientId}/adherence`
+  );
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Failed to load adherence"));
+  }
+  return response.json();
+}
+
+
+// ─── Federated learning (participant side) ───────────────────────────────────
+
+export interface FederationParticipation {
+  configured: boolean;
+  source: "environment" | "database" | null;
+  hub_url: string | null;
+  node_name: string | null;
+  secret_set: boolean;
+  updated_at?: string | null;
+  last_sync_at?: string | null;
+  last_sync_result?: Record<string, unknown> | null;
+  sync_interval_minutes: number;
+  dp_epsilon: number | null;
+  transport_warning?: string | null;   // set when the hub is reached over plain HTTP
+}
+
+export interface FederatedModelRecord {
+  id: string;
+  hub_url: string;
+  hub_round: number;
+  contributing_nodes: number;
+  real_nodes: number;
+  total_samples: number;
+  pulled_at: string;
+  adopted: boolean;
+  active: boolean;
+  decided_at?: string | null;
+  evaluation?: { adopt: boolean; reasons: string[];
+    classifier?: { global?: { accuracy: number | null }; note?: string };
+    baselines?: { actors_scored: number; high_share_global?: number; high_share_local?: number; note?: string } } | null;
+  classifier?: { rounds: number; nodes: number; samples: number } | null;
+}
+
+export interface FederatedClassifierStatus {
+  labels: { total: number; threats: number; benign: number };
+  trainable: boolean;
+  needs: { labels: number; per_class: number };
+  local_fit: { accuracy: number | null; precision: number | null; recall: number | null; examples: number } | null;
+  in_use: { label: string; rounds: number; nodes: number; samples: number } | null;
+  privacy: { clip: number; dp_epsilon: number | null; note: string };
+}
+
+export async function getFederationParticipation(): Promise<FederationParticipation> {
+  return jsonOrThrow(await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/participation`),
+    "Failed to load federation participation");
+}
+
+export async function joinFederation(data: { hub_url: string; node_name: string; shared_secret: string }) {
+  return jsonOrThrow(await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/participation`, {
+    method: "PUT", body: JSON.stringify(data),
+  }), "Failed to join the federation");
+}
+
+export async function leaveFederation() {
+  return jsonOrThrow(await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/participation`, { method: "DELETE" }),
+    "Failed to leave the federation");
+}
+
+export async function getFederatedModels(): Promise<FederatedModelRecord[]> {
+  return jsonOrThrow(await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/models`), "Failed to load models");
+}
+
+export async function activateFederatedModel(id: string) {
+  return jsonOrThrow(await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/models/${id}/activate`, { method: "POST" }),
+    "Failed to activate the model");
+}
+
+export async function switchToLocalModels() {
+  return jsonOrThrow(await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/models/deactivate`, { method: "POST" }),
+    "Failed to switch to local models");
+}
+
+export async function getFederatedClassifierStatus(): Promise<FederatedClassifierStatus> {
+  return jsonOrThrow(await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/classifier`),
+    "Failed to load the classifier status");
 }

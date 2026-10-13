@@ -83,20 +83,28 @@ CREATE TABLE IF NOT EXISTS AuthLogs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS MedicalRecords (
-    Medical_Record_ID UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    Patient_ID UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
-    Uploaded_By UUID REFERENCES Users(id) ON DELETE SET NULL,
-    Record_Type VARCHAR(120) NOT NULL,
-    Storage_Provider VARCHAR(40) NOT NULL DEFAULT 'Firestore',
-    Storage_Reference TEXT NOT NULL,
-    Encrypted_Key_Reference TEXT NOT NULL,
-    Key_Version INTEGER NOT NULL DEFAULT 1,
-    Blockchain_Tx_Hash VARCHAR(255),
-    Consent_Required BOOLEAN NOT NULL DEFAULT TRUE,
-    Created_At TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    Updated_At TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+-- ─────────────────────────────────────────────────────────────────────────────
+-- REMOVED — MedicalRecords. No code path ever read or wrote it; it predated the
+-- current design (its 'Firestore' storage default came from an abandoned
+-- backend). Superseded by:
+--   LabReports       — lab results, with the full hybrid-encryption columns
+--   ImagingReports   — imaging studies, same protection
+--   MedicalDocuments — doctor-authored documents
+--
+-- New databases never create it. An existing one has it dropped only while it
+-- is empty: a deployment that somehow holds rows there keeps them, and gets a
+-- notice instead, so nothing is destroyed without a person deciding to.
+-- ─────────────────────────────────────────────────────────────────────────────
+DO $$
+BEGIN
+    IF to_regclass('medicalrecords') IS NOT NULL THEN
+        IF NOT EXISTS (SELECT 1 FROM MedicalRecords) THEN
+            DROP TABLE MedicalRecords;
+        ELSE
+            RAISE NOTICE 'MedicalRecords holds rows, so it was kept. Nothing reads it; migrate and drop it by hand.';
+        END IF;
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS Consent (
     Consent_ID UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -134,8 +142,685 @@ CREATE TABLE IF NOT EXISTS Notifications (
     Created_At TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Add Disabled status to enum
+DO $$ BEGIN
+    ALTER TYPE registration_status ADD VALUE IF NOT EXISTS 'Disabled';
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+-- Add rejection_reason to Users
+ALTER TABLE Users ADD COLUMN IF NOT EXISTS rejection_reason TEXT;
+
+-- Admin Audit Logs
+CREATE TABLE IF NOT EXISTS AdminAuditLogs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    admin_id UUID REFERENCES Users(id),
+    admin_user_id VARCHAR(20),
+    action VARCHAR(100) NOT NULL,
+    target_user_id UUID REFERENCES Users(id),
+    target_public_user_id VARCHAR(20),
+    ip_address INET,
+    details JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_audit_admin ON AdminAuditLogs(admin_id);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON AdminAuditLogs(created_at DESC);
+
+-- Lab Report Type enum
+DO $$ BEGIN
+    CREATE TYPE lab_report_type AS ENUM (
+        'CBC', 'Blood Sugar', 'Urine Test', 'Lipid Profile',
+        'Liver Function', 'Kidney Function', 'ECG', 'X-Ray',
+        'MRI', 'CT Scan', 'Ultrasound', 'Other'
+    );
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE appointment_status AS ENUM ('Scheduled', 'Completed', 'Cancelled');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE lab_report_status AS ENUM ('Pending', 'Completed', 'Reviewed');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+CREATE TABLE IF NOT EXISTS Diagnoses (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    doctor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    title VARCHAR(255) NOT NULL,
+    description TEXT,
+    symptoms TEXT,
+    doctor_notes TEXT,
+    recommended_tests TEXT,
+    visit_date DATE NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS LabReports (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    uploaded_by UUID REFERENCES Users(id) ON DELETE SET NULL,
+    report_name VARCHAR(255) NOT NULL,
+    report_type lab_report_type NOT NULL DEFAULT 'Other',
+    report_id_public VARCHAR(30) UNIQUE,
+    file_data TEXT,
+    findings TEXT,
+    normal_range TEXT,
+    status lab_report_status NOT NULL DEFAULT 'Pending',
+    upload_date TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS Prescriptions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    doctor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    medicine_name VARCHAR(255) NOT NULL,
+    dosage VARCHAR(100) NOT NULL,
+    frequency VARCHAR(100) NOT NULL,
+    duration VARCHAR(100) NOT NULL,
+    instructions TEXT,
+    prescribed_date DATE NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS DoctorConsultations (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    doctor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    consultation_date DATE NOT NULL,
+    symptoms TEXT,
+    diagnosis_summary TEXT,
+    doctor_notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS Appointments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    doctor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    department VARCHAR(100),
+    appointment_date DATE NOT NULL,
+    appointment_time TIME NOT NULL,
+    status appointment_status NOT NULL DEFAULT 'Scheduled',
+    notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+DO $$ BEGIN
+    CREATE TYPE medical_document_type AS ENUM (
+        'Diagnosis Report', 'Consultation Report', 'Treatment Summary',
+        'Medical Certificate', 'Referral Letter', 'Discharge Summary', 'Other'
+    );
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+ALTER TYPE appointment_status ADD VALUE IF NOT EXISTS 'Pending';
+ALTER TYPE appointment_status ADD VALUE IF NOT EXISTS 'Confirmed';
+
+CREATE TABLE IF NOT EXISTS MedicalDocuments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    doctor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    document_name VARCHAR(255) NOT NULL,
+    document_type medical_document_type NOT NULL DEFAULT 'Other',
+    content TEXT,
+    status VARCHAR(50) NOT NULL DEFAULT 'Final',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_medicaldocuments_doctor ON MedicalDocuments(doctor_id);
+CREATE INDEX IF NOT EXISTS idx_medicaldocuments_patient ON MedicalDocuments(patient_id);
+    
+DO $$ BEGIN
+    CREATE TYPE lab_request_priority AS ENUM ('Routine', 'Urgent', 'Emergency');
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE lab_request_status AS ENUM ('Pending', 'Accepted', 'In Progress', 'Completed');
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+CREATE TABLE IF NOT EXISTS LabTestRequests (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    doctor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    test_name VARCHAR(255) NOT NULL,
+    priority lab_request_priority NOT NULL DEFAULT 'Routine',
+    status lab_request_status NOT NULL DEFAULT 'Pending',
+    clinical_notes TEXT,
+    requested_date TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS ImagingReports (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    lab_tech_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    scan_region VARCHAR(100) NOT NULL,
+    exam_type VARCHAR(100) NOT NULL,
+    clinical_history TEXT,
+    findings TEXT,
+    impression TEXT,
+    recommendations TEXT,
+    image_data TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS structured_data JSONB;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS document_hash VARCHAR(64);
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS encrypted_aes_key TEXT;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS digital_signature TEXT;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS blockchain_tx_hash VARCHAR(66);
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS lab_tech_id UUID REFERENCES Users(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_labtestrequests_patient ON LabTestRequests(patient_id);
+CREATE INDEX IF NOT EXISTS idx_labtestrequests_status ON LabTestRequests(status);
+CREATE INDEX IF NOT EXISTS idx_imagingreports_patient ON ImagingReports(patient_id);
+
+CREATE INDEX IF NOT EXISTS idx_diagnoses_patient ON Diagnoses(patient_id);
+CREATE INDEX IF NOT EXISTS idx_labreports_patient ON LabReports(patient_id);
+CREATE INDEX IF NOT EXISTS idx_prescriptions_patient ON Prescriptions(patient_id);
+CREATE INDEX IF NOT EXISTS idx_consultations_patient ON DoctorConsultations(patient_id);
+CREATE INDEX IF NOT EXISTS idx_appointments_patient ON Appointments(patient_id);
+CREATE INDEX IF NOT EXISTS idx_appointments_date ON Appointments(appointment_date);
+
 CREATE INDEX IF NOT EXISTS idx_users_role ON Users(role);
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON Sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_auditlogs_user_id ON AuthLogs(user_id);
-CREATE INDEX IF NOT EXISTS idx_records_patient_id ON MedicalRecords(Patient_ID);
 CREATE INDEX IF NOT EXISTS idx_consent_patient_subject ON Consent(Patient_ID, Subject_User_ID);
+
+-- Email Notifications
+CREATE TABLE IF NOT EXISTS EmailNotifications (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    email_address VARCHAR(100) NOT NULL,
+    notification_type VARCHAR(20) NOT NULL, -- 'APPROVAL', 'REJECTION'
+    email_subject VARCHAR(255) NOT NULL,
+    email_content TEXT NOT NULL,
+    sent_status VARCHAR(20) NOT NULL DEFAULT 'PENDING', -- 'SENT', 'FAILED', 'PENDING'
+    sent_timestamp TIMESTAMPTZ,
+    error_message TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_notifications_user ON EmailNotifications(user_id);
+CREATE INDEX IF NOT EXISTS idx_email_notifications_status ON EmailNotifications(sent_status);
+
+-- IPFS & AWS S3 Cloud Storage Columns
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS ipfs_cid VARCHAR(255);
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS s3_key VARCHAR(512);
+
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS ipfs_cid VARCHAR(255);
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS s3_key VARCHAR(512);
+
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS ipfs_cid VARCHAR(255);
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS s3_key VARCHAR(512);
+
+
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Laboratory report workflow: Doctor request → Lab technician → Signed report
+-- Links the report permanently to its originating request, referring doctor and
+-- performing technician, and stores the hybrid-encryption material needed to
+-- decrypt it later (ML-KEM ciphertext + AES-GCM nonce/tag).
+-- ─────────────────────────────────────────────────────────────────────────────
+
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS lab_request_id UUID REFERENCES LabTestRequests(id) ON DELETE SET NULL;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS doctor_id UUID REFERENCES Users(id) ON DELETE SET NULL;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS panel_code VARCHAR(32);
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS accession_number VARCHAR(32);
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS collected_at TIMESTAMPTZ;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS finalized_at TIMESTAMPTZ;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS is_locked BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS interpretation TEXT;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS remarks TEXT;
+
+-- Hybrid encryption material. encrypted_aes_key already exists and now holds
+-- the ML-KEM ciphertext; these carry the AES-256-GCM parameters beside it.
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS encryption_nonce TEXT;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS encryption_tag TEXT;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS kem_algorithm VARCHAR(32);
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS signature_algorithm VARCHAR(32);
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS encrypted_document TEXT;
+
+-- One finalised report per test request.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_labreports_request_unique
+    ON LabReports(lab_request_id) WHERE lab_request_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_labreports_doctor ON LabReports(doctor_id);
+CREATE INDEX IF NOT EXISTS idx_labreports_labtech ON LabReports(lab_tech_id);
+
+-- Panel selected by the doctor when raising the request, so the technician
+-- opens the correct form rather than choosing one by hand.
+ALTER TABLE LabTestRequests ADD COLUMN IF NOT EXISTS panel_code VARCHAR(32);
+ALTER TABLE LabTestRequests ADD COLUMN IF NOT EXISTS accepted_by UUID REFERENCES Users(id) ON DELETE SET NULL;
+ALTER TABLE LabTestRequests ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
+ALTER TABLE LabTestRequests ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+
+-- Blockchain / integrity anchor. One row per auditable document event; holds
+-- only identifiers, action, timestamp and the SHA-256 digest. Never the
+-- document itself and never key material.
+CREATE TABLE IF NOT EXISTS DocumentAnchors (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    document_type VARCHAR(40) NOT NULL,
+    document_id UUID NOT NULL,
+    report_id_public VARCHAR(30),
+    patient_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    actor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    actor_public_id VARCHAR(20),
+    action VARCHAR(60) NOT NULL,
+    document_hash VARCHAR(64) NOT NULL,
+    tx_hash VARCHAR(66),
+    anchored_on VARCHAR(30) NOT NULL DEFAULT 'local-simulated',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_anchors_document ON DocumentAnchors(document_id);
+CREATE INDEX IF NOT EXISTS idx_anchors_patient ON DocumentAnchors(patient_id);
+
+-- Block number is present only for genuine on-chain anchors; NULL means the
+-- anchor was written locally because no chain was reachable.
+ALTER TABLE DocumentAnchors ADD COLUMN IF NOT EXISTS block_number BIGINT;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Nurse module: vitals, nursing notes, and medication administration.
+-- Nurses are not "assigned" to patients the way doctors are (via diagnoses);
+-- any approved nurse can record observations for any approved patient, and the
+-- nurse's own patient list is simply "who I've recorded something for", mirroring
+-- how the Lab Technician's queue works.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS PatientVitals (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    nurse_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    temperature_celsius NUMERIC(4,1),
+    blood_pressure_systolic SMALLINT,
+    blood_pressure_diastolic SMALLINT,
+    heart_rate SMALLINT,
+    spo2 SMALLINT,
+    respiratory_rate SMALLINT,
+    weight_kg NUMERIC(5,2),
+    height_cm NUMERIC(5,2),
+    notes TEXT,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+DO $$ BEGIN
+    CREATE TYPE nursing_note_type AS ENUM ('Observation', 'Care', 'Incident');
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+CREATE TABLE IF NOT EXISTS NursingNotes (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    nurse_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    note_type nursing_note_type NOT NULL DEFAULT 'Observation',
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+DO $$ BEGIN
+    CREATE TYPE medication_admin_status AS ENUM ('Administered', 'Refused', 'Held', 'Missed');
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+-- One administration event per prescription per nurse action; a prescription
+-- can have many rows over its course (e.g. "Twice daily" for 90 days).
+CREATE TABLE IF NOT EXISTS MedicationAdministration (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    prescription_id UUID NOT NULL REFERENCES Prescriptions(id) ON DELETE CASCADE,
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    nurse_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    status medication_admin_status NOT NULL DEFAULT 'Administered',
+    remarks TEXT,
+    administered_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Doctor-authored documents (discharge summaries, referral letters, medical
+-- certificates) previously stored their body as plaintext in `content` and
+-- never reached cloud storage at all, bypassing the security pipeline that
+-- every other document type goes through. They now carry the same hybrid
+-- material. `content` is retained only for rows predating encryption.
+-- ─────────────────────────────────────────────────────────────────────────────
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS encrypted_content TEXT;
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS encrypted_aes_key TEXT;
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS encryption_nonce TEXT;
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS encryption_tag TEXT;
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS document_hash VARCHAR(64);
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS digital_signature TEXT;
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS kem_algorithm VARCHAR(32);
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS signature_algorithm VARCHAR(32);
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS blockchain_tx_hash VARCHAR(66);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Imaging reports carry the same hybrid-encryption material as lab reports.
+-- Previously the image payload was uploaded to cloud storage as plaintext and
+-- stored plaintext in image_data, which contradicts the rule that the cloud
+-- never holds unencrypted medical content. image_data is retained only for
+-- rows predating encryption; new rows populate the encrypted_* columns.
+-- ─────────────────────────────────────────────────────────────────────────────
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS encrypted_image TEXT;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS encrypted_aes_key TEXT;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS encryption_nonce TEXT;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS encryption_tag TEXT;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS document_hash VARCHAR(64);
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS digital_signature TEXT;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS kem_algorithm VARCHAR(32);
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS signature_algorithm VARCHAR(32);
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS blockchain_tx_hash VARCHAR(66);
+
+CREATE INDEX IF NOT EXISTS idx_vitals_patient ON PatientVitals(patient_id);
+CREATE INDEX IF NOT EXISTS idx_vitals_nurse ON PatientVitals(nurse_id);
+CREATE INDEX IF NOT EXISTS idx_vitals_recorded ON PatientVitals(recorded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_nursingnotes_patient ON NursingNotes(patient_id);
+CREATE INDEX IF NOT EXISTS idx_nursingnotes_nurse ON NursingNotes(nurse_id);
+CREATE INDEX IF NOT EXISTS idx_medadmin_patient ON MedicationAdministration(patient_id);
+CREATE INDEX IF NOT EXISTS idx_medadmin_prescription ON MedicationAdministration(prescription_id);
+CREATE INDEX IF NOT EXISTS idx_medadmin_nurse ON MedicationAdministration(nurse_id);
+
+-- ─── Doctor-initiated access requests (spec §6) ──────────────────────────────
+-- Extends Consent rather than adding a parallel table: a request and a consent
+-- are the same relationship at different stages, and splitting them would give
+-- two sources of truth for "may this doctor read this patient".
+DO $$ BEGIN
+    ALTER TYPE consent_status ADD VALUE IF NOT EXISTS 'Pending';
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN
+    ALTER TYPE consent_status ADD VALUE IF NOT EXISTS 'Rejected';
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Purpose TEXT;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Requested_Resource VARCHAR(120);
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Requested_At TIMESTAMPTZ;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Decided_At TIMESTAMPTZ;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Decision_Note TEXT;
+CREATE INDEX IF NOT EXISTS idx_consent_patient_status ON Consent(Patient_ID, Status);
+
+-- ─── AI security layer (spec §18–25) ─────────────────────────────────────────
+-- Behavioural metadata only. No clinical content reaches these tables: the
+-- layer analyses *how* records are touched, never what they contain (§18).
+
+CREATE TABLE IF NOT EXISTS SecurityEvents (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    actor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    actor_public_id VARCHAR(20),
+    actor_role user_role,
+    event_type VARCHAR(60) NOT NULL,      -- RECORD_ACCESS, LOGIN_FAILED, EMERGENCY_ACCESS…
+    subject_patient_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    resource VARCHAR(120),
+    ip_address INET,
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS idx_secevent_actor_time ON SecurityEvents(actor_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_secevent_type ON SecurityEvents(event_type, occurred_at DESC);
+
+CREATE TABLE IF NOT EXISTS RiskAssessments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    actor_id UUID REFERENCES Users(id) ON DELETE CASCADE,
+    actor_public_id VARCHAR(20),
+    risk_score NUMERIC(5,2) NOT NULL,
+    risk_level VARCHAR(10) NOT NULL,      -- LOW | MEDIUM | HIGH
+    detection_source VARCHAR(40) NOT NULL,-- LOCAL_ANOMALY | FEDERATED_IDS
+    features JSONB NOT NULL DEFAULT '{}'::jsonb,
+    explanation JSONB NOT NULL DEFAULT '[]'::jsonb,   -- XAI attributions (§22)
+    window_start TIMESTAMPTZ,
+    window_end TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_risk_level ON RiskAssessments(risk_level, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS SecurityAlerts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    assessment_id UUID REFERENCES RiskAssessments(id) ON DELETE CASCADE,
+    actor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    severity VARCHAR(10) NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    summary TEXT NOT NULL,
+    response VARCHAR(40) NOT NULL,        -- MONITOR | WARN | VERIFY | RESTRICT | ESCALATE
+    acknowledged_at TIMESTAMPTZ,
+    acknowledged_by UUID REFERENCES Users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS SecurityIncidents (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    incident_ref VARCHAR(24) UNIQUE NOT NULL,
+    alert_id UUID REFERENCES SecurityAlerts(id) ON DELETE SET NULL,
+    actor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    event_type VARCHAR(60) NOT NULL,
+    affected_resource VARCHAR(160),
+    risk_level VARCHAR(10) NOT NULL,
+    detection_source VARCHAR(40) NOT NULL,
+    explanation TEXT,
+    response TEXT,
+    resolution TEXT,
+    status VARCHAR(20) NOT NULL DEFAULT 'Open',   -- Open | Investigating | Closed
+    audit_reference VARCHAR(80),
+    blockchain_tx_hash VARCHAR(120),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    closed_at TIMESTAMPTZ
+);
+
+-- Federated learning: one row per participating node per round. Holds model
+-- PARAMETERS only (per-feature baselines), never records — that separation is
+-- the entire point of federating (§20).
+CREATE TABLE IF NOT EXISTS FederatedRounds (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    round_number INTEGER NOT NULL,
+    node_name VARCHAR(80) NOT NULL,
+    is_simulated BOOLEAN NOT NULL DEFAULT TRUE,
+    sample_count INTEGER NOT NULL,
+    local_parameters JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(round_number, node_name)
+);
+
+CREATE TABLE IF NOT EXISTS FederatedGlobalModel (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    round_number INTEGER NOT NULL UNIQUE,
+    parameters JSONB NOT NULL,
+    contributing_nodes INTEGER NOT NULL,
+    total_samples INTEGER NOT NULL,
+    aggregation VARCHAR(20) NOT NULL DEFAULT 'FedAvg',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─── Zero-knowledge consent proofs (spec §17) ────────────────────────────────
+-- Only the commitment is public. The token itself is AES-encrypted at rest,
+-- exactly as ML-KEM private keys are, and is handed to the doctor once.
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS zkp_commitment TEXT;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS zkp_token_encrypted TEXT;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS zkp_token_collected_at TIMESTAMPTZ;
+
+-- Challenges are single-use: a proof bound to a nonce that can be presented
+-- twice is just a bearer token wearing a costume.
+CREATE TABLE IF NOT EXISTS ZkpChallenges (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    challenge VARCHAR(64) UNIQUE NOT NULL,
+    subject_user_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    consumed_at TIMESTAMPTZ,
+    verified BOOLEAN,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP + INTERVAL '5 minutes'
+);
+CREATE INDEX IF NOT EXISTS idx_zkp_challenge ON ZkpChallenges(challenge);
+
+-- ─── Federated peers (spec §20–21) ───────────────────────────────────────────
+-- A registered peer is a real remote institution that submits model parameters.
+-- Simulated peers stay flagged in FederatedRounds; these are separate and real.
+CREATE TABLE IF NOT EXISTS FederatedPeers (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    node_name VARCHAR(120) UNIQUE NOT NULL,
+    shared_secret_encrypted TEXT NOT NULL,   -- HMAC key, AES-encrypted at rest
+    contact_url TEXT,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    last_submission_at TIMESTAMPTZ,
+    submissions INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─── IPFS replication ────────────────────────────────────────────────────────
+-- One row per (CID, target): the latest state that target itself reported.
+-- 'queued' and 'pinning' are requests, not copies; only 'pinned' counts towards
+-- the replication factor. A failed target keeps its error for whoever is on call.
+CREATE TABLE IF NOT EXISTS IpfsReplicas (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    cid VARCHAR(255) NOT NULL,
+    target VARCHAR(255) NOT NULL,
+    target_kind VARCHAR(20) NOT NULL CHECK (target_kind IN ('node', 'service')),
+    status VARCHAR(20) NOT NULL CHECK (status IN ('queued', 'pinning', 'pinned', 'failed')),
+    request_id VARCHAR(255),          -- pinning-service request, polled for progress
+    error TEXT,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (cid, target)
+);
+CREATE INDEX IF NOT EXISTS idx_ipfs_replicas_status ON IpfsReplicas(status);
+
+-- ─── Connecting the security architecture (spec §7–§25) ──────────────────────
+-- Alerts now come from more than the anomaly model: integrity and signature
+-- checks, the consent ledger, access control and break-glass all report here,
+-- and an administrator needs to see which one is speaking.
+ALTER TABLE SecurityAlerts ADD COLUMN IF NOT EXISTS source VARCHAR(40) NOT NULL DEFAULT 'LOCAL_ANOMALY';
+
+-- Incidents can be worked: Open → Investigating → Closed, with a resolution.
+ALTER TABLE SecurityIncidents ADD COLUMN IF NOT EXISTS resolved_by UUID REFERENCES Users(id) ON DELETE SET NULL;
+ALTER TABLE SecurityIncidents ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+
+-- The inline risk check scores one actor per request; this keeps it cheap.
+CREATE INDEX IF NOT EXISTS idx_security_events_actor_time ON SecurityEvents(actor_id, occurred_at);
+
+-- Step-up verification: a password re-entry that the risk policy can demand
+-- before releasing records to an actor currently scoring MEDIUM/HIGH.
+CREATE TABLE IF NOT EXISTS StepUpVerifications (
+    user_id UUID PRIMARY KEY REFERENCES Users(id) ON DELETE CASCADE,
+    verified_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- On-chain consent (PHR.sol updateConsent/checkConsent). The transaction that
+-- recorded the latest decision, so a later read can check the chain agrees.
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS onchain_tx_hash VARCHAR(120);
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS onchain_authorized BOOLEAN;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS onchain_recorded_at TIMESTAMPTZ;
+
+-- Break-glass: the behavioural risk at declaration, the compliance record it
+-- opened, and the contract's own emergency event.
+ALTER TABLE EmergencyAccess ADD COLUMN IF NOT EXISTS risk_level VARCHAR(10);
+ALTER TABLE EmergencyAccess ADD COLUMN IF NOT EXISTS incident_ref VARCHAR(24);
+ALTER TABLE EmergencyAccess ADD COLUMN IF NOT EXISTS contract_tx_hash VARCHAR(120);
+
+-- Federated models record how many real institutions built them, so a model
+-- made only from simulated peers is never used to score a real person.
+ALTER TABLE FederatedGlobalModel ADD COLUMN IF NOT EXISTS real_nodes INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE FederatedGlobalModel ADD COLUMN IF NOT EXISTS simulated_nodes INTEGER NOT NULL DEFAULT 0;
+
+-- Global models pulled from a federation hub when this hospital is a peer.
+CREATE TABLE IF NOT EXISTS FederatedHubModels (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    hub_url TEXT NOT NULL,
+    hub_round INTEGER NOT NULL,
+    parameters JSONB NOT NULL,
+    contributing_nodes INTEGER NOT NULL,
+    total_samples INTEGER NOT NULL,
+    real_nodes INTEGER NOT NULL DEFAULT 0,
+    pulled_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─── Care team: which nurses may open which patients (spec §4, §34) ─────────
+-- A nurse's access is a relationship like a doctor's, not a property of the
+-- role. It is granted by a doctor already authorized for the patient (and lasts
+-- only as long as that doctor's own access) or by an administrator (ward
+-- allocation), optionally time-boxed, and ended rather than deleted.
+CREATE TABLE IF NOT EXISTS CareTeamAssignments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    nurse_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    assigned_by UUID REFERENCES Users(id) ON DELETE SET NULL,
+    assigned_by_role VARCHAR(20) NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ,
+    ended_at TIMESTAMPTZ,
+    ended_by UUID REFERENCES Users(id) ON DELETE SET NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_care_team_active
+    ON CareTeamAssignments(patient_id, nurse_id) WHERE ended_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_care_team_nurse
+    ON CareTeamAssignments(nurse_id) WHERE ended_at IS NULL;
+
+-- A doctor re-asking after a withdrawal or refusal puts the row back to
+-- Pending. The earlier refusal must keep blocking until the patient decides.
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS prior_refusal BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- ─── Federated learning: labels, a trained classifier, adoption ─────────────
+-- An investigator's verdict on a closed incident is a training label: the
+-- actor's behaviour window at the time, and whether it was a real threat.
+CREATE TABLE IF NOT EXISTS SecurityLabels (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    actor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    actor_role VARCHAR(40),
+    features JSONB NOT NULL,
+    label SMALLINT NOT NULL CHECK (label IN (0, 1)),
+    source VARCHAR(30) NOT NULL,
+    source_ref UUID,
+    labelled_by UUID REFERENCES Users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (source, source_ref)
+);
+ALTER TABLE SecurityIncidents ADD COLUMN IF NOT EXISTS verdict VARCHAR(20);
+ALTER TABLE FederatedGlobalModel ADD COLUMN IF NOT EXISTS aggregation_report JSONB;
+
+-- A pulled global model is evaluated on local data before it is used, and an
+-- administrator can switch between models or back to local-only detection.
+ALTER TABLE FederatedHubModels ADD COLUMN IF NOT EXISTS evaluation JSONB;
+ALTER TABLE FederatedHubModels ADD COLUMN IF NOT EXISTS adopted BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE FederatedHubModels ADD COLUMN IF NOT EXISTS decided_by UUID REFERENCES Users(id) ON DELETE SET NULL;
+ALTER TABLE FederatedHubModels ADD COLUMN IF NOT EXISTS decided_at TIMESTAMPTZ;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'federatedhubmodels' AND column_name = 'active') THEN
+        ALTER TABLE FederatedHubModels ADD COLUMN active BOOLEAN NOT NULL DEFAULT FALSE;
+        -- Before adoption existed the newest pulled model was the one in use.
+        UPDATE FederatedHubModels SET active = TRUE
+         WHERE id = (SELECT id FROM FederatedHubModels ORDER BY pulled_at DESC LIMIT 1);
+    END IF;
+END $$;
+
+-- Joining a federation from the admin screen rather than only through server
+-- environment variables. One row; the shared secret is encrypted at rest.
+CREATE TABLE IF NOT EXISTS FederationParticipation (
+    id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    hub_url TEXT NOT NULL,
+    node_name VARCHAR(120) NOT NULL,
+    shared_secret_encrypted TEXT NOT NULL,
+    updated_by UUID REFERENCES Users(id) ON DELETE SET NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_sync_at TIMESTAMPTZ,
+    last_sync_result JSONB
+);
+
+-- ─── Federation hardening ────────────────────────────────────────────────────
+-- A peer's submission carries a signed timestamp; the hub keeps the newest it
+-- accepted from each peer and refuses anything not newer (replay).
+ALTER TABLE FederatedPeers ADD COLUMN IF NOT EXISTS last_submission_ts BIGINT;
+ALTER TABLE FederatedPeers ADD COLUMN IF NOT EXISTS secret_rotated_at TIMESTAMPTZ;
+-- Peer names may be up to 120 characters (FederatedPeers); rounds must hold them.
+ALTER TABLE FederatedRounds ALTER COLUMN node_name TYPE VARCHAR(120);
+-- The hub evaluates its own global model on local data, as a participant does,
+-- before detection here uses it. Rows from before this check count as adopted.
+ALTER TABLE FederatedGlobalModel ADD COLUMN IF NOT EXISTS adopted BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE FederatedGlobalModel ADD COLUMN IF NOT EXISTS evaluation JSONB;

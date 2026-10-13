@@ -1,12 +1,18 @@
 fastapi
 uvicorn
-pydantic
+pydantic[email]
 pycryptodome
 liboqs-python
 psycopg[binary]
 psycopg_pool
 python-dotenv
-requests
 argon2-cffi
 PyJWT
+boto3
+# >=6 required: web3<6 pulls eth-abi<3, which pulls parsimonious<0.9, which
+# calls inspect.getargspec() — removed in Python 3.11. An unpinned install on
+# any current Python resolves the broken chain and fails at import time.
+web3>=6         # on-chain anchoring and consent (chain_client.py)
+reportlab
 pytest
+httpx          # required by starlette's TestClient
