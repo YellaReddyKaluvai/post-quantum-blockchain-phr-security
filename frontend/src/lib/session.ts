@@ -898,6 +898,22 @@ export async function adminAssignCareTeam(data: CareTeamAssignment & { patient_i
   return jsonOrThrow(response, "Failed to assign the nurse");
 }
 
+export interface CareTeamSuggestion {
+  nurse_id: string;
+  nurse_user_id: string;
+  nurse_name: string;
+  patient_id: string;
+  patient_user_id: string;
+  patient_name: string;
+  last_activity: string;
+  entries: number;
+}
+
+export async function getCareTeamSuggestions(days = 90): Promise<CareTeamSuggestion[]> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/care-team/suggestions?days=${days}`);
+  return jsonOrThrow(response, "Failed to load suggestions");
+}
+
 export async function adminEndCareTeam(assignmentId: string) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/care-team/${assignmentId}/end`, { method: "POST" });
   return jsonOrThrow(response, "Failed to end the assignment");

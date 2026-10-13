@@ -157,6 +157,10 @@ def test_the_core_flow(env, people):
     assert any(p["id"] == pid for p in c.get("/api/nurse/patients", headers=N).json())
     team = c.get("/api/patient/care-team", headers=P).json()
     assert [m["nurse_user_id"] for m in team] == [people["nurse_pub"]]
+    # The admin's review list leaves out a pair that already has an assignment.
+    r = c.get("/api/admin/care-team/suggestions", headers=A)
+    assert r.status_code == 200
+    assert not any(s["patient_id"] == pid and s["nurse_user_id"] == people["nurse_pub"] for s in r.json())
 
     # ── 8–9. Lab request reaches the laboratory ──────────────────────────────
     r = c.post("/api/doctor/requests", headers=D,

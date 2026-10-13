@@ -4464,6 +4464,44 @@ def list_care_teams(q: str = Query("", max_length=80),
             return [_care_team_member(r) for r in cur.fetchall()]
 
 
+@app.get("/api/admin/care-team/suggestions")
+def care_team_suggestions(days: int = Query(90, ge=1, le=365),
+                          session: dict = Depends(require_role("Administrator"))):
+    """Nurses' recent patients that have no care-team assignment — for review.
+
+    Before care teams, any nurse could open any chart, so a working nurse may
+    have patients they are genuinely caring for and can no longer reach. This
+    lists them from the nurse's own recorded work (vitals, notes, medication
+    rounds) so an administrator can allocate the ones that should continue.
+    It grants nothing by itself: history is evidence, not authorization.
+    """
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """WITH activity AS (
+                       SELECT nurse_id, patient_id, recorded_at AS at FROM PatientVitals
+                       UNION ALL SELECT nurse_id, patient_id, created_at FROM NursingNotes
+                       UNION ALL SELECT nurse_id, patient_id, administered_at FROM MedicationAdministration
+                   )
+                   SELECT a.nurse_id, n.user_id AS nurse_user_id, n.full_name AS nurse_name,
+                          a.patient_id, p.user_id AS patient_user_id, p.full_name AS patient_name,
+                          MAX(a.at) AS last_activity, COUNT(*) AS entries
+                     FROM activity a
+                     JOIN Users n ON n.id = a.nurse_id AND n.role = 'Nurse' AND n.status = 'Approved'
+                     JOIN Users p ON p.id = a.patient_id AND p.role = 'Patient'
+                    WHERE a.at > NOW() - make_interval(days => %s)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM CareTeamAssignments c
+                           WHERE c.nurse_id = a.nurse_id AND c.patient_id = a.patient_id
+                             AND c.ended_at IS NULL
+                             AND (c.expires_at IS NULL OR c.expires_at > NOW()))
+                    GROUP BY a.nurse_id, n.user_id, n.full_name, a.patient_id, p.user_id, p.full_name
+                    ORDER BY MAX(a.at) DESC
+                    LIMIT 200""", (days,))
+            return [{**r, "nurse_id": str(r["nurse_id"]), "patient_id": str(r["patient_id"])}
+                    for r in cur.fetchall()]
+
+
 @app.post("/api/admin/care-team", response_model=CareTeamMember)
 def admin_assign_care_team(req: CareTeamAssignRequest,
                            session: dict = Depends(require_role("Administrator"))):
