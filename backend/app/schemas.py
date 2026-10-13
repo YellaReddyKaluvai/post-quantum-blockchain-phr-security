@@ -872,6 +872,9 @@ class IncidentUpdateRequest(BaseModel):
     """Move an incident through its lifecycle (spec §25)."""
     status: Literal["Investigating", "Closed"]
     resolution: Optional[str] = Field(default=None, max_length=2000)
+    # The investigator's finding. It becomes a training label for the federated
+    # threat classifier; "inconclusive" (or none) teaches it nothing.
+    verdict: Optional[Literal["confirmed_threat", "false_positive", "inconclusive"]] = None
 
     @model_validator(mode="after")
     def _closing_needs_a_resolution(self):
@@ -880,3 +883,23 @@ class IncidentUpdateRequest(BaseModel):
         if self.status == "Closed" and not (self.resolution and self.resolution.strip()):
             raise ValueError("Closing an incident requires a resolution.")
         return self
+
+
+class FederationParticipationRequest(BaseModel):
+    """Join another hospital's federation (it issued the secret at registration)."""
+    hub_url: str = Field(min_length=8, max_length=300)
+    node_name: str = Field(min_length=2, max_length=120)
+    shared_secret: str = Field(min_length=16, max_length=200)
+
+    @field_validator("hub_url")
+    @classmethod
+    def http_url(cls, v: str) -> str:
+        v = v.strip()
+        if not (v.startswith("https://") or v.startswith("http://")) or " " in v:
+            raise ValueError("Enter the hub's address, e.g. https://hub.example-hospital.org")
+        return v
+
+    @field_validator("node_name", "shared_secret")
+    @classmethod
+    def trimmed(cls, v: str) -> str:
+        return v.strip()

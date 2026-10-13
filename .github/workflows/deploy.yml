@@ -128,15 +128,22 @@ jobs:
         ADDRESS=$(grep -oE 'Deployed to: 0x[0-9a-fA-F]{40}' /tmp/deploy.log | awk '{print $3}')
         test -n "$ADDRESS"
         echo "CONTRACT_ADDRESS=$ADDRESS" >> "$GITHUB_ENV"
-    - name: Start hospital B (a second backend, its own database) as the federation hub
+    # Federated learning needs more than one hospital: B is the hub, C a second
+    # participant (A is the test process). Each is a separate server with its
+    # own database; they share nothing but the federation protocol.
+    - name: Start hospitals B (federation hub) and C (participant)
       run: |
-        docker run --rm --network host $IMAGE python -c "import psycopg; c = psycopg.connect('$DB_ROOT/postgres', autocommit=True); [c.execute('CREATE DATABASE ' + d) for d in ('pqc_integrations', 'hospital_b')]"
-        docker run -d --name hospital-b --network host \
-          -e DATABASE_URL=$DB_ROOT/hospital_b -e BLOCKCHAIN_ENABLED=false \
-          -e SECURITY_ANALYSIS_INTERVAL_MINUTES=0 \
-          $IMAGE uvicorn app.main:app --host 127.0.0.1 --port 8001
-        for i in $(seq 1 60); do curl -fs http://127.0.0.1:8001/api/health >/dev/null && break; sleep 1; done
-        curl -fsS http://127.0.0.1:8001/api/health
+        docker run --rm --network host $IMAGE python -c "import psycopg; c = psycopg.connect('$DB_ROOT/postgres', autocommit=True); [c.execute('CREATE DATABASE ' + d) for d in ('pqc_integrations', 'hospital_b', 'hospital_c')]"
+        for h in b:8001 c:8002; do
+          docker run -d --name hospital-${h%%:*} --network host \
+            -e DATABASE_URL=$DB_ROOT/hospital_${h%%:*} -e BLOCKCHAIN_ENABLED=false \
+            -e SECURITY_ANALYSIS_INTERVAL_MINUTES=0 \
+            $IMAGE uvicorn app.main:app --host 127.0.0.1 --port ${h##*:}
+        done
+        for port in 8001 8002; do
+          for i in $(seq 1 60); do curl -fs http://127.0.0.1:$port/api/health >/dev/null && break; sleep 1; done
+          curl -fsS http://127.0.0.1:$port/api/health; echo
+        done
     # SeaweedFS: an open-source object store with an S3 gateway. (MinIO's
     # images are no longer published.) With no identities configured its S3
     # API accepts any signed request, which is all a disposable CI store needs.
@@ -156,8 +163,8 @@ jobs:
     # On-chain consent, anchoring and break-glass against the deployed contract;
     # the encrypted report published to IPFS and replicated to the second node,
     # stored in S3 and recovered from it; approval e-mail delivered over SMTP;
-    # and federated learning between this hospital and hospital B over HTTP.
-    - name: End-to-end with the chain, IPFS, S3, e-mail and a second hospital
+    # and federated learning across three hospitals over HTTP.
+    - name: End-to-end with the chain, IPFS, S3, e-mail and three hospitals
       run: >-
         docker run --rm --network host
         -v ${{ github.workspace }}/contracts:/contracts:ro
@@ -171,6 +178,8 @@ jobs:
         -e IPFS_REPLICA_NODES=http://127.0.0.1:5002
         -e FED_HUB_URL=http://127.0.0.1:8001
         -e FED_HUB_DATABASE_URL=$DB_ROOT/hospital_b
+        -e FED_C_URL=http://127.0.0.1:8002
+        -e FED_C_DATABASE_URL=$DB_ROOT/hospital_c
         -e AWS_S3_ENDPOINT_URL=$S3_ENDPOINT
         -e AWS_ACCESS_KEY_ID=$S3_USER
         -e AWS_SECRET_ACCESS_KEY=$S3_SECRET
@@ -190,5 +199,6 @@ jobs:
       if: failure()
       run: |
         docker logs hospital-b 2>&1 | tail -80 || true
+        docker logs hospital-c 2>&1 | tail -40 || true
         docker logs s3 2>&1 | tail -30 || true
         tail -40 /tmp/anvil.log || true

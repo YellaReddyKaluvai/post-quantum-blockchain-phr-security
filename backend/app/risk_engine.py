@@ -31,9 +31,15 @@ is a clinical harm; by default it is allowed and the compliance record that
 every override gets is marked HIGH instead.
 
 Which baseline: the federated model for the actor's role when one exists that a
-*real* peer institution contributed to (or one pulled from a federation hub);
-otherwise this hospital's own. A model built only from simulated peers is
-never used to judge a real person.
+*real* peer institution contributed to (or one pulled from a federation hub and
+adopted after evaluation); otherwise this hospital's own. A model built only
+from simulated peers is never used to judge a real person.
+
+Two models, one decision. The baseline answers "how unusual is this?"; the
+threat classifier (federated_classifier) answers "how much does this look like
+behaviour investigators confirmed as a threat?". The risk is the higher of the
+two, so a pattern seen before can raise the level even where the actor's peers
+are too few to define normal — and the explanation names which model spoke.
 """
 
 from __future__ import annotations
@@ -46,12 +52,14 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from app import ai_security as aisec
+from app import federated_classifier as fl
 
 logger = logging.getLogger(__name__)
 
 ACTIONS = ("allow", "monitor", "verify", "block")
 SOURCE_LOCAL = "LOCAL_ANOMALY"
 SOURCE_FEDERATED = "FEDERATED_IDS"
+SOURCE_CLASSIFIER = "FEDERATED_CLASSIFIER"
 
 
 # ─── Policy ──────────────────────────────────────────────────────────────────
@@ -107,12 +115,15 @@ class Decision:
     baseline_source: str = SOURCE_LOCAL
     baseline_samples: int = 0
     note: Optional[str] = None
+    threat_probability: Optional[float] = None
+    classifier: Optional[str] = None
 
     def as_dict(self) -> dict[str, Any]:
         return {"risk_level": self.level, "risk_score": self.risk, "action": self.action,
                 "explanation": self.contributions, "narrative": self.narrative,
                 "baseline": self.baseline_source, "baseline_samples": self.baseline_samples,
-                "note": self.note}
+                "note": self.note, "threat_probability": self.threat_probability,
+                "classifier": self.classifier}
 
 
 # ─── Baselines ───────────────────────────────────────────────────────────────
@@ -131,6 +142,8 @@ class _BaselineCache:
         self._local: dict[str, aisec.Baseline] = {}
         self._federated: Optional[dict] = None
         self._federated_label: Optional[str] = None
+        self._classifier: Optional[fl.Classifier] = None
+        self._classifier_label: Optional[str] = None
 
     def invalidate(self) -> None:
         with self._lock:
@@ -140,6 +153,8 @@ class _BaselineCache:
         windows = aisec.extract_windows(cur, hours=window_hours)
         self._local = aisec.fit_role_baselines(windows)
         self._federated, self._federated_label = usable_federated_model(cur)
+        self._classifier, self._classifier_label = _choose_classifier(
+            cur, self._federated, self._federated_label)
         self._fitted_at = time.monotonic()
 
     def get(self, cur, role: str, window_hours: int,
@@ -152,6 +167,29 @@ class _BaselineCache:
                     logger.error("Risk baseline refresh failed: %s", exc)
             local, federated = self._local, self._federated
         return select_baseline(role, local, federated, min_peers)
+
+    def classifier(self) -> tuple[Optional[fl.Classifier], Optional[str]]:
+        with self._lock:
+            return self._classifier, self._classifier_label
+
+
+def _choose_classifier(cur, federated: Optional[dict],
+                       federated_label: Optional[str]) -> tuple[Optional[fl.Classifier], Optional[str]]:
+    """The federated classifier when the adopted global model carries one;
+    otherwise one trained on this hospital's own investigated incidents."""
+    clf = (federated or {}).get("classifier")
+    if fl.sane_classifier(clf):
+        c = fl.Classifier.from_parameters(clf)
+        return c, f"federated classifier ({federated_label}, {c.nodes} institutions)"
+    try:
+        from app.federation import load_labels
+        examples = load_labels(cur)
+    except Exception as exc:  # noqa: BLE001 - detection must not depend on it
+        logger.warning("Could not load security labels: %s", exc)
+        return None, None
+    if fl.trainable(examples):
+        return fl.train(examples), f"local classifier ({len(examples)} investigated incidents)"
+    return None, None
 
 
 def select_baseline(role: str, local: dict[str, aisec.Baseline], federated: Optional[dict],
@@ -195,9 +233,11 @@ def usable_federated_model(cur) -> tuple[Optional[dict], Optional[str]]:
         if row:
             candidates.append((row["created_at"], row["parameters"],
                                f"local round {row['round_number']}"))
+        # Only a pulled model that passed evaluation here, or that an
+        # administrator chose — never simply the newest one.
         cur.execute(
             """SELECT parameters, pulled_at, hub_round FROM FederatedHubModels
-                ORDER BY pulled_at DESC LIMIT 1""")
+                WHERE active ORDER BY pulled_at DESC LIMIT 1""")
         row = cur.fetchone()
         if row:
             candidates.append((row["pulled_at"], row["parameters"],
@@ -222,19 +262,48 @@ def evaluate(cur, actor_id: str, role: str, emergency: bool = False) -> Decision
         features={k: 0.0 for k in aisec.FEATURE_WEIGHTS})
 
     baseline, source, samples = _cache.get(cur, role, p["window_hours"], p["min_peers"])
-    if baseline is None:
-        # Too few peers in this role to say what normal is. Scoring anyway would
-        # flag whoever happens to be busiest; better to say so and allow.
+    classifier, classifier_label = _cache.classifier()
+    decision = assess(window, baseline, source, samples, classifier, classifier_label)
+    decision.action = decide(decision.level, emergency)
+    return decision
+
+
+def level_for(risk: float) -> str:
+    return "HIGH" if risk >= aisec.RISK_HIGH else "MEDIUM" if risk >= aisec.RISK_MEDIUM else "LOW"
+
+
+def assess(window: aisec.ActorWindow, baseline: Optional[aisec.Baseline], source: str,
+           samples: int, classifier: Optional[fl.Classifier],
+           classifier_label: Optional[str]) -> Decision:
+    """Combine the anomaly score and the threat classifier into one decision.
+
+    The risk is the higher of the two. With too few peers to define normal and
+    no classifier, nothing is scored — flagging whoever happens to be busiest
+    would be worse than saying so.
+    """
+    if baseline is None and classifier is None:
         return Decision(level="LOW", risk=0.0, action="allow", baseline_source=source,
                         baseline_samples=samples,
                         narrative="Not enough peer activity in this role to judge.",
                         note="insufficient-baseline")
-
-    risk, level, contributions = aisec.score(window, baseline)
-    return Decision(level=level, risk=risk, action=decide(level, emergency),
-                    contributions=contributions,
-                    narrative=aisec.narrate(level, contributions),
-                    baseline_source=source, baseline_samples=samples)
+    risk, level, contributions, narrative = 0.0, "LOW", [], "No baseline for this role yet."
+    if baseline is not None:
+        risk, level, contributions = aisec.score(window, baseline)
+        narrative = aisec.narrate(level, contributions)
+    probability = None
+    if classifier is not None:
+        probability = round(fl.predict(classifier, window.features), 4)
+        clf_risk = round(probability * 100, 2)
+        if clf_risk > risk:
+            risk, level = clf_risk, level_for(clf_risk)
+            contributions = fl.explain(classifier, window.features)
+            drivers = ", ".join(c["label"] for c in contributions) or "no single feature"
+            narrative = (f"{probability:.0%} match with behaviour investigators confirmed as a "
+                         f"threat ({classifier_label}); driven by {drivers}.")
+            source = SOURCE_CLASSIFIER
+    return Decision(level=level, risk=risk, action="allow", contributions=contributions,
+                    narrative=narrative, baseline_source=source, baseline_samples=samples,
+                    threat_probability=probability, classifier=classifier_label)
 
 
 def step_up_valid(cur, user_id: str) -> bool:

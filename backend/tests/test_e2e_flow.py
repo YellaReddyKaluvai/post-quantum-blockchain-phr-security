@@ -293,8 +293,13 @@ def test_the_core_flow(env, people):
     assert {"EMERGENCY_ACCESS", "INTEGRITY_FAILURE"} <= kinds
     target = next(i for i in incidents if i["event_type"] == "EMERGENCY_ACCESS" and i["status"] == "Open")
     r = c.post(f"/api/admin/security/incidents/{target['id']}", headers=A,
-               json={"status": "Closed", "resolution": "Reviewed in E2E: genuine emergency."})
+               json={"status": "Closed", "resolution": "Reviewed in E2E: genuine emergency.",
+                     "verdict": "false_positive"})
     assert r.status_code == 200
+    # The investigator's verdict becomes a training label for the federated classifier.
+    assert r.json()["training_label"] == "benign"
+    assert db.execute("SELECT label FROM SecurityLabels WHERE source_ref = %s",
+                      (target["id"],)).fetchone()["label"] == 0
     assert c.get("/api/admin/security/policy", headers=A).status_code == 200
 
     # ── Audit trail ──────────────────────────────────────────────────────────
