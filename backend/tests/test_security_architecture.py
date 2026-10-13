@@ -688,3 +688,15 @@ def test_nurse_search_is_limited_to_the_care_team_and_returns_no_emails():
 def test_assigning_a_nurse_needs_the_doctors_own_access_and_no_break_glass():
     src = _src("assign_patient_care_team")
     assert "_require_write_access" in src and "emergency override" in src
+
+
+def test_an_outdated_contract_is_reported_unverified_without_being_asked(ledger):
+    """Deployed before consentStatus: the client knows at connection, so no
+    consent read is attempted, and the result is "unverified", never a verdict."""
+    chain = FakeChain(onchain="revoked")
+    chain.supports_consent_status = False
+    chain.consent_status = lambda *a: pytest.fail("an outdated contract must not be queried")
+    ledger.setattr(consent_ledger, "_client", lambda: chain)
+    assert consent_ledger.chain_state("p", "d") is None
+    assert consent_ledger.verify(FakeCursor(), patient_id="p", doctor_id="d",
+                                 db_authorized=True) == "unverified"

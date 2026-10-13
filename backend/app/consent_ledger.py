@@ -116,7 +116,7 @@ def chain_state(patient_id: str, doctor_id: str) -> Optional[str]:
     if cached and time.monotonic() - cached[1] < _CACHE_SECONDS:
         return cached[0]
     client = _client()
-    if client is None:
+    if client is None or not getattr(client, "supports_consent_status", True):
         return None
     try:
         state = client.consent_status(party_ref(patient_id), party_ref(doctor_id))

@@ -81,6 +81,19 @@ class ChainClient:
                 f"{settings.BLOCKCHAIN_CHAIN_ID}. Re-run deploy_contract.py."
             )
 
+        # A contract deployed before consentStatus existed cannot answer the
+        # consent check. Find out once, here, and say so — rather than have
+        # every consent read fail quietly into "unverified".
+        try:
+            self.contract.functions.consentStatus("", "").call()
+            self.supports_consent_status = True
+        except Exception:  # noqa: BLE001 - any failure means the function is not there
+            self.supports_consent_status = False
+            logger.error(
+                "PHR.sol at %s predates consentStatus(); on-chain consent cannot be verified "
+                "until it is redeployed (restart the chain and run start.sh, or "
+                "deploy_contract.py and update BLOCKCHAIN_CONTRACT_ADDRESS).", self.address)
+
         logger.info(
             "Chain client ready: %s @ %s (chain %s)",
             self.address, settings.BLOCKCHAIN_RPC_URL, settings.BLOCKCHAIN_CHAIN_ID,
