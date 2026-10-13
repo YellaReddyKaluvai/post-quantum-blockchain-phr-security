@@ -287,6 +287,17 @@ export async function getAuditLogs(params: { action?: string; page?: number; per
   return response.json();
 }
 
+/** Write on-chain, now, the anchors that were only simulated locally (labelled as late). */
+export async function reanchorLocalAnchors() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/blockchain/reanchor`, { method: "POST" });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not anchor on-chain"));
+  }
+  return response.json() as Promise<{ chain_available: boolean; anchored: number;
+                                       remaining_local?: number; note: string }>;
+}
+
 export async function getBlockchainStatus() {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/blockchain/status`);
   if (!response.ok) throw new Error("Failed to fetch blockchain status");

@@ -285,7 +285,12 @@ listed as not built.
 | Medication adherence | ✅ | Refusals and misses reach the prescriber and the patient, not only a percentage |
 | Emergency break-glass access | ✅ | Password re-verification, daily limit, risk-scored, time-boxed, patient notified immediately, anchored on-chain, compliance incident opened automatically |
 | End-to-end flow (spec §37) | ✅ | `tests/test_e2e_flow.py` drives access request → consent → nurse care team → lab request → signed, encrypted report → patient release → tamper detection → withdrawal → break-glass → incidents and audit, against real Postgres and real liboqs. CI runs it twice: database-only, and with the chain, IPFS and a second hospital live |
-| Automated tests | ✅ | 430 Python tests plus a Foundry contract suite and a browser-prover vector check; weighted toward refusals. CI runs them inside the backend image, where liboqs is real |
+| Browser sessions | ✅ | The session token lives only in an HttpOnly cookie (scripts cannot read it); CORS is limited to `CORS_ORIGINS`; a cookie-authenticated change needs an `X-Requested-With` header (CSRF); each token has an id checked on every request, so logout revokes it and disabling a user ends their sessions at once |
+| Consent-token storage | ✅ | Sealed in the browser with AES-256-GCM under the doctor's passphrase; backups are the sealed form; tokens stored before this are flagged with a one-step encrypt. Checked in CI by `scripts/check-vault.mjs` |
+| Differential privacy across rounds | ✅ | Every classifier release is recorded with its zCDP cost and composed across rounds into a total (ε, δ); `FEDERATION_DP_TOTAL_EPSILON` stops releases at the budget; a release without noise voids any overall claim and is shown as such |
+| Late anchoring | ✅ | Anchors recorded while no chain was reachable can be written on-chain later (Admin → Security), marked `LATE_ANCHOR` on the chain itself: they prove the digest existed by that block, not at the original time |
+| Anchor provenance | ✅ | A digest verifies only from events our own contract (or a listed previous one) emitted — a look-alike contract's event does not count |
+| Automated tests | ✅ | 453 Python tests plus a Foundry contract suite and a browser-prover vector check; weighted toward refusals. CI runs them inside the backend image, where liboqs is real |
 | Federated learning between hospitals | ✅ | Per-role baselines **and a threat classifier trained on investigated incidents**, federated with robust FedAvg, clipped updates and optional differential privacy; each global model evaluated locally before adoption, with rollback. **Verified live in CI across three hospitals** (separate servers and databases), over two training rounds |
 
 🟡 = built and tested in isolation, still to be verified on the running system.
@@ -338,8 +343,8 @@ is listed honestly rather than quietly dropped.
 
 | # | Item | Where it stops |
 |---|---|---|
-| 1 | **Browser token storage** | The consent token is kept in the browser's local storage, readable by any script running on this origin. A backup file and a paste-in path exist; hardware-backed storage does not. |
-| 2 | **Contracts deployed before `consentStatus`** | Detected and reported (startup log, the admin security policy, `start.sh`), but such a contract still has to be redeployed by hand before consent is verified on-chain. |
+| 1 | **Consent token while in use** | Stored only encrypted under the doctor's passphrase (AES-256-GCM, PBKDF2-SHA-256), so a copy of browser storage or a backup is useless without it. A script running on the page *while* the passphrase is typed could still capture it; hardware-backed keys (WebAuthn) are not used. |
+| 2 | **Replacing an outdated contract** | `migrate_contract.py` deploys the current contract and carries consent from the old contract's own state (dry run first). Running it, and updating `.env`, is still an operator's step. |
 
 ### Not implemented
 

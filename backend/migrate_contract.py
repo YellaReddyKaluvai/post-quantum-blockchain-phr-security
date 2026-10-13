@@ -32,15 +32,7 @@ Usage (dry run first; --apply deploys and writes):
 import argparse
 import sys
 
-from web3 import Web3
-from eth_account import Account
-from psycopg.rows import dict_row
-
-from app.config import get_settings
-from app.chain_client import load_contract_artifact
 from app.consent_ledger import party_ref
-from app.database import get_db
-from deploy_contract import deploy
 
 
 def _consents(cur) -> list[dict]:
@@ -67,6 +59,14 @@ def main(argv=None) -> int:
     args.add_argument("--apply", action="store_true", help="deploy and write (default: dry run)")
     args.add_argument("--old", help="old contract address (default: BLOCKCHAIN_CONTRACT_ADDRESS)")
     opts = args.parse_args(argv)
+
+    from web3 import Web3
+    from eth_account import Account
+    from psycopg.rows import dict_row
+    from app.config import get_settings
+    from app.chain_client import load_contract_artifact
+    from app.database import get_db
+    from deploy_contract import deploy
 
     settings = get_settings()
     web3 = Web3(Web3.HTTPProvider(settings.BLOCKCHAIN_RPC_URL, request_kwargs={"timeout": 20}))
