@@ -34,7 +34,7 @@ class Settings(BaseModel):
     AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY", "mock_aws_secret_key_quantumcare_pqc")
     AWS_REGION: str = os.getenv("AWS_REGION", "ap-south-1")
     AWS_S3_BUCKET: str = os.getenv("AWS_S3_BUCKET", "quantumcare-pqc-phr-storage")
-    # An S3-compatible endpoint (MinIO, Ceph, …) instead of AWS. Blank = AWS.
+    # An S3-compatible endpoint (SeaweedFS, MinIO, Ceph, …) instead of AWS. Blank = AWS.
     AWS_S3_ENDPOINT_URL: str = os.getenv("AWS_S3_ENDPOINT_URL", "")
     # No IPFS gateway or pinning settings: nothing is published to the IPFS
     # network. The system computes an IPFS-style CIDv0 purely as a content

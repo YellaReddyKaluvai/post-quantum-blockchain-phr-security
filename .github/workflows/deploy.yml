@@ -73,7 +73,7 @@ jobs:
     env:
       DB_ROOT: postgresql://postgres:postgres@127.0.0.1:5432
       IMAGE: post-quantum-phr-backend:latest
-      # Throwaway credentials for the MinIO container below; nothing real.
+      # Throwaway credentials for the S3 container below; nothing real.
       S3_ENDPOINT: http://127.0.0.1:9000
       S3_USER: quantumcare-ci
       S3_SECRET: quantumcare-ci-secret
@@ -137,10 +137,15 @@ jobs:
           $IMAGE uvicorn app.main:app --host 127.0.0.1 --port 8001
         for i in $(seq 1 60); do curl -fs http://127.0.0.1:8001/api/health >/dev/null && break; sleep 1; done
         curl -fsS http://127.0.0.1:8001/api/health
-    - name: Start S3-compatible storage (MinIO) with a bucket
+    # SeaweedFS: an open-source object store with an S3 gateway. (MinIO's
+    # images are no longer published.) With no identities configured its S3
+    # API accepts any signed request, which is all a disposable CI store needs.
+    - name: Start S3-compatible storage (SeaweedFS) with a bucket
       run: |
-        docker run -d --name minio --network host           -e MINIO_ROOT_USER=$S3_USER -e MINIO_ROOT_PASSWORD=$S3_SECRET           minio/minio:latest server /data --address 127.0.0.1:9000
-        for i in $(seq 1 60); do curl -fs http://127.0.0.1:9000/minio/health/live >/dev/null && break; sleep 1; done
+        docker run -d --name s3 --network host chrislusf/seaweedfs:latest           server -dir=/data -s3 -s3.port=9000 -ip=127.0.0.1 -ip.bind=127.0.0.1
+        for i in $(seq 1 90); do
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/)" != "000" ] && break; sleep 1
+        done
         docker run --rm --network host $IMAGE python -c "import boto3; boto3.client('s3', endpoint_url='$S3_ENDPOINT', aws_access_key_id='$S3_USER', aws_secret_access_key='$S3_SECRET', region_name='us-east-1').create_bucket(Bucket='$S3_BUCKET')"
     - name: Wait for both IPFS nodes
       run: |
@@ -185,5 +190,5 @@ jobs:
       if: failure()
       run: |
         docker logs hospital-b 2>&1 | tail -80 || true
-        docker logs minio 2>&1 | tail -30 || true
+        docker logs s3 2>&1 | tail -30 || true
         tail -40 /tmp/anvil.log || true
