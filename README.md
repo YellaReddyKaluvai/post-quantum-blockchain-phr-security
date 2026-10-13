@@ -261,12 +261,14 @@ listed as not built.
 
 | Area | State | Notes |
 |---|---|---|
-| Registration → admin approval → login | ✅ | Permanent role-scoped User IDs; real SMTP approval/rejection email |
+| Registration → admin approval → login | ✅ | Permanent role-scoped User IDs; real SMTP approval/rejection email — **verified live in CI**: the approval mail is read back from a mail server (Mailpit), addressed to the patient and carrying their User ID |
 | Post-quantum key issuance | ✅ | Real ML-KEM-768 + ML-DSA-65 via liboqs, generated on approval |
 | Doctor → Lab → Patient report pipeline | ✅ | 9 structured panels → hospital PDF → AES-256-GCM → ML-KEM → ML-DSA → chain anchor |
 | Imaging studies | ✅ | Encrypted, signed, anchored — and now readable by the patient and by an entitled doctor |
-| Nurse module | ✅ | Vitals, notes and medication rounds all reach the doctor and the patient; a nurse reaches a patient only through a care-team assignment |
-| Cloud storage (AWS S3) | ✅ | Ciphertext only, verified; doubles as a recovery path if the database copy is lost |
+| Nurse module | ✅ | Vitals, notes and medication rounds all reach the doctor and the patient; a nurse reaches a patient only through a care-team assignment. Existing nurse–patient work is listed for an administrator to review and allocate |
+| Cloud storage (AWS S3) | ✅ | Ciphertext only, verified; doubles as a recovery path if the database copy is lost. **Verified live in CI** against SeaweedFS's S3 gateway (`AWS_S3_ENDPOINT_URL` takes any S3-compatible store): the object is exactly the ciphertext, and a report whose database copy is removed is still released from S3 |
+| Patient security notifications | ✅ | A record withheld after failing its integrity or signature check, consent altered against the blockchain, repeated refused attempts at a chart — the patient is told, with the incident reference; only Patient accounts are ever notified |
+| Encryption-key rotation | ✅ | `rotate_encryption_key.py` moves every encrypted column (personal fields, clinical text, post-quantum private keys) to a new key: strict decryption, every value verified, one locked transaction, dry run by default |
 | Blockchain anchoring | ✅ | Real on-chain writes via `PHR.sol` (writes restricted to the backend's key); falls back to a clearly-labelled local anchor. **Verified live in CI** against anvil: consent written on-chain, report digests read back, break-glass through `emergencyAccess()`, a consent row edited in SQL refused as a mismatch |
 | Session handling | ✅ | 30-minute tokens; expiry redirects to login and returns you to where you were |
 | RBAC across 5 roles | ✅ | Enforced server-side; backend/frontend permission parity is test-enforced |
@@ -284,8 +286,8 @@ listed as not built.
 | Medication adherence | ✅ | Refusals and misses reach the prescriber and the patient, not only a percentage |
 | Emergency break-glass access | ✅ | Password re-verification, daily limit, risk-scored, time-boxed, patient notified immediately, anchored on-chain, compliance incident opened automatically |
 | End-to-end flow (spec §37) | ✅ | `tests/test_e2e_flow.py` drives access request → consent → nurse care team → lab request → signed, encrypted report → patient release → tamper detection → withdrawal → break-glass → incidents and audit, against real Postgres and real liboqs. CI runs it twice: database-only, and with the chain, IPFS and a second hospital live |
-| Automated tests | ✅ | 367 Python tests plus a Foundry contract suite and a browser-prover vector check; weighted toward refusals. CI runs them inside the backend image, where liboqs is real |
-| Federated learning between hospitals | ✅ | **Verified live in CI** between two running backends with separate databases: peer registration, signed submission (a wrong secret refused), FedAvg round on the hub, global model pulled back and stored |
+| Automated tests | ✅ | 413 Python tests plus a Foundry contract suite and a browser-prover vector check; weighted toward refusals. CI runs them inside the backend image, where liboqs is real |
+| Federated learning between hospitals | ✅ | Per-role baselines **and a threat classifier trained on investigated incidents**, federated with robust FedAvg, clipped updates and optional differential privacy; each global model evaluated locally before adoption, with rollback. **Verified live in CI across three hospitals** (separate servers and databases), over two training rounds |
 
 🟡 = built and tested in isolation, still to be verified on the running system.
 
@@ -327,17 +329,18 @@ is listed honestly rather than quietly dropped.
 | **Re-request lifts a withdrawal** | A doctor re-asking after a withdrawal reset the row to Pending, which unblocked them before the patient decided. | The refusal stands until the patient approves |
 | **Chain, IPFS replication, federation in CI** | Exercised only against fakes. | Run live in CI: anvil + deployed contract, two kubo daemons, a second hospital |
 | **ZKP prover in the browser** | Proofs needed `demo/zkp_prove.py`. | "Prove consent" on the patient's page; the token stays in the browser |
+| **Patient security notices** | Integrity and signature failures, altered consent and repeated refused access reached only the admin. | The patient whose record is involved is told |
+| **Public `ENCRYPTION_KEY`** | Data written under the example key could not be moved to a new one. | `rotate_encryption_key.py` |
+| **S3 and e-mail in CI** | Never exercised against a real service. | SeaweedFS (S3) and Mailpit in the integration run |
+| **Existing nurse relationships** | Not carried into care teams. | Listed for an administrator to review and allocate |
 | **Lab report progress** | The finalize dialog animated "hashing… ML-KEM… ML-DSA" on client-side timers before the request was sent. | It states what runs on the server; the result shows what the server returned |
 
 ### Still open
 
 | # | Item | Where it stops |
 |---|---|---|
-| 1 | **Rotating a public `ENCRYPTION_KEY`** | Databases created with the example key keep it: the data is encrypted under it, and there is no re-encryption tool yet. The server warns at every start and on the security policy. |
-| 2 | **Existing nurse relationships** | Not migrated into care teams — after this change a nurse sees no patients until assigned. Deliberate (the old access had no basis), but it needs an administrator pass on a live system. |
-| 3 | **Contracts deployed before `consentStatus`** | Cannot answer the new consent query, so every consent reads `unverified` until `PHR.sol` is redeployed (`start.sh` redeploys on a fresh anvil). |
-| 4 | **Browser token storage** | The consent token is kept in the browser's local storage, readable by any script running on this origin. A backup file and a paste-in path exist; hardware-backed storage does not. |
-| 5 | **S3 and SMTP live** | Built and handled honestly when unconfigured, but CI has no AWS or mail account, so neither is exercised against the real service there. |
+| 1 | **Browser token storage** | The consent token is kept in the browser's local storage, readable by any script running on this origin. A backup file and a paste-in path exist; hardware-backed storage does not. |
+| 2 | **Contracts deployed before `consentStatus`** | Detected and reported (startup log, the admin security policy, `start.sh`), but such a contract still has to be redeployed by hand before consent is verified on-chain. |
 
 ### Not implemented
 
@@ -691,49 +694,63 @@ DOC-2026-000011   score 85.42   HIGH
 
 ### Federated learning — what is real, what is not
 
+The federated IDS has two models, both learned locally and federated:
+
+| Model | What it learns | What leaves the hospital |
+|---|---|---|
+| **Per-role behaviour baselines** | What normal looks like for each role (median and spread of 7 behavioural features) | Medians and scales per role |
+| **Threat classifier** | Which behaviour investigators *confirmed* as a threat — trained on incidents closed with a verdict | 7 weights and a bias, clipped (and optionally noised) |
+
 | Component | Status |
 |---|---|
-| FedAvg aggregation, **per role**, weighted by that role's sample count | **Real** |
-| Local per-role baselines fitted from this hospital's activity | **Real** |
-| Only parameters (medians, scales) cross the boundary | **Real** |
-| Peer registration, signed submission, poisoning floor | **Real** |
-| Participant side: submit local update, pull the global model (HMAC-signed, replay-protected) | **Real** — tested against a fake hub |
-| Global model used by detection | **Real** — only when built by real institutions; a round with simulated peers never scores anyone |
-| Peer institutions actually running | **Depends on deployment** |
+| Local training: baselines from this hospital's activity; the classifier from its investigated incidents, starting each round from the global weights | **Real** |
+| FedAvg: per role for baselines; for the classifier weighted by examples, each node capped at 5× the median node, an outlying update set aside (3+ nodes) | **Real** |
+| Privacy: no record, event, label or identifier is sent; classifier updates are clipped, and `FEDERATION_DP_EPSILON` adds Gaussian noise (the Gaussian mechanism per round — no accounting across rounds is claimed) | **Real** |
+| Signed, replay-protected exchange; peer registration; plausibility floor | **Real** |
+| Adoption gate: a pulled model is evaluated on local data and used only if it does not make detection here worse; every model kept, any one activatable, rollback to local-only | **Real** |
+| Detection: risk = the higher of the anomaly score and the classifier's threat probability, explained per feature by whichever model spoke | **Real** |
+| Automation: hub rounds when real peers have submitted (`FEDERATION_ROUND_INTERVAL_MINUTES`, `FEDERATION_MIN_PEERS`); participant sync (`FEDERATION_SYNC_INTERVAL_MINUTES`) | **Real** |
+| Joining a federation from the admin screen (secret encrypted at rest) or by environment variables | **Real** |
+| **Three hospitals in CI**, each a separate server and database | **Verified** — see below |
+| Independent institutions actually federating | **Depends on deployment** |
 
 ```
-Hospital B (participant)                              Hospital A (hub)
-fit per-role baselines ── signed update ──► /api/federated/submit
-                                            Run Round: FedAvg per role
-store FederatedHubModels ◄── signed pull ── /api/federated/global-model
-risk engine scores with it                  (only models with 0 simulated nodes)
+Hospital A, C (participants)                            Hospital B (hub)
+incidents closed with a verdict → labels
+train classifier from the global weights
+fit per-role baselines
+clip (+ DP noise) · sign ── update ──────────────────►  /api/federated/submit
+                                                         round: per-role FedAvg +
+                                                         robust FedAvg of classifiers
+evaluate on local data ◄── signed pull ──────────────── /api/federated/global-model
+adopt if it is no worse here; else keep it for review    (real institutions only)
+risk engine: max(anomaly score, threat probability)
 ```
 
 Per role, because detection compares each actor with their own role: an
 all-roles average would describe nobody and flag doctors and technicians alike
-for being themselves.
-
-A second QuantumCare instance registers as a peer, fits its own baseline, and
-POSTs only its parameters to `/api/federated/submit`. Submissions are HMAC-signed
-per peer — without that, anyone who could reach the endpoint could drag the
-global baseline wherever they liked and silently blind every participant's
-detector. Implausible parameters (negative medians, zero scales) are refused
-before aggregation.
+for being themselves. Logistic regression, because it trains from tens of
+labelled incidents, FedAvg averages it exactly, and every prediction decomposes
+into per-feature contributions — the Explainable AI view works for it as it does
+for the anomaly score.
 
 **When a real peer submits, the simulated nodes are dropped from the round.**
-They exist only to demonstrate the aggregation before anyone has federated;
-padding a real round with invented nodes would misrepresent the result. The
-endpoint's disclosure states which case applied.
+They exist only to demonstrate the aggregation before anyone has federated, add
+baselines but never classifier weights, and a model that includes them never
+scores anyone.
 
-Verified: a signed submission accepted, a forged signature **401**, poisoned
-parameters **400**, and a round that ran with **2 real nodes and 0 simulated**.
-CI repeats this between two running backends with separate databases
-(`tests/test_federation_live.py`): hospital B registers hospital A, A's signed
-model is accepted (and a wrong secret refused), B runs the round, and A pulls
-the global model both built.
-
-What federation buys is precise: no record, event or identifier ever leaves the
-institution — only the few numbers describing what normal looks like.
+**Verified.** Unit tests (`tests/test_federated_learning.py`): the classifier
+learns; three hospitals with a handful of incidents each converge over FedAvg
+rounds to a model that works on all three; clipping bounds the step; the noise
+has the stated scale; a node claiming a million examples cannot buy the model;
+a poisoned update is set aside; a poisoned global classifier is refused on local
+incidents; global baselines that would flag this hospital's normal staff are
+refused. Live in CI (`tests/test_federation_live.py`), three hospitals as separate
+servers and databases: A and C join through the admin API, train on their own
+investigated incidents and submit; B aggregates (2 real peers, 0 simulated); both
+pull and adopt; a second round starts from the global weights; A rolls back to
+local models and re-activates an older global one; B is checked to hold no labels
+and nothing A stored names a node or a person.
 
 ### Verified
 

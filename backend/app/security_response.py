@@ -20,6 +20,12 @@ Records carry identifiers, resource names and the explanation — never clinical
 content. An incident says *that* report LR-… failed its integrity check, not
 what the report said.
 
+The patient whose record is involved is told too (spec §27, "relevant
+security/access events"): a record of theirs withheld because it failed a
+check, their consent altered outside the application, or someone repeatedly
+refused at their chart. ``notify_patient`` only ever writes to an account that
+is a patient, and only to the record's own subject.
+
 Every function here writes through the caller's cursor and leaves committing to
 the caller, except ``commit_before_refusal``: a request that is about to be
 refused raises, and ``get_db`` rolls back on an exception, so the evidence of
@@ -166,6 +172,49 @@ def _event(cur, *, actor_id, actor_public_id, actor_role, event_type, patient_id
                           ip_address=ip_address, metadata=metadata)
 
 
+# ─── Telling the patient ─────────────────────────────────────────────────────
+
+PATIENT_NOTICE_DEDUPE_HOURS = 24
+
+
+def notify_patient(cur, *, patient_id: Optional[str], kind: str, title: str, body: str) -> bool:
+    """Notify the patient a security event concerns. Returns True if one was written.
+
+    Guarded twice against the §27 failure — notifying someone else: the id must
+    belong to a Patient account (a doctor's or a nurse's id passed by mistake
+    is refused, not delivered), and the same notice is not repeated to the same
+    patient within a day, so a retried download does not flood their inbox.
+    """
+    if not patient_id:
+        return False
+    cur.execute("SELECT 1 FROM Users WHERE id = %s AND role = 'Patient'", (patient_id,))
+    if not cur.fetchone():
+        logger.error("Security notice %s not sent: %s is not a patient account", kind, patient_id)
+        return False
+    cur.execute(
+        """SELECT 1 FROM Notifications
+            WHERE user_id = %s AND notification_type = %s AND title = %s
+              AND created_at > NOW() - make_interval(hours => %s)""",
+        (patient_id, kind, title, PATIENT_NOTICE_DEDUPE_HOURS))
+    if cur.fetchone():
+        return False
+    cur.execute(
+        "INSERT INTO Notifications (user_id, notification_type, title, body) VALUES (%s, %s, %s, %s)",
+        (patient_id, kind, title, body))
+    return True
+
+
+def _display_name(cur, user_id: Optional[str]) -> str:
+    if not user_id:
+        return "A staff member"
+    cur.execute("SELECT full_name, role::text AS role FROM Users WHERE id = %s", (user_id,))
+    row = cur.fetchone()
+    if not row:
+        return "A staff member"
+    name, role = (row["full_name"], row["role"]) if isinstance(row, dict) else (row[0], row[1])
+    return f"Dr. {name}" if role == "Doctor" else f"{name} ({role})"
+
+
 # ─── Cryptographic failures: always an incident ──────────────────────────────
 
 def integrity_failure(cur, *, resource: str, detail: str, actor_id=None,
@@ -183,11 +232,18 @@ def integrity_failure(cur, *, resource: str, detail: str, actor_id=None,
         summary=(f"{resource} failed its integrity check when it was opened: {detail} "
                  "It was not released. The stored record differs from what was signed."),
         response="ESCALATE")
-    return open_incident(
+    ref = open_incident(
         cur, event_type="INTEGRITY_FAILURE", risk_level="HIGH",
         detection_source=SOURCE_INTEGRITY, affected_resource=resource, alert_id=alert,
         explanation=detail, response="Release withheld; investigate the storage layer.",
         actor_id=None)
+    notify_patient(
+        cur, patient_id=patient_id, kind="SECURITY_RECORD_WITHHELD",
+        title="A record of yours is being checked",
+        body=(f"{resource} no longer matches what was signed when it was created, so it is "
+              f"not being shown to anyone. The security team opened incident {ref} to "
+              "investigate. Nothing is needed from you."))
+    return ref
 
 
 def signature_failure(cur, *, resource: str, detail: str, actor_id=None,
@@ -205,11 +261,18 @@ def signature_failure(cur, *, resource: str, detail: str, actor_id=None,
         summary=(f"The ML-DSA signature on {resource} did not verify: {detail} "
                  "Its authenticity cannot be shown, so it was not released as trusted."),
         response="ESCALATE")
-    return open_incident(
+    ref = open_incident(
         cur, event_type="SIGNATURE_FAILURE", risk_level="HIGH",
         detection_source=SOURCE_SIGNATURE, affected_resource=resource, alert_id=alert,
         explanation=detail, response="Release withheld; re-verify the signer's key.",
         actor_id=None)
+    notify_patient(
+        cur, patient_id=patient_id, kind="SECURITY_RECORD_WITHHELD",
+        title="A record of yours is being checked",
+        body=(f"The digital signature on {resource} could not be verified, so it is not "
+              f"being shown as authentic. The security team opened incident {ref} to "
+              "investigate. Nothing is needed from you."))
+    return ref
 
 
 def consent_ledger_mismatch(cur, *, patient_id: str, doctor_id: str, detail: str) -> str:
@@ -221,11 +284,18 @@ def consent_ledger_mismatch(cur, *, patient_id: str, doctor_id: str, detail: str
         cur, severity="HIGH", source=SOURCE_CONSENT_LEDGER, actor_id=doctor_id,
         title="Consent state disagrees with the blockchain",
         summary=detail, response="ESCALATE", dedupe_minutes=60)
-    return open_incident(
+    ref = open_incident(
         cur, event_type="CONSENT_LEDGER_MISMATCH", risk_level="HIGH",
         detection_source=SOURCE_CONSENT_LEDGER, affected_resource=f"Consent:{patient_id}",
         alert_id=alert, explanation=detail, actor_id=doctor_id,
         response="Access refused; the database consent row may have been altered.")
+    notify_patient(
+        cur, patient_id=patient_id, kind="SECURITY_CONSENT_ALTERED",
+        title="Your consent record was changed outside the system",
+        body=(f"The stored record of your decision about {_display_name(cur, doctor_id)} no "
+              "longer matches the copy on the blockchain. Your recorded decision stands: "
+              f"their access was refused, and incident {ref} was opened to investigate."))
+    return ref
 
 
 # ─── Behavioural rules ───────────────────────────────────────────────────────
@@ -249,7 +319,7 @@ def access_denied(cur, *, actor_id: str, actor_public_id: Optional[str], actor_r
     count = row["n"] if isinstance(row, dict) else row[0]
     if count < DENIAL_ALERT_THRESHOLD:
         return None
-    return raise_alert(
+    alert = raise_alert(
         cur, severity="MEDIUM", source=SOURCE_ACCESS_CONTROL, actor_id=actor_id,
         title=f"Repeated refused access — {actor_public_id or 'unknown actor'}",
         summary=(f"{actor_public_id or 'An actor'} was refused access {count} times in the "
@@ -257,6 +327,24 @@ def access_denied(cur, *, actor_id: str, actor_public_id: Optional[str], actor_r
                  "Repeated attempts on records one is not entitled to are an insider-threat "
                  "signal."),
         response="VERIFY", dedupe_minutes=DENIAL_WINDOW_MINUTES)
+    # Every patient whose record was refused to this actor in the window — the
+    # pattern, not only the latest attempt, is what they would want to know.
+    cur.execute(
+        """SELECT DISTINCT subject_patient_id AS pid FROM SecurityEvents
+            WHERE actor_id = %s AND event_type = 'ACCESS_DENIED'
+              AND subject_patient_id IS NOT NULL
+              AND occurred_at > NOW() - make_interval(mins => %s)""",
+        (actor_id, DENIAL_WINDOW_MINUTES))
+    patients = [r["pid"] if isinstance(r, dict) else r[0] for r in (cur.fetchall() or [])]
+    who = _display_name(cur, actor_id)
+    for pid in patients:
+        notify_patient(
+            cur, patient_id=str(pid), kind="SECURITY_ACCESS_REFUSED",
+            title="Repeated attempts to open your record were refused",
+            body=(f"{who} tried to open your record without your permission and was refused. "
+                  "Nothing was shown. The security team has been alerted; you can review "
+                  "who may access your records under Record Access."))
+    return alert
 
 
 FAILED_LOGIN_ALERT_THRESHOLD = 5
