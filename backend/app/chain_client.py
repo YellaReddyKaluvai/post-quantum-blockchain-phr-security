@@ -95,8 +95,8 @@ class ChainClient:
             self.supports_consent_status = False
             logger.error(
                 "PHR.sol at %s predates consentStatus(); on-chain consent cannot be verified "
-                "until it is redeployed (restart the chain and run start.sh, or "
-                "deploy_contract.py and update BLOCKCHAIN_CONTRACT_ADDRESS).", self.address)
+                "until it is replaced: run migrate_contract.py, which deploys the current "
+                "contract and carries consent over from this one's own state.", self.address)
 
         logger.info(
             "Chain client ready: %s @ %s (chain %s)",

@@ -117,7 +117,7 @@ if up 8545 && command -v forge >/dev/null 2>&1; then
   elif ! cast call 0x5FbDB2315678afecb367f032d93F642f64180aa3 "consentStatus(string,string)(uint8)" "" ""          --rpc-url http://127.0.0.1:8545 >/dev/null 2>&1; then
     # Deployed before consentStatus existed: the backend cannot verify consent
     # on-chain against it. anvil keeps state in memory, so a restart redeploys.
-    say "PHR.sol contract" "OUTDATED — run ./stop.sh && ./start.sh to redeploy"
+    say "PHR.sol contract" "OUTDATED — keep consent: cd backend && python migrate_contract.py (dry run, then --apply)"
   else
     say "PHR.sol contract" "already deployed"
   fi
