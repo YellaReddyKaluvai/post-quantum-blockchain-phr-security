@@ -27,6 +27,9 @@ pytestmark = pytest.mark.skipif(
     reason="end-to-end flow needs RUN_E2E=1, a disposable DATABASE_URL and liboqs")
 
 PASSWORD = "Str0ng-E2E-pass!"
+# CI runs the flow a second time against a local anvil chain with PHR.sol
+# deployed; these checks only make sense when a chain is really there.
+ON_CHAIN = os.getenv("BLOCKCHAIN_ENABLED", "false").lower() == "true"
 
 
 @pytest.fixture(scope="module")
@@ -85,11 +88,13 @@ def people(env):
     doctor_uuid, doctor_pub = _register_and_approve(env, "Doctor", admin,
                                                     specialization="Cardiology")
     _, tech_pub = _register_and_approve(env, "Lab Technician", admin)
+    _, nurse_pub = _register_and_approve(env, "Nurse", admin)
     return {
         "admin": admin,
         "patient": _login(env["client"], patient_pub), "patient_uuid": patient_uuid,
         "doctor": _login(env["client"], doctor_pub), "doctor_uuid": doctor_uuid,
         "tech": _login(env["client"], tech_pub),
+        "nurse": _login(env["client"], nurse_pub), "nurse_pub": nurse_pub,
     }
 
 
@@ -105,6 +110,7 @@ def _events(env, event_type, actor=None):
 def test_the_core_flow(env, people):
     c, db = env["client"], env["db"]
     P, D, T, A = people["patient"], people["doctor"], people["tech"], people["admin"]
+    N = people["nurse"]
     pid, did = people["patient_uuid"], people["doctor_uuid"]
 
     # ── 1–2. Without a relationship or consent, the doctor gets nothing ──────
@@ -125,11 +131,27 @@ def test_the_core_flow(env, people):
     assert any(x["request_id"] == request_id and x["status"] == "Pending" for x in pending)
     r = c.post(f"/api/patient/access-requests/{request_id}/approve", headers=P, json={})
     assert r.status_code == 200, r.text
+    if ON_CHAIN:
+        assert r.json()["consent_ledger"]["recorded_on"] == "ethereum"
 
     # ── 6–7. The backend now allows it — and only now ────────────────────────
     r = c.get(f"/api/doctor/patients/{pid}", headers=D)
     assert r.status_code == 200, r.text
     assert _events(env, "RECORD_ACCESS", did) >= 1
+
+    # ── Nursing access is a care-team relationship, delegated by the doctor ──
+    assert c.get(f"/api/nurse/patients/{pid}", headers=N).status_code == 403
+    assert c.get("/api/nurse/patients/search?q=E2E", headers=N).json() == []
+    r = c.post(f"/api/doctor/patients/{pid}/care-team", headers=D, json={
+        "nurse_id": people["nurse_pub"], "reason": "Post-procedure observations overnight",
+        "duration_hours": 24})
+    assert r.status_code == 200, r.text
+    assert c.get(f"/api/nurse/patients/{pid}", headers=N).status_code == 200
+    assert c.post(f"/api/nurse/patients/{pid}/vitals", headers=N,
+                  json={"heart_rate": 72, "spo2": 98}).status_code == 200
+    assert any(p["id"] == pid for p in c.get("/api/nurse/patients", headers=N).json())
+    team = c.get("/api/patient/care-team", headers=P).json()
+    assert [m["nurse_user_id"] for m in team] == [people["nurse_pub"]]
 
     # ── 8–9. Lab request reaches the laboratory ──────────────────────────────
     r = c.post("/api/doctor/requests", headers=D,
@@ -160,6 +182,12 @@ def test_the_core_flow(env, people):
     assert str(row["patient_id"]) == pid                       # bound to the right patient
     assert row["encrypted_document"] and row["digital_signature"]
     assert b"%PDF" not in row["encrypted_document"].encode()   # only ciphertext at rest
+    if ON_CHAIN:
+        assert report["anchored_on"] != "local-simulated" and report["blockchain_tx_hash"]
+    if os.getenv("IPFS_API_URL"):
+        # What IPFS holds is exactly the ciphertext — never the report itself.
+        from app.storage_service import fetch_from_ipfs
+        assert fetch_from_ipfs(report["ipfs_cid"]) == row["encrypted_document"].encode("utf-8")
     assert _events(env, "LAB_REPORT_UPLOADED") >= 1
 
     # ── 14. Patient notified ─────────────────────────────────────────────────
@@ -171,6 +199,8 @@ def test_the_core_flow(env, people):
     assert r.status_code == 200 and r.content.startswith(b"%PDF")
     v = c.get(f"/api/patient/lab-reports/{report['report_id']}/verify", headers=P).json()
     assert v["hash_matches"] is True and v["signature_valid"] is True
+    if ON_CHAIN:
+        assert v["blockchain_verified"] is True        # digest read back from the contract
     assert c.get(f"/api/doctor/reports/{report['report_id']}/download", headers=D).status_code == 200
 
     # ── Integrity: a changed digest is withheld and becomes an incident ──────
@@ -191,6 +221,25 @@ def test_the_core_flow(env, people):
         assert c.get(f"/api/doctor/patients/{pid}", headers=D).status_code == 403
     assert db.execute("SELECT COUNT(*) AS n FROM SecurityAlerts WHERE source = 'ACCESS_CONTROL' "
                       "AND actor_id = %s", (did,)).fetchone()["n"] >= 1
+    # …and the nurse that doctor brought in loses access with them.
+    assert c.get(f"/api/nurse/patients/{pid}", headers=N).status_code == 403
+
+    # Asking again does not lift the withdrawal: it stands until the patient decides.
+    r = c.post("/api/doctor/access-requests", headers=D, json={
+        "patient_id": pid, "purpose": "Requesting renewed access for post-procedure follow-up."})
+    assert r.status_code == 200, r.text
+    assert c.get(f"/api/doctor/patients/{pid}", headers=D).status_code == 403
+
+    if ON_CHAIN:
+        # Someone with SQL access restores the doctor's consent behind the
+        # application's back. The contract still records the withdrawal.
+        db.execute("UPDATE Consent SET status = 'Authorized', prior_refusal = FALSE "
+                   "WHERE patient_id = %s AND subject_user_id = %s", (pid, did))
+        assert c.get(f"/api/doctor/patients/{pid}", headers=D).status_code == 403
+        assert db.execute("SELECT COUNT(*) AS n FROM SecurityIncidents "
+                          "WHERE event_type = 'CONSENT_LEDGER_MISMATCH'").fetchone()["n"] >= 1
+        db.execute("UPDATE Consent SET status = 'Pending', prior_refusal = TRUE "
+                   "WHERE patient_id = %s AND subject_user_id = %s", (pid, did))
 
     # ── Emergency access: identity-verified, recorded, reviewed ──────────────
     r = c.post("/api/doctor/emergency-access", headers=D, json={
@@ -202,9 +251,13 @@ def test_the_core_flow(env, people):
         "duration_hours": 1, "password": PASSWORD})
     assert r.status_code == 200, r.text
     assert r.json()["incident_ref"].startswith("INC-")
+    if ON_CHAIN:
+        assert r.json()["contract_tx_hash"]          # PHR.sol emergencyAccess()
     assert c.get(f"/api/doctor/patients/{pid}", headers=D).status_code == 200
     notes = c.get("/api/patient/notifications", headers=P).json()
     assert any(n["notification_type"] == "EMERGENCY_ACCESS" for n in notes)
+    # Break-glass is personal: it does not reopen the chart to the nurse.
+    assert c.get(f"/api/nurse/patients/{pid}", headers=N).status_code == 403
 
     # ── AI / security monitoring and incident handling ───────────────────────
     for event in ("LOGIN_SUCCESS", "RECORD_ACCESS", "CONSENT_EVENT", "EMERGENCY_ACCESS",
@@ -223,7 +276,7 @@ def test_the_core_flow(env, people):
     # ── Audit trail ──────────────────────────────────────────────────────────
     actions = {r["action"] for r in db.execute("SELECT DISTINCT action FROM AdminAuditLogs").fetchall()}
     assert {"ACCESS_APPROVED", "LAB_TEST_REQUESTED", "LAB_REPORT_FINALIZED",
-            "CONSENT_REVOKED", "EMERGENCY_ACCESS_DECLARED"} <= actions
+            "CONSENT_REVOKED", "EMERGENCY_ACCESS_DECLARED", "CARE_TEAM_ASSIGNED"} <= actions
 
 
 def test_failed_sign_ins_reach_the_detector_and_alert(env, people):

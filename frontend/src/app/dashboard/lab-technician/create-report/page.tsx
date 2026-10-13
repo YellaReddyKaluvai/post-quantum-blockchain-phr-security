@@ -63,7 +63,6 @@ interface RequestDetail {
   doctor?: { full_name?: string; user_id?: string; specialization?: string } | null;
 }
 
-type SecurityStep = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 
 export default function CreateReportPage() {
   const params = useSearchParams();
@@ -78,9 +77,13 @@ export default function CreateReportPage() {
   const [loadError, setLoadError] = useState("");
 
   const [submitting, setSubmitting] = useState(false);
-  const [securityStep, setSecurityStep] = useState<SecurityStep>(0);
   const [submitError, setSubmitError] = useState("");
-  const [result, setResult] = useState<{ report_no: string; document_hash: string; blockchain_tx_hash?: string } | null>(null);
+  // Exactly what the server reports it did — nothing here is inferred or animated.
+  const [result, setResult] = useState<{
+    report_no: string; document_hash: string; blockchain_tx_hash?: string | null;
+    anchored_on?: string | null; signature_algorithm?: string | null; kem_algorithm?: string | null;
+    ipfs_cid?: string | null; s3_key?: string | null; notified?: string[];
+  } | null>(null);
 
   const load = useCallback(async () => {
     if (!reqId) {
@@ -143,38 +146,25 @@ export default function CreateReportPage() {
   const filledCount = allAnalytes.filter((a) => (values[a.key] || "").trim() !== "").length;
   const canSubmit = !!panel && !!reqId && filledCount > 0 && !submitting;
 
+  // The whole pipeline runs on the server in this one request. The modal used
+  // to step through "hashing… AES… ML-KEM…" on client-side timers before the
+  // request was even sent — progress that was not happening. It now says what
+  // is running, and the result screen shows only what the server returned.
   const handleFinalize = async () => {
-    if (!reqId || !panel) return;
+    if (!reqId || !panel || submitting) return;
     setSubmitError("");
     setSubmitting(true);
-    setSecurityStep(1); // Rendering the report
     try {
-      await new Promise((r) => setTimeout(r, 350));
-      setSecurityStep(2); // Hashing
-      await new Promise((r) => setTimeout(r, 300));
-      setSecurityStep(3); // AES-256-GCM
-      await new Promise((r) => setTimeout(r, 300));
-      setSecurityStep(4); // ML-KEM
-      await new Promise((r) => setTimeout(r, 300));
-      setSecurityStep(5); // ML-DSA
-
       const res = await createStructuredLabReport({
         request_id: reqId,
         panel_code: panel.code,
         values,
         remarks: remarks || undefined,
       });
-
-      setSecurityStep(6); // Done
-      setResult({
-        report_no: res.report_no,
-        document_hash: res.document_hash,
-        blockchain_tx_hash: res.blockchain_tx_hash,
-      });
+      setResult(res);
     } catch (e) {
       console.error(e);
       setSubmitError(e instanceof Error ? e.message : "Failed to finalize the report.");
-      setSecurityStep(0);
     } finally {
       setSubmitting(false);
     }
@@ -215,10 +205,17 @@ export default function CreateReportPage() {
           {panel?.short_name} report <span className="font-mono font-semibold text-slate-700">{result.report_no}</span> has
           been signed, encrypted and stored. The patient and referring doctor have been notified.
         </p>
-        <div className="mt-6 text-left bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs font-mono text-slate-600 break-all">
-          SHA-256: {result.document_hash}
-          {result.blockchain_tx_hash && <><br />Audit Tx: {result.blockchain_tx_hash}</>}
-        </div>
+        <dl className="mt-6 text-left bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs text-slate-600 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 break-all">
+          <dt className="font-semibold text-slate-500">SHA-256</dt><dd className="font-mono">{result.document_hash}</dd>
+          <dt className="font-semibold text-slate-500">Signature</dt><dd>{result.signature_algorithm ?? "—"}</dd>
+          <dt className="font-semibold text-slate-500">Key protection</dt><dd>AES-256-GCM, key encapsulated with {result.kem_algorithm ?? "—"}</dd>
+          <dt className="font-semibold text-slate-500">Anchored</dt>
+          <dd>{result.anchored_on === "local-simulated"
+            ? "locally only — no blockchain was reachable"
+            : <>{result.anchored_on} · <span className="font-mono">{result.blockchain_tx_hash}</span></>}</dd>
+          <dt className="font-semibold text-slate-500">Cloud copy</dt><dd>{result.s3_key ? "encrypted copy stored in S3" : "database only (S3 not configured)"}</dd>
+          <dt className="font-semibold text-slate-500">IPFS</dt><dd className="font-mono">{result.ipfs_cid ?? "—"}</dd>
+        </dl>
         <div className="mt-6 flex justify-center gap-3">
           <button
             onClick={() => router.push("/dashboard/lab-technician/reports")}
@@ -316,8 +313,9 @@ export default function CreateReportPage() {
           )}
 
         <div className="pt-4 border-t border-slate-100">
-          <label className="block text-sm font-medium text-slate-700 mb-1">Technical Remarks (Optional)</label>
+          <label htmlFor="report-remarks" className="block text-sm font-medium text-slate-700 mb-1">Technical Remarks (Optional)</label>
           <textarea
+            id="report-remarks"
             rows={3}
             value={remarks}
             onChange={(e) => setRemarks(e.target.value)}
@@ -350,24 +348,20 @@ export default function CreateReportPage() {
             <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
               className="relative bg-white rounded-2xl shadow-2xl p-8 max-w-sm w-full overflow-hidden">
-              <div className="absolute top-0 left-0 w-full h-1 bg-slate-100">
-                <motion.div className="h-full bg-cyan-500" initial={{ width: "0%" }}
-                  animate={{ width: `${(securityStep / 6) * 100}%` }} transition={{ duration: 0.4 }} />
-              </div>
               <div className="text-center mb-6">
                 <div className="w-16 h-16 mx-auto bg-cyan-50 rounded-2xl flex items-center justify-center mb-4 border border-cyan-100">
-                  {securityStep < 6 ? <Shield className="w-8 h-8 text-cyan-500 animate-pulse" /> : <CheckCircle className="w-8 h-8 text-emerald-500" />}
+                  <Loader2 className="w-8 h-8 text-cyan-500 animate-spin" />
                 </div>
                 <h3 className="text-lg font-bold text-slate-800">Securing Report</h3>
-                <p className="text-xs text-slate-500 mt-1">Hybrid Post-Quantum Cryptography Pipeline</p>
+                <p className="text-xs text-slate-500 mt-1">Running on the server, in one request:</p>
               </div>
-              <div className="space-y-4 text-sm">
-                <Step icon={Hospital} label="Rendering Hospital-Format Document" active={securityStep === 1} done={securityStep > 1} />
-                <Step icon={Fingerprint} label="SHA-256 Document Hashing" active={securityStep === 2} done={securityStep > 2} />
-                <Step icon={Lock} label="AES-256-GCM Encryption" active={securityStep === 3} done={securityStep > 3} />
-                <Step icon={Shield} label="ML-KEM-768 Key Encapsulation" active={securityStep === 4} done={securityStep > 4} />
-                <Step icon={Fingerprint} label="ML-DSA-65 Digital Signature" active={securityStep === 5} done={securityStep > 5} />
-              </div>
+              <ul className="space-y-3 text-sm text-slate-600">
+                <Step icon={Hospital} label="Render the hospital-format document" />
+                <Step icon={Fingerprint} label="SHA-256 digest of the document" />
+                <Step icon={Lock} label="AES-256-GCM encryption" />
+                <Step icon={Shield} label="ML-KEM-768 encapsulation of the AES key" />
+                <Step icon={Fingerprint} label="ML-DSA-65 signature over the digest" />
+              </ul>
             </motion.div>
           </div>
         )}
@@ -376,14 +370,14 @@ export default function CreateReportPage() {
   );
 }
 
-function Step({ icon: Icon, label, active, done }: { icon: React.ElementType; label: string; active: boolean; done: boolean }) {
+function Step({ icon: Icon, label }: { icon: React.ElementType; label: string }) {
   return (
-    <div className="flex items-center gap-3">
-      <div className={`w-6 h-6 rounded-full flex items-center justify-center ${done ? "bg-emerald-100 text-emerald-600" : active ? "bg-cyan-100 text-cyan-600" : "bg-slate-100 text-slate-400"}`}>
-        {done ? <CheckCircle className="w-4 h-4" /> : active ? <Loader2 className="w-4 h-4 animate-spin" /> : <Icon className="w-4 h-4" />}
-      </div>
-      <span className={done ? "text-slate-800 font-medium" : active ? "text-cyan-700 font-semibold" : "text-slate-400"}>{label}</span>
-    </div>
+    <li className="flex items-center gap-3">
+      <span className="w-6 h-6 rounded-full flex items-center justify-center bg-cyan-50 text-cyan-600">
+        <Icon className="w-4 h-4" />
+      </span>
+      {label}
+    </li>
   );
 }
 
@@ -396,8 +390,9 @@ function refDisplay(analyte: Analyte): string {
 
 function AnalyteInput({ analyte, value, onChange }: { analyte: Analyte; value: string; onChange: (k: string, v: string) => void }) {
   const ref = refDisplay(analyte);
+  const id = `analyte-${analyte.key}`;
   const label = (
-    <label className={`block text-sm font-medium text-slate-700 mb-1 ${analyte.indent ? "pl-4" : ""}`}>
+    <label htmlFor={id} className={`block text-sm font-medium text-slate-700 mb-1 ${analyte.indent ? "pl-4" : ""}`}>
       {analyte.name} {analyte.computed && <span className="text-[10px] text-slate-400 font-normal">(auto-calculated if left blank)</span>}
     </label>
   );
@@ -407,6 +402,7 @@ function AnalyteInput({ analyte, value, onChange }: { analyte: Analyte; value: s
       <div>
         {label}
         <select
+          id={id}
           value={value}
           onChange={(e) => onChange(analyte.key, e.target.value)}
           className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-500"
@@ -424,6 +420,7 @@ function AnalyteInput({ analyte, value, onChange }: { analyte: Analyte; value: s
       {label}
       <div className="flex gap-2 items-center">
         <input
+          id={id}
           type={analyte.input === "number" ? "number" : "text"}
           step={analyte.step || "any"}
           value={value}

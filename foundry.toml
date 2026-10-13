@@ -3,6 +3,7 @@
 # default src/, so the repo layout is unchanged.
 [profile.default]
 src = "contracts"
+test = "test"
 out = "contracts/out"
 libs = []
 solc_version = "0.8.20"

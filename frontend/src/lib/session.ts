@@ -161,7 +161,7 @@ export async function register(data: Record<string, unknown>) {
   });
   if (!response.ok) {
     const err = await response.json().catch(() => null);
-    throw new Error(err?.detail || "Registration failed");
+    throw new Error(extractErrorDetail(err, "Registration failed"));
   }
   return response.json();
 }
@@ -174,7 +174,7 @@ export async function login(user_id: string, password: string) {
   });
   if (!response.ok) {
     const err = await response.json().catch(() => null);
-    throw new Error(err?.detail || "Login failed");
+    throw new Error(extractErrorDetail(err, "Login failed"));
   }
   return response.json();
 }
@@ -304,7 +304,7 @@ export async function resendEmail(notificationId: string) {
   });
   if (!response.ok) {
     const err = await response.json().catch(() => null);
-    throw new Error(err?.detail || "Failed to resend email");
+    throw new Error(extractErrorDetail(err, "Failed to resend email"));
   }
   return response.json();
 }
@@ -341,7 +341,7 @@ export async function downloadPatientLabReport(id: string) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/lab-reports/${id}/download`);
   if (!response.ok) {
     const err = await response.json().catch(() => null);
-    throw new Error(err?.detail || "Failed to securely decrypt and download lab report");
+    throw new Error(extractErrorDetail(err, "Failed to securely decrypt and download lab report"));
   }
   return response.blob();
 }
@@ -448,7 +448,7 @@ export async function createPatientAppointment(data: {
   });
   if (!response.ok) {
     const err = await response.json().catch(() => null);
-    throw new Error(err?.detail?.[0]?.msg || err?.detail || "Failed to book appointment");
+    throw new Error(extractErrorDetail(err, "Failed to book appointment"));
   }
   return response.json();
 }
@@ -582,7 +582,7 @@ export async function downloadDoctorLabReport(id: string) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/reports/${id}/download`);
   if (!response.ok) {
     const err = await response.json().catch(() => null);
-    throw new Error(err?.detail || "Failed to securely decrypt and download lab report");
+    throw new Error(extractErrorDetail(err, "Failed to securely decrypt and download lab report"));
   }
   return response.blob();
 }
@@ -800,6 +800,114 @@ export async function clearLabNotifications() {
   return response.json();
 }
 
+// ─── Zero-knowledge consent proof (the token stays in this browser) ─────────
+
+export interface CollectedConsentToken {
+  consent_token: string;
+  commitment: string;
+  scheme: string;
+  post_quantum_secure: boolean;
+}
+
+export async function collectConsentToken(patientId: string): Promise<CollectedConsentToken> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/consent-token/${patientId}`);
+  return jsonOrThrow(response, "Failed to collect the consent token");
+}
+
+export async function requestZkpChallenge(patientId: string): Promise<{ challenge: string; context: string; scheme: string }> {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/doctor/zkp/challenge?patient_id=${encodeURIComponent(patientId)}`, { method: "POST" });
+  return jsonOrThrow(response, "Failed to get a challenge");
+}
+
+export async function submitZkpProof(body: { challenge: string; scheme: string; proof: string }) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/zkp/verify`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return jsonOrThrow(response, "Proof verification failed");
+}
+
+// ─── Care team: which nurses may open a patient's chart ─────────────────────
+
+export interface CareTeamMember {
+  id: string;
+  patient_id: string;
+  patient_user_id?: string | null;
+  patient_name?: string | null;
+  nurse_id: string;
+  nurse_user_id?: string | null;
+  nurse_name?: string | null;
+  assigned_by_name?: string | null;
+  assigned_by_role: string;
+  reason: string;
+  created_at: string;
+  expires_at?: string | null;
+}
+
+export interface CareTeamAssignment {
+  nurse_id: string;
+  reason: string;
+  duration_hours?: number | null;
+  /** Administrator form only. */
+  patient_id?: string;
+}
+
+async function jsonOrThrow(response: Response, fallback: string) {
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, fallback));
+  }
+  return response.json();
+}
+
+export async function searchNurses(query: string): Promise<{ id: string; user_id: string; full_name: string }[]> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/nurses?q=${encodeURIComponent(query)}`);
+  return jsonOrThrow(response, "Failed to search nurses");
+}
+
+export async function getPatientCareTeam(patientId: string): Promise<CareTeamMember[]> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${patientId}/care-team`);
+  return jsonOrThrow(response, "Failed to load the care team");
+}
+
+export async function assignCareTeamNurse(patientId: string, data: CareTeamAssignment): Promise<CareTeamMember> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/patients/${patientId}/care-team`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+  return jsonOrThrow(response, "Failed to add the nurse");
+}
+
+export async function endCareTeamAssignment(patientId: string, assignmentId: string) {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/doctor/patients/${patientId}/care-team/${assignmentId}/end`, { method: "POST" });
+  return jsonOrThrow(response, "Failed to remove the nurse");
+}
+
+export async function getAdminCareTeams(query = ""): Promise<CareTeamMember[]> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/care-team?q=${encodeURIComponent(query)}`);
+  return jsonOrThrow(response, "Failed to load care teams");
+}
+
+export async function adminAssignCareTeam(data: CareTeamAssignment & { patient_id: string }): Promise<CareTeamMember> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/care-team`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+  return jsonOrThrow(response, "Failed to assign the nurse");
+}
+
+export async function adminEndCareTeam(assignmentId: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/care-team/${assignmentId}/end`, { method: "POST" });
+  return jsonOrThrow(response, "Failed to end the assignment");
+}
+
+export async function getMyCareTeam(): Promise<CareTeamMember[]> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/care-team`);
+  return jsonOrThrow(response, "Failed to load your care team");
+}
+
 // ─── Nurse ────────────────────────────────────────────────────────────────
 
 export async function getNurseProfile() {
@@ -828,8 +936,8 @@ export async function searchNursePatients(query: string) {
 
 export async function getNursePatientDetail(id: string) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/nurse/patients/${id}`);
-  if (!response.ok) throw new Error("Failed to fetch patient details");
-  return response.json();
+  // A 403 explains which care-team assignment is missing; show it, not a generic error.
+  return jsonOrThrow(response, "Failed to fetch patient details");
 }
 
 export async function recordPatientVitals(patientId: string, data: Record<string, unknown>) {
