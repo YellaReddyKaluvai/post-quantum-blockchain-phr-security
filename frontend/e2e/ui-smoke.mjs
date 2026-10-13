@@ -8,21 +8,146 @@
 //   3. No request ever carries the token as a Bearer header; every state change
 //      carries the CSRF header.
 //   4. After logout the very same cookie is refused by the API.
+//   5. A doctor protects a consent token with a passkey — a virtual authenticator
+//      standing in for Touch ID — and proves consent with it. What is stored is
+//      ciphertext under a key the authenticator holds: no passphrase is typed,
+//      and the token itself is nowhere in browser storage.
 //
 // Env: UI_URL (default http://localhost:3000), API_URL (default http://localhost:8001),
-//      UI_ADMIN_ID, UI_ADMIN_PASSWORD. Run it from a directory where `playwright` is installed.
+//      UI_ADMIN_ID, UI_ADMIN_PASSWORD, UI_DOCTOR_ID, UI_PATIENT_UUID, UI_PASSWORD.
+//      Run it from a directory where `playwright` is installed.
 import { chromium } from "playwright";
 
 const UI = process.env.UI_URL || "http://localhost:3000";
 const API = process.env.API_URL || "http://localhost:8001";
 const ADMIN = process.env.UI_ADMIN_ID;
 const PASSWORD = process.env.UI_ADMIN_PASSWORD;
+const DOCTOR = process.env.UI_DOCTOR_ID;
+const PATIENT = process.env.UI_PATIENT_UUID;
 
 let failures = 0;
 const check = (ok, what) => {
   console.log(`${ok ? "ok  " : "FAIL"} ${what}`);
   if (!ok) failures += 1;
 };
+
+/**
+ * The doctor's consent token, sealed by an authenticator rather than a typed
+ * passphrase. Chrome's virtual authenticator stands in for the hardware; the
+ * WebAuthn PRF extension is what yields the key, so if this build of Chromium
+ * cannot offer PRF the checks say so instead of passing quietly.
+ */
+async function signInAsDoctor(page) {
+  await page.goto(`${UI}/login`);
+  await page.fill('input[placeholder="PAT-2026-000001"]', DOCTOR);
+  await page.fill('input[type="password"]', PASSWORD);
+  await page.press('input[type="password"]', "Enter");
+  await page.waitForURL(/\/dashboard\/doctor/);
+  await page.goto(`${UI}/dashboard/doctor/patients/${PATIENT}`);
+}
+
+async function passkeyChecks(browser) {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  page.setDefaultTimeout(20_000);
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  let authenticator;
+  try {
+    ({ authenticatorId: authenticator } = await cdp.send("WebAuthn.addVirtualAuthenticator", {
+      options: {
+        protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal",
+        hasResidentKey: true, hasUserVerification: true, hasPrf: true,
+        isUserVerified: true, automaticPresenceSimulation: true,
+      },
+    }));
+  } catch (error) {
+    console.log(`FAIL this Chromium cannot provide a PRF-capable authenticator: ${error.message}`);
+    failures += 1;
+    await context.close();
+    return;
+  }
+
+  try {
+    await signInAsDoctor(page);
+    const passkeyOption = page.getByTestId("protect-with-passkey");
+    await passkeyOption.waitFor();
+    check(true, "the passkey option is offered where the device has an authenticator");
+    await passkeyOption.click();
+    await page.getByRole("button", { name: "Collect consent token" }).click();
+
+    const protection = page.getByTestId("token-protection");
+    await protection.waitFor();
+    check((await protection.textContent()).includes("protected by a passkey"),
+      "the token is sealed by the passkey, not a passphrase");
+
+    const stored = await page.evaluate(() => {
+      const key = Object.keys(localStorage).find((k) => k.startsWith("quantumcare.zkp."));
+      return JSON.parse(localStorage.getItem(key));
+    });
+    check(stored.sealed && stored.sealed.kdf === "WebAuthn-PRF" && stored.sealed.credentialId.length > 0,
+      "what is stored names the authenticator credential, not a passphrase KDF");
+    check(!("token" in stored) && !JSON.stringify(stored).includes("mlwe1:" + "0".repeat(8)),
+      "the token itself is not in browser storage");
+
+    // Reload: the key is gone from memory and must come back from the authenticator.
+    await page.reload();
+    await page.getByRole("button", { name: "Prove consent" }).click();
+    await page.getByText("Consent proven").waitFor();
+    check(true, "after a reload the authenticator unlocks it and the proof verifies");
+
+    // Without the authenticator the token cannot be opened at all.
+    await cdp.send("WebAuthn.removeVirtualAuthenticator", { authenticatorId: authenticator });
+    await page.reload();
+    await page.getByRole("button", { name: "Prove consent" }).click();
+    // Nothing to answer the prompt: the proof cannot complete, and the token
+    // stays sealed. (The browser waits out its own WebAuthn timeout.)
+    await page.waitForTimeout(5_000);
+    check(!(await page.getByText("Consent proven").isVisible()),
+      "with the authenticator gone the token stays sealed");
+
+    // An authenticator that cannot hold a key: said plainly, before anything is stored.
+    const plain = await browser.newContext();
+    const plainPage = await plain.newPage();
+    plainPage.setDefaultTimeout(20_000);
+    const plainCdp = await plain.newCDPSession(plainPage);
+    await plainCdp.send("WebAuthn.enable");
+    await plainCdp.send("WebAuthn.addVirtualAuthenticator", { options: {
+      protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true,
+      isUserVerified: true, automaticPresenceSimulation: true } });          // no PRF
+    await signInAsDoctor(plainPage);
+    await plainPage.getByTestId("protect-with-passkey").click();
+    await plainPage.getByRole("button", { name: "Collect consent token" }).click();
+    const refusal = plainPage.locator("p[role=alert]");
+    await refusal.waitFor();
+    check((await refusal.textContent()).includes("passphrase"),
+      "an authenticator that cannot hold a key says so and points to a passphrase");
+    check(await plainPage.evaluate(
+      () => Object.keys(localStorage).filter((k) => k.startsWith("quantumcare.zkp.")).length === 0),
+      "and nothing half-protected is stored");
+
+    // The passphrase path is untouched by any of this.
+    await plainPage.getByTestId("protect-with-passphrase").click();
+    await plainPage.fill("#zkp-pass", "fallback-phrase");
+    await plainPage.fill("#zkp-pass2", "fallback-phrase");
+    await plainPage.getByRole("button", { name: "Collect consent token" }).click();
+    await plainPage.getByTestId("token-protection").waitFor();
+    check((await plainPage.getByTestId("token-protection").textContent()).includes("under a passphrase"),
+      "choosing a passphrase still protects the token");
+    await plainPage.reload();
+    await plainPage.fill("#zkp-unlock", "fallback-phrase");
+    await plainPage.getByRole("button", { name: "Prove consent" }).click();
+    await plainPage.getByText("Consent proven").waitFor();
+    check(true, "and the passphrase still proves consent");
+    await plain.close();
+  } catch (error) {
+    console.error(error);
+    await page.screenshot({ path: "/tmp/ui-smoke-passkey-failure.png", fullPage: true }).catch(() => {});
+    failures += 1;
+  } finally {
+    await context.close();
+  }
+}
 
 (async () => {
   const browser = await chromium.launch();
@@ -95,6 +220,9 @@ const check = (ok, what) => {
     const replay = await fresh.request.get(`${API}/api/auth/me`);
     check(replay.status() === 401, `the logged-out cookie, replayed, is refused (HTTP ${replay.status()})`);
     await fresh.close();
+    // ── 5. A consent token protected by a passkey ────────────────────────────
+    if (DOCTOR && PATIENT) await passkeyChecks(browser);
+    else console.log("skip  passkey checks (UI_DOCTOR_ID / UI_PATIENT_UUID not set)");
   } catch (error) {
     console.error(error);
     await page.screenshot({ path: "/tmp/ui-smoke-failure.png", fullPage: true }).catch(() => {});
