@@ -91,8 +91,10 @@ def test_consent_moves_from_an_outdated_contract_and_the_chain_wins():
     assert (carried[consent["D1"]], carried[consent["D2"]], carried[consent["D3"]]) == (True, False, False)
     assert consent["D3"] in plan["disagree"] and consent["D1"] not in plan["disagree"]
 
-    done = migrate(legacy_address, apply=True, say=lambda *_: None)
-    assert done["status"] == "migrated" and legacy_address in done["previous"]
+    said: list[str] = []
+    done = migrate(legacy_address, apply=True, say=said.append)
+    assert done["status"] == "migrated", " | ".join(said)
+    assert legacy_address in done["previous"]
     new = web3.eth.contract(address=done["new_address"], abi=load_contract_artifact()["abi"])
     states = [new.functions.consentStatus(party_ref(str(ids["P"])), party_ref(str(ids[d]))).call()
               for d in ("D1", "D2", "D3")]
