@@ -49,7 +49,7 @@ from app import federated_classifier as fed_clf
 from app.database import get_db, init_db
 from app.security import (
     hash_password, verify_password, encrypt_data, decrypt_data,
-    create_session_token, get_current_session, require_role, require_permission,
+    create_session_token, verify_session_token, get_current_session, require_role, require_permission,
     SESSION_COOKIE_NAME
 )
 from app.crypto_service import (
@@ -81,7 +81,9 @@ app = FastAPI(title="PQC Hospital IAM API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # Only the configured frontends. With credentials allowed, "*" would let any
+    # website a signed-in user visits call this API as them and read the replies.
+    allow_origins=[o.strip().rstrip("/") for o in get_settings().CORS_ORIGINS.split(",") if o.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -257,13 +259,14 @@ def login(request: LoginRequest, response: Response):
                 "full_name": user["full_name"]
             }
             token, expires_at = create_session_token(token_payload)
-            
-            # Store session
+
+            # Store the session; its jti is what logout revokes.
             cur.execute("""
-                INSERT INTO Sessions (user_id, token_hash, role, expires_at)
-                VALUES (%s, %s, %s, %s)
-            """, (user["id"], hash_password(token), user["role"], expires_at))
-            
+                INSERT INTO Sessions (user_id, token_hash, role, expires_at, jti)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (user["id"], hashlib.sha256(token.encode()).hexdigest(), user["role"], expires_at,
+                  verify_session_token(token)["jti"]))
+
             # Log successful login
             cur.execute("INSERT INTO AuthLogs (user_id, public_user_id, action) VALUES (%s, %s, %s)",
                         (user["id"], user["user_id"], "LOGIN_SUCCESS"))
@@ -271,11 +274,19 @@ def login(request: LoginRequest, response: Response):
                 cur, actor_id=str(user["id"]), actor_public_id=user["user_id"],
                 actor_role=user["role"], event_type="LOGIN_SUCCESS", resource="login")
             conn.commit()
-            
-    response.set_cookie(SESSION_COOKIE_NAME, token, httponly=True, secure=False, samesite="lax", path="/")
-    
+
+    # HttpOnly: no page script, injected or not, can read it. The browser
+    # frontend relies on this cookie alone; access_token in the body is for API
+    # clients (scripts, other hospitals' servers, tests) that send a Bearer header.
+    settings = get_settings()
+    samesite = settings.SESSION_COOKIE_SAMESITE if settings.SESSION_COOKIE_SAMESITE in (
+        "lax", "strict", "none") else "lax"
+    response.set_cookie(SESSION_COOKIE_NAME, token, httponly=True,
+                        secure=settings.SESSION_COOKIE_SECURE or samesite == "none",
+                        samesite=samesite, path="/", max_age=settings.access_token_minutes * 60)
+
     permissions = list(get_permissions_for_role(user["role"]))
-    
+
     return {
         "access_token": token,
         "user_id": str(user["id"]),
@@ -291,8 +302,10 @@ def logout(response: Response, session: dict = Depends(get_current_session)):
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("INSERT INTO AuthLogs (user_id, action) VALUES (%s, %s)", (session["user_id"], "LOGOUT"))
+            # Revoke this session: the token stops working now, not at expiry.
+            cur.execute("UPDATE Sessions SET is_active = FALSE WHERE jti = %s", (session.get("jti"),))
             conn.commit()
-            
+
     response.delete_cookie(SESSION_COOKIE_NAME, path="/")
     return {"status": "success"}
 
@@ -907,7 +920,8 @@ def get_blockchain_status(session: dict = Depends(require_role("Administrator"))
             cur.execute("""
                 SELECT COUNT(*) AS total,
                        COUNT(*) FILTER (WHERE anchored_on <> 'local-simulated') AS on_chain,
-                       COUNT(*) FILTER (WHERE anchored_on = 'local-simulated') AS simulated
+                       COUNT(*) FILTER (WHERE anchored_on = 'local-simulated') AS simulated,
+                       COUNT(*) FILTER (WHERE reanchored_at IS NOT NULL) AS anchored_late
                 FROM DocumentAnchors
             """)
             counts = cur.fetchone()
@@ -923,6 +937,7 @@ def get_blockchain_status(session: dict = Depends(require_role("Administrator"))
         "total": counts["total"],
         "on_chain": counts["on_chain"],
         "simulated": counts["simulated"],
+        "anchored_late": counts["anchored_late"],
     }
     chain_info["recent_anchors"] = [{
         "document_type": r["document_type"],
@@ -935,6 +950,22 @@ def get_blockchain_status(session: dict = Depends(require_role("Administrator"))
     } for r in recent]
 
     return chain_info
+
+
+@app.post("/api/admin/blockchain/reanchor")
+def reanchor_local_anchors(session: dict = Depends(require_role("Administrator"))):
+    """Write on-chain, now, the anchors that were only simulated locally.
+
+    Labelled as late, on the chain and in the row: a late anchor proves the
+    digest existed by its block, not at the original time.
+    """
+    from app import anchor_service
+    with get_db() as conn:
+        result = anchor_service.reanchor_local(conn)
+        log_admin_action(conn, session["user_id"], session.get("public_user_id"),
+                         "ANCHORS_REANCHORED", details={"anchored": result["anchored"]})
+        conn.commit()
+    return result
 
 
 # ─── Patient Dashboard Endpoints ─────────────────────────────────────────────
@@ -3565,7 +3596,7 @@ def _verify_against_chain(report: dict) -> Optional[bool]:
         receipt = client.web3.eth.get_transaction_receipt(tx_hash)
         # The contract emits AuditLogged(userUUID, actionType, resourceHash, ts);
         # resourceHash is the document digest we anchored.
-        events = client.contract.events.AuditLogged().process_receipt(receipt)
+        events = client.audit_events(receipt)          # our contract(s) only
         if not events:
             return False
         return any(e["args"]["resourceHash"] == report.get("document_hash") for e in events)
@@ -5228,7 +5259,7 @@ def _federated_round(cur) -> dict:
 
     local_baselines = aisec.fit_role_baselines(windows)
     previous = _latest_global_classifier(cur)
-    local_classifier, local_training = federation.train_for_submission(cur, previous)
+    local_classifier, local_training = federation.train_for_submission(cur, previous, purpose="hub_round")
     local_params = aisec.role_parameters(local_baselines, local_classifier)
     local_samples = len(windows)
     rnd = _open_round(cur)
@@ -5553,6 +5584,7 @@ def federated_classifier_status(session: dict = Depends(require_role("Administra
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             examples = federation.load_labels(cur)
+            spent = federation.privacy_spent(cur)
             in_use, in_use_label = risk_engine._choose_classifier(
                 cur, *risk_engine.usable_federated_model(cur))
     threats = sum(1 for _, y in examples if y)
@@ -5565,7 +5597,15 @@ def federated_classifier_status(session: dict = Depends(require_role("Administra
         "local_fit": local_fit,
         "in_use": ({"label": in_use_label, **in_use.to_parameters()} if in_use else None),
         "privacy": {"clip": fed_clf.DEFAULT_CLIP, "dp_epsilon": federation.dp_epsilon(),
-                    "note": ("Gaussian mechanism per round on the clipped update; rounds compose."
+                    "spent": spent,
+                    "note": ("Gaussian mechanism per round on the clipped update, composed across "
+                             "rounds by zCDP: " + (
+                                 f"ε={spent['epsilon_total']} spent at δ={spent['delta']}"
+                                 if spent["epsilon_total"] is not None else
+                                 f"{spent['releases_without_noise']} earlier release(s) had no noise, "
+                                 "so no overall guarantee holds")
+                             + (f" (budget {spent['budget_epsilon']})" if spent["budget_epsilon"] else "")
+                             + "."
                              if federation.dp_epsilon() else
                              "Updates are clipped; differential-privacy noise is off "
                              "(set FEDERATION_DP_EPSILON).")},

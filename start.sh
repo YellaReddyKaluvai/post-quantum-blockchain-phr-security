@@ -117,7 +117,7 @@ if up 8545 && command -v forge >/dev/null 2>&1; then
   elif ! cast call 0x5FbDB2315678afecb367f032d93F642f64180aa3 "consentStatus(string,string)(uint8)" "" ""          --rpc-url http://127.0.0.1:8545 >/dev/null 2>&1; then
     # Deployed before consentStatus existed: the backend cannot verify consent
     # on-chain against it. anvil keeps state in memory, so a restart redeploys.
-    say "PHR.sol contract" "OUTDATED — run ./stop.sh && ./start.sh to redeploy"
+    say "PHR.sol contract" "OUTDATED — keep consent: cd backend && python migrate_contract.py (dry run, then --apply)"
   else
     say "PHR.sol contract" "already deployed"
   fi
@@ -147,8 +147,11 @@ fi
 if up 8000; then
   say "Backend API (8000)" "already running"
 else
+  # The frontends allowed to call the API with the session cookie (the tunnel
+  # needs none: it goes through the Next.js proxy, on the page's own origin).
+  CORS_ORIGINS="http://localhost:3000,http://127.0.0.1:3000${LAN_IP:+,http://$LAN_IP:3000}"
   ( cd backend && source venv/bin/activate \
-    && DYLD_LIBRARY_PATH="$HOME/_oqs/lib:${DYLD_LIBRARY_PATH:-}" \
+    && DYLD_LIBRARY_PATH="$HOME/_oqs/lib:${DYLD_LIBRARY_PATH:-}" CORS_ORIGINS="$CORS_ORIGINS" \
        nohup python3 -m uvicorn app.main:app --host "$BIND_HOST" --port 8000 > /tmp/backend.log 2>&1 & )
   wait_up 8000 45 && say "Backend API (8000)" "started" || say "Backend API (8000)" "FAILED — see /tmp/backend.log"
 fi

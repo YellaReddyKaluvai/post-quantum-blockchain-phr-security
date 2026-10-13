@@ -275,18 +275,22 @@ listed as not built.
 | Doctor-authored documents | ✅ | Encrypted, signed and anchored — and readable by the patient they concern, completing the spec's "patient receives authorized access" |
 | Clinical record encryption | ✅ | Diagnoses and prescriptions encrypted at column level; grepping the database for a diagnosis returns nothing |
 | Consent management | ✅ | Revoking a doctor genuinely blocks reads — the same report returns 200 before and 404 after |
-| Smart-contract consent | 🟡 | Decisions written to `PHR.sol` (`updateConsent`, pseudonymous refs); consent-based reads refused if `checkConsent` disagrees with the row. Unit-tested with a fake chain — **not yet run against a live chain** |
+| Smart-contract consent | ✅ | Decisions written to `PHR.sol` (`updateConsent`, pseudonymous refs); consent-based reads refused if the contract's `consentStatus` disagrees with the row. **Verified live in CI** against anvil (see Blockchain anchoring) |
 | Doctor access requests | ✅ | Doctor requests with a stated purpose → patient approves or declines → the backend enforces it. Verified: no request 403, pending 403, rejected 403, approved 200 |
 | AI security layer | ✅ | Anomaly detection (scheduled, and inline at every clinician read), XAI explanations, configurable risk policy with password re-verification, alerts from every security source, incidents worked to closure |
-| Federated learning loop | 🟡 | Per-role FedAvg; a hospital can submit its signed per-role update to a hub and pull the global model back; detection uses a global model only when real institutions built it. Tested against a fake hub — **not yet between two running hospitals** |
 | Zero-knowledge consent proof | ✅ | **Post-quantum**: lattice proof (Fiat–Shamir with aborts, ML-DSA-65 parameters), **made in the doctor's browser** — the token never leaves it. The TypeScript prover and the Python verifier are checked against each other in CI. Consents approved before the switch keep their Schnorr commitment, which still verifies and is reported as *not* post-quantum. See its own section |
 | IPFS publishing | ✅ | Really pinned to a running kubo node; joins the recovery chain behind the database and S3. **Verified live in CI** with two kubo daemons: the stored object is exactly the ciphertext, and replication is confirmed by the replica's own pin list |
-| IPFS replication | 🟡 | Copies on other IPFS nodes and/or Pinning-Service-API providers; only copies a target confirms count. Unit-tested against a scripted HTTP fake — **not yet run against a real second node or pinning service** |
-| Federation peer admin screen | 🟡 | Register a peer (secret shown once), suspend, reinstate. Rendered and exercised against sample data — **not yet against a live backend** |
+| IPFS replication | ✅ | Copies on other IPFS nodes and/or Pinning-Service-API providers; only copies a target confirms count. **Verified live in CI** against a second kubo node; a commercial pinning service is unit-tested against a scripted fake only |
+| Federation peer admin screen | 🟡 | Register a peer (secret shown once), rotate its secret, suspend, reinstate. The API behind it is **verified live in CI** across three hospitals; the screen itself has been exercised only against sample data |
 | Medication adherence | ✅ | Refusals and misses reach the prescriber and the patient, not only a percentage |
 | Emergency break-glass access | ✅ | Password re-verification, daily limit, risk-scored, time-boxed, patient notified immediately, anchored on-chain, compliance incident opened automatically |
 | End-to-end flow (spec §37) | ✅ | `tests/test_e2e_flow.py` drives access request → consent → nurse care team → lab request → signed, encrypted report → patient release → tamper detection → withdrawal → break-glass → incidents and audit, against real Postgres and real liboqs. CI runs it twice: database-only, and with the chain, IPFS and a second hospital live |
-| Automated tests | ✅ | 430 Python tests plus a Foundry contract suite and a browser-prover vector check; weighted toward refusals. CI runs them inside the backend image, where liboqs is real |
+| Browser sessions | ✅ | The session token lives only in an HttpOnly cookie (scripts cannot read it); CORS is limited to `CORS_ORIGINS`; a cookie-authenticated change needs an `X-Requested-With` header (CSRF); each token has an id checked on every request, so logout revokes it and disabling a user ends their sessions at once |
+| Consent-token storage | ✅ | Sealed in the browser with AES-256-GCM under the doctor's passphrase; backups are the sealed form; tokens stored before this are flagged with a one-step encrypt. Checked in CI by `scripts/check-vault.mjs` |
+| Differential privacy across rounds | ✅ | Every classifier release is recorded with its zCDP cost and composed across rounds into a total (ε, δ); `FEDERATION_DP_TOTAL_EPSILON` stops releases at the budget; a release without noise voids any overall claim and is shown as such |
+| Late anchoring | ✅ | Anchors recorded while no chain was reachable can be written on-chain later (Admin → Security), marked `LATE_ANCHOR` on the chain itself: they prove the digest existed by that block, not at the original time |
+| Anchor provenance | ✅ | A digest verifies only from events our own contract (or a listed previous one) emitted — a look-alike contract's event does not count |
+| Automated tests | ✅ | 453 Python tests plus a Foundry contract suite and a browser-prover vector check; weighted toward refusals. CI runs them inside the backend image, where liboqs is real |
 | Federated learning between hospitals | ✅ | Per-role baselines **and a threat classifier trained on investigated incidents**, federated with robust FedAvg, clipped updates and optional differential privacy; each global model evaluated locally before adoption, with rollback. **Verified live in CI across three hospitals** (separate servers and databases), over two training rounds |
 
 🟡 = built and tested in isolation, still to be verified on the running system.
@@ -339,14 +343,14 @@ is listed honestly rather than quietly dropped.
 
 | # | Item | Where it stops |
 |---|---|---|
-| 1 | **Browser token storage** | The consent token is kept in the browser's local storage, readable by any script running on this origin. A backup file and a paste-in path exist; hardware-backed storage does not. |
-| 2 | **Contracts deployed before `consentStatus`** | Detected and reported (startup log, the admin security policy, `start.sh`), but such a contract still has to be redeployed by hand before consent is verified on-chain. |
+| 1 | **Consent token while in use** | Stored only encrypted under the doctor's passphrase (AES-256-GCM, PBKDF2-SHA-256), so a copy of browser storage or a backup is useless without it. A script running on the page *while* the passphrase is typed could still capture it; hardware-backed keys (WebAuthn) are not used. |
+| 2 | **Replacing an outdated contract** | `migrate_contract.py` deploys the current contract and carries consent from the old contract's own state (dry run first). Running it, and updating `.env`, is still an operator's step. |
 
 ### Not implemented
 
 | Area | Status |
 |---|---|
-| **A federation of independent institutions** | The protocol runs live between two backends in CI. An actual federation needs other hospitals to deploy and register; nothing here pretends they exist. |
+| **A federation of independent institutions** | The protocol runs live between three backends in CI. An actual federation needs other hospitals to deploy and register; nothing here pretends they exist. |
 | **Standardised post-quantum ZKP** | The lattice proof uses ML-DSA-65's parameters and assumptions, but the construction itself (Lyubashevsky's, uncompressed) is not a NIST standard and has not been independently reviewed. |
 
 > On AI: the security layer performs **behavioural anomaly detection**, not

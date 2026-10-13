@@ -336,3 +336,45 @@ def test_the_approval_email_reaches_the_patient(env, people):
         "SELECT sent_status FROM EmailNotifications WHERE email_address = %s AND notification_type = 'APPROVAL'",
         (people["patient_email"],)).fetchone()
     assert sent["sent_status"] == "SENT"
+
+
+def test_a_browser_session_is_an_httponly_cookie_and_ends_at_logout(env, people):
+    """The browser's session: HttpOnly, refused cross-site without the header,
+    and dead the moment it is logged out — or its owner is disabled."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    nurse_pub = people["nurse_pub"]
+    browser = TestClient(app)          # its own cookie jar; the app is already started
+    r = browser.post("/api/login", json={"user_id": nurse_pub, "password": PASSWORD})
+    assert r.status_code == 200
+    cookie = r.headers["set-cookie"].lower()
+    assert "quantumcare_token=" in cookie and "httponly" in cookie and "samesite=lax" in cookie
+    assert browser.get("/api/auth/me").status_code == 200          # the cookie alone, read-only
+    # A state change on the cookie alone, as a forged cross-site form would send it.
+    assert browser.post("/api/logout").status_code == 403
+    bearer = {"Authorization": f"Bearer {r.json()['access_token']}"}
+    assert browser.post("/api/logout", headers={"X-Requested-With": "QuantumCare"}).status_code == 200
+    # Revoked: neither the cookie (were it replayed) nor the same token as Bearer works.
+    browser.cookies.set("quantumcare_token", r.cookies["quantumcare_token"])
+    assert browser.get("/api/auth/me").status_code == 401
+    assert browser.get("/api/auth/me", headers=bearer).status_code == 401
+
+    # Disabling a user ends their live sessions too.
+    c, db = env["client"], env["db"]
+    nurse_headers = _login(c, nurse_pub)
+    nurse_uuid = c.get("/api/auth/me", headers=nurse_headers).json()["user_id"]
+    assert c.post(f"/api/admin/users/{nurse_uuid}/disable", headers=people["admin"]).status_code == 200
+    try:
+        assert c.get("/api/auth/me", headers=nurse_headers).status_code == 401
+    finally:
+        assert c.post(f"/api/admin/users/{nurse_uuid}/enable", headers=people["admin"]).status_code == 200
+
+
+def test_only_configured_origins_may_call_the_api_with_credentials(env):
+    c = env["client"]
+    evil = c.options("/api/auth/me", headers={"Origin": "https://evil.example",
+                                              "Access-Control-Request-Method": "GET"})
+    assert evil.headers.get("access-control-allow-origin") is None
+    ok = c.options("/api/auth/me", headers={"Origin": "http://localhost:3000",
+                                            "Access-Control-Request-Method": "GET"})
+    assert ok.headers.get("access-control-allow-origin") == "http://localhost:3000"
