@@ -108,8 +108,8 @@ def configuration_warnings(settings: "Settings") -> list[str]:
         warnings.append(
             "ENCRYPTION_KEY is the public example key from this repository, so the "
             "personal fields it protects are readable by anyone with the database. "
-            "Data already stored is encrypted under it; set a new key only on a fresh "
-            "database or after re-encrypting existing rows.")
+            "Move existing data to a new key with backend/rotate_encryption_key.py "
+            "(server stopped), then set the new key.")
     elif len(settings.ENCRYPTION_KEY) != 32:
         warnings.append("ENCRYPTION_KEY is not exactly 32 characters; it is padded or truncated.")
     if "SECRET_KEY" in _GENERATED:
