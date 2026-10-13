@@ -63,7 +63,7 @@ def migrate(old_address: str | None, apply: bool, say=print) -> dict:
     from app.config import get_settings
     from app.chain_client import load_contract_artifact
     from app.database import get_db
-    from deploy_contract import deploy
+    from deploy_contract import deploy, with_margin
 
     settings = get_settings()
     web3 = Web3(Web3.HTTPProvider(settings.BLOCKCHAIN_RPC_URL, request_kwargs={"timeout": 20}))
@@ -110,11 +110,12 @@ def migrate(old_address: str | None, apply: bool, say=print) -> dict:
     new = web3.eth.contract(address=new_address, abi=artifact["abi"])
     nonce = web3.eth.get_transaction_count(account.address)
     for c, granted in carry:
-        tx = new.functions.updateConsent(
-            party_ref(str(c["patient_id"])), party_ref(str(c["subject_user_id"])), granted
-        ).build_transaction({"from": account.address, "nonce": nonce,
-                             "chainId": settings.BLOCKCHAIN_CHAIN_ID, "gas": 200_000,
-                             "gasPrice": web3.eth.gas_price})
+        call = new.functions.updateConsent(
+            party_ref(str(c["patient_id"])), party_ref(str(c["subject_user_id"])), granted)
+        tx = call.build_transaction({"from": account.address, "nonce": nonce,
+                                     "chainId": settings.BLOCKCHAIN_CHAIN_ID,
+                                     "gas": with_margin(call.estimate_gas({"from": account.address})),
+                                     "gasPrice": web3.eth.gas_price})
         receipt = web3.eth.wait_for_transaction_receipt(
             web3.eth.send_raw_transaction(account.sign_transaction(tx).raw_transaction), timeout=120)
         if receipt["status"] != 1:
