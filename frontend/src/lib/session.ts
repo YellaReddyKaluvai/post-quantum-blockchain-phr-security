@@ -1185,6 +1185,19 @@ export async function registerFederatedPeer(nodeName: string, contactUrl?: strin
   return response.json();
 }
 
+/** Issue a peer a new shared secret; the old one stops working at once. Shown once. */
+export async function rotateFederatedPeerSecret(peerId: string) {
+  const response = await fetchWithAuth(
+    `${backendBaseUrl}/api/admin/federated/peers/${encodeURIComponent(peerId)}/rotate-secret`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not rotate that peer's secret"));
+  }
+  return response.json() as Promise<{ node_name: string; shared_secret: string }>;
+}
+
 export async function setFederatedPeerActive(peerId: string, active: boolean) {
   const response = await fetchWithAuth(
     `${backendBaseUrl}/api/admin/federated/peers/${encodeURIComponent(peerId)}/${active ? "activate" : "deactivate"}`,
@@ -1287,6 +1300,7 @@ export interface FederationParticipation {
   last_sync_result?: Record<string, unknown> | null;
   sync_interval_minutes: number;
   dp_epsilon: number | null;
+  transport_warning?: string | null;   // set when the hub is reached over plain HTTP
 }
 
 export interface FederatedModelRecord {

@@ -94,6 +94,11 @@ export default function FederatedLearningPanel({ onChanged }: { onChanged: () =>
               {participation.sync_interval_minutes ? ` · syncs every ${participation.sync_interval_minutes} min` : " · manual sync"}
               {participation.last_sync_at ? ` · last sync ${new Date(participation.last_sync_at).toLocaleString()}` : ""}
             </p>
+            {participation.transport_warning && (
+              <p role="alert" className="text-xs font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+                {participation.transport_warning}
+              </p>
+            )}
             <div className="flex gap-2 flex-wrap">
               <button onClick={submit} disabled={busy !== ""}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-violet-200 text-violet-700 text-xs font-bold hover:bg-violet-50 disabled:opacity-50">

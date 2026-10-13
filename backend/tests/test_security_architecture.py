@@ -410,11 +410,43 @@ def test_fedavg_runs_per_role_weighted_by_that_roles_samples():
     a = {"version": 2, "roles": {"Doctor": _flat(median=2.0, samples=90),
                                  "Nurse": _flat(median=5.0, samples=10)}}
     b = {"version": 2, "roles": {"Doctor": _flat(median=12.0, samples=10)}}
-    out = aisec.federated_average_roles([("A", 100, a), ("B", 10, b)])
+    report = {}
+    out = aisec.federated_average_roles([("A", 100, a), ("B", 10, b)], report)
     doctor = out["roles"]["Doctor"]["medians"]["records_accessed"]
-    assert 2.5 < doctor < 3.5                      # A's 90 doctors outweigh B's 10
+    # A's 90 doctors outweigh B's 10 — but by at most 5:1, the cap no node can buy past.
+    assert doctor == pytest.approx((2.0 * 50 + 12.0 * 10) / 60, abs=1e-3)
+    assert report["capped"] == {"Doctor": ["A"]}
     assert out["roles"]["Nurse"]["medians"]["records_accessed"] == 5.0
     assert out["roles"]["Doctor"]["contributing_nodes"] == 2
+    assert "capped" not in out                     # who was capped never leaves the hub
+
+
+def test_a_peer_claiming_a_billion_actors_cannot_buy_a_roles_baseline():
+    honest = [(f"h{i}", 20, {"version": 2, "roles": {"Doctor": _flat(median=4.0, samples=20)}})
+              for i in range(2)]
+    liar = ("liar", 1_000_000, {"version": 2, "roles": {"Doctor": _flat(median=900.0,
+                                                                         samples=1_000_000)}})
+    report = {}
+    out = aisec.federated_average_roles(honest + [liar], report)
+    # Three nodes: the outlying baseline is set aside outright.
+    assert report["excluded"] == {"Doctor": ["liar"]}
+    assert out["roles"]["Doctor"]["medians"]["records_accessed"] == pytest.approx(4.0)
+    # Two nodes: nothing to compare against, so the cap bounds it — 100 of 120, not 99.998%.
+    report = {}
+    out = aisec.federated_average_roles([honest[0], liar], report)
+    assert report["capped"] == {"Doctor": ["liar"]}
+    assert out["roles"]["Doctor"]["medians"]["records_accessed"] == pytest.approx(
+        (4.0 * 20 + 900.0 * 100) / 120, abs=1e-2)
+    # And a count that large is refused at submission anyway.
+    assert not aisec.sane_parameters({"version": 2, "roles": {"Doctor": _flat(samples=2_000_000)}})
+
+
+def test_honest_hospitals_of_different_shapes_are_not_set_aside():
+    nodes = [(f"h{i}", 30, {"version": 2, "roles": {"Doctor": _flat(median=m, scale=sc, samples=30)}})
+             for i, (m, sc) in enumerate([(4.0, 2.0), (5.5, 2.5), (3.0, 1.6), (6.0, 3.0)])]
+    report = {}
+    aisec.federated_average_roles(nodes, report)
+    assert report["excluded"] == {} and report["capped"] == {}
 
 
 def test_an_older_flat_model_is_kept_out_of_role_models():
@@ -479,21 +511,66 @@ def test_a_submission_carries_only_signed_parameters(participant):
 
     def fake_http(method, url, *, body=None, headers=None, timeout=30):
         if method == "GET":
-            return 200, json.dumps({"round_number": 4, "parameters": params}).encode()
+            return 200, _signed_model({"round_number": 4, "open_round": 6, "parameters": params},
+                                      headers)
         sent.update(json.loads(body))
         return 200, b'{"accepted": true}'
 
     participant.setattr(federation, "_http", fake_http)
     out = federation.submit_local_update(FakeCursor())
-    assert out["round_number"] == 5                     # the hub's next round
-    assert set(sent) == {"node_name", "round_number", "sample_count", "parameters", "signature"}
-    assert aisec.verify_parameters_signature("hospital-b", 5, 7, sent["parameters"], "s3cret",
-                                             sent["signature"])
+    assert out["round_number"] == 6                     # the round the hub says is open
+    assert set(sent) == {"node_name", "round_number", "sample_count", "parameters",
+                         "timestamp", "signature"}
+    assert abs(sent["timestamp"] - time.time()) < 60
+    assert aisec.verify_parameters_signature("hospital-b", 6, 7, sent["parameters"], "s3cret",
+                                             sent["signature"], sent["timestamp"])
+    # The timestamp is signed: changed, the signature no longer holds.
+    assert not aisec.verify_parameters_signature("hospital-b", 6, 7, sent["parameters"], "s3cret",
+                                                 sent["signature"], sent["timestamp"] + 1)
+
+
+def _signed_model(model, request_headers, secret="s3cret"):
+    """What the hub returns: the model, signed for the requesting node and timestamp."""
+    ts = int(request_headers["X-Federation-Timestamp"])
+    node = request_headers["X-Federation-Node"]
+    return json.dumps({**model, "signature": federation.model_signature(node, ts, model, secret)}
+                      ).encode()
+
+
+def test_a_global_model_not_signed_for_this_request_is_refused(participant):
+    model = {"round_number": 2, "parameters": {"version": 2, "roles": {"Doctor": _flat()}}}
+    captured = {}
+
+    def replayed(method, url, *, body=None, headers=None, timeout=30):
+        # A response signed for an earlier request (a different timestamp).
+        old = {**headers, "X-Federation-Timestamp": str(int(headers["X-Federation-Timestamp"]) - 60)}
+        return 200, _signed_model(model, old)
+
+    def tampered(method, url, *, body=None, headers=None, timeout=30):
+        signed = json.loads(_signed_model(model, headers))
+        signed["parameters"]["roles"]["Doctor"]["medians"]["records_accessed"] = 999.0
+        return 200, json.dumps(signed).encode()
+
+    def unsigned(method, url, *, body=None, headers=None, timeout=30):
+        return 200, json.dumps(model).encode()
+
+    def genuine(method, url, *, body=None, headers=None, timeout=30):
+        captured.update(headers)
+        return 200, _signed_model(model, headers)
+
+    for fake in (replayed, tampered, unsigned):
+        participant.setattr(federation, "_http", fake)
+        with pytest.raises(federation.FederationError, match="not signed by the hub"):
+            federation.pull_global_model()
+    participant.setattr(federation, "_http", genuine)
+    assert federation.pull_global_model()["round_number"] == 2
+    assert captured["X-Federation-Node"] == "hospital-b"
 
 
 def test_a_global_model_that_fails_the_plausibility_floor_is_not_used(participant):
     bad = {"round_number": 2, "parameters": {"version": 2, "roles": {"Doctor": _flat(median=-5)}}}
-    participant.setattr(federation, "_http", lambda *a, **k: (200, json.dumps(bad).encode()))
+    participant.setattr(federation, "_http",
+                        lambda *a, headers=None, **k: (200, _signed_model(bad, headers)))
     with pytest.raises(federation.FederationError, match="plausibility"):
         federation.pull_global_model()
 

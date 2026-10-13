@@ -47,7 +47,7 @@ FEATURES: tuple[str, ...] = tuple(FEATURE_WEIGHTS)
 MIN_TRAINING_LABELS = 6          # and at least two of each class
 MIN_PER_CLASS = 2
 DEFAULT_CLIP = 5.0               # L2 bound on one round's update
-SAMPLE_CAP_RATIO = 5.0           # no node counts for more than 5× the median node
+SAMPLE_CAP_RATIO = 5.0           # no node counts for more than 5× the (lower) median node
 OUTLIER_FACTOR = 3.0             # an update this many median distances away is set aside
 _rng = random.SystemRandom()
 
@@ -222,8 +222,9 @@ def aggregate(nodes: list[tuple[str, Classifier]], previous_rounds: int = 0) -> 
     """FedAvg over the participants' classifiers, defended against one bad node.
 
     * Each node is weighted by its labelled examples, but no node may count for
-      more than SAMPLE_CAP_RATIO × the median node — a participant cannot buy
-      the global model by inflating its sample count.
+      more than SAMPLE_CAP_RATIO × the lower median node — a participant cannot buy
+      the global model by inflating its sample count. The lower median, because
+      with two nodes the ordinary median is their mean, which the liar sets.
     * With three or more nodes, an update further than OUTLIER_FACTOR × the
       median distance from the coordinate-wise median is set aside for that
       round and reported.
@@ -245,7 +246,7 @@ def aggregate(nodes: list[tuple[str, Classifier]], previous_rounds: int = 0) -> 
         report["excluded"] = [name for (name, _), d in zip(kept, dists) if d > limit]
         kept = [(n, c) for (n, c), d in zip(kept, dists) if d <= limit]
     counts = [max(1, c.samples) for _, c in kept]
-    cap = SAMPLE_CAP_RATIO * statistics.median(counts)
+    cap = SAMPLE_CAP_RATIO * statistics.median_low(counts)
     weights = []
     for (name, _), n in zip(kept, counts):
         if n > cap:

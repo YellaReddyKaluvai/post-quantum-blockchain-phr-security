@@ -286,7 +286,7 @@ listed as not built.
 | Medication adherence | ✅ | Refusals and misses reach the prescriber and the patient, not only a percentage |
 | Emergency break-glass access | ✅ | Password re-verification, daily limit, risk-scored, time-boxed, patient notified immediately, anchored on-chain, compliance incident opened automatically |
 | End-to-end flow (spec §37) | ✅ | `tests/test_e2e_flow.py` drives access request → consent → nurse care team → lab request → signed, encrypted report → patient release → tamper detection → withdrawal → break-glass → incidents and audit, against real Postgres and real liboqs. CI runs it twice: database-only, and with the chain, IPFS and a second hospital live |
-| Automated tests | ✅ | 413 Python tests plus a Foundry contract suite and a browser-prover vector check; weighted toward refusals. CI runs them inside the backend image, where liboqs is real |
+| Automated tests | ✅ | 430 Python tests plus a Foundry contract suite and a browser-prover vector check; weighted toward refusals. CI runs them inside the backend image, where liboqs is real |
 | Federated learning between hospitals | ✅ | Per-role baselines **and a threat classifier trained on investigated incidents**, federated with robust FedAvg, clipped updates and optional differential privacy; each global model evaluated locally before adoption, with rollback. **Verified live in CI across three hospitals** (separate servers and databases), over two training rounds |
 
 🟡 = built and tested in isolation, still to be verified on the running system.
@@ -704,9 +704,11 @@ The federated IDS has two models, both learned locally and federated:
 | Component | Status |
 |---|---|
 | Local training: baselines from this hospital's activity; the classifier from its investigated incidents, starting each round from the global weights | **Real** |
-| FedAvg: per role for baselines; for the classifier weighted by examples, each node capped at 5× the median node, an outlying update set aside (3+ nodes) | **Real** |
+| Robust FedAvg, for both models: each node weighted by its samples but capped at 5× the lower-median node, and with 3+ nodes an outlying update set aside (baselines per role, compared in log space). Who was capped or set aside is reported at the hub and never sent to peers | **Real** |
 | Privacy: no record, event, label or identifier is sent; classifier updates are clipped, and `FEDERATION_DP_EPSILON` adds Gaussian noise (the Gaussian mechanism per round — no accounting across rounds is claimed) | **Real** |
-| Signed, replay-protected exchange; peer registration; plausibility floor | **Real** |
+| Signed, replay-protected exchange: every submission carries a signed timestamp and the hub takes only a fresh one newer than the last from that peer; the hub signs the model it returns for the requesting peer and request, and a participant refuses one altered or replayed in transit | **Real** |
+| Peer control: registration, suspension (a suspended peer's earlier updates are left out of new rounds), secret rotation; submissions only to the open round; per-role counts bounded and consistent with the total; an update older than 7 days is not carried into a round | **Real** |
+| The hub's own adoption gate: each round is evaluated on the hub's data exactly as a participant evaluates a pulled one, and detection at the hub uses it only if it passes | **Real** |
 | Adoption gate: a pulled model is evaluated on local data and used only if it does not make detection here worse; every model kept, any one activatable, rollback to local-only | **Real** |
 | Detection: risk = the higher of the anomaly score and the classifier's threat probability, explained per feature by whichever model spoke | **Real** |
 | Automation: hub rounds when real peers have submitted (`FEDERATION_ROUND_INTERVAL_MINUTES`, `FEDERATION_MIN_PEERS`); participant sync (`FEDERATION_SYNC_INTERVAL_MINUTES`) | **Real** |
@@ -750,7 +752,13 @@ servers and databases: A and C join through the admin API, train on their own
 investigated incidents and submit; B aggregates (2 real peers, 0 simulated); both
 pull and adopt; a second round starts from the global weights; A rolls back to
 local models and re-activates an older global one; B is checked to hold no labels
-and nothing A stored names a node or a person.
+and nothing A stored names a node or a person. Then B's defences, against the
+running servers: A's captured submission replayed is refused; one correctly
+signed for a round not yet open is refused; C's secret is rotated, its old one
+stops working at once and the new one works; A is suspended, cannot submit, and
+B's next round is built without it. Hub-side refusals one by one, and the
+participant refusing an unsigned, altered or replayed model, are unit-tested
+(`tests/test_federation_hub.py`, `tests/test_security_architecture.py`).
 
 ### Verified
 
