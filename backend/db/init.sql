@@ -764,3 +764,51 @@ CREATE INDEX IF NOT EXISTS idx_care_team_nurse
 -- A doctor re-asking after a withdrawal or refusal puts the row back to
 -- Pending. The earlier refusal must keep blocking until the patient decides.
 ALTER TABLE Consent ADD COLUMN IF NOT EXISTS prior_refusal BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- ─── Federated learning: labels, a trained classifier, adoption ─────────────
+-- An investigator's verdict on a closed incident is a training label: the
+-- actor's behaviour window at the time, and whether it was a real threat.
+CREATE TABLE IF NOT EXISTS SecurityLabels (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    actor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    actor_role VARCHAR(40),
+    features JSONB NOT NULL,
+    label SMALLINT NOT NULL CHECK (label IN (0, 1)),
+    source VARCHAR(30) NOT NULL,
+    source_ref UUID,
+    labelled_by UUID REFERENCES Users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (source, source_ref)
+);
+ALTER TABLE SecurityIncidents ADD COLUMN IF NOT EXISTS verdict VARCHAR(20);
+ALTER TABLE FederatedGlobalModel ADD COLUMN IF NOT EXISTS aggregation_report JSONB;
+
+-- A pulled global model is evaluated on local data before it is used, and an
+-- administrator can switch between models or back to local-only detection.
+ALTER TABLE FederatedHubModels ADD COLUMN IF NOT EXISTS evaluation JSONB;
+ALTER TABLE FederatedHubModels ADD COLUMN IF NOT EXISTS adopted BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE FederatedHubModels ADD COLUMN IF NOT EXISTS decided_by UUID REFERENCES Users(id) ON DELETE SET NULL;
+ALTER TABLE FederatedHubModels ADD COLUMN IF NOT EXISTS decided_at TIMESTAMPTZ;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'federatedhubmodels' AND column_name = 'active') THEN
+        ALTER TABLE FederatedHubModels ADD COLUMN active BOOLEAN NOT NULL DEFAULT FALSE;
+        -- Before adoption existed the newest pulled model was the one in use.
+        UPDATE FederatedHubModels SET active = TRUE
+         WHERE id = (SELECT id FROM FederatedHubModels ORDER BY pulled_at DESC LIMIT 1);
+    END IF;
+END $$;
+
+-- Joining a federation from the admin screen rather than only through server
+-- environment variables. One row; the shared secret is encrypted at rest.
+CREATE TABLE IF NOT EXISTS FederationParticipation (
+    id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    hub_url TEXT NOT NULL,
+    node_name VARCHAR(120) NOT NULL,
+    shared_secret_encrypted TEXT NOT NULL,
+    updated_by UUID REFERENCES Users(id) ON DELETE SET NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_sync_at TIMESTAMPTZ,
+    last_sync_result JSONB
+);

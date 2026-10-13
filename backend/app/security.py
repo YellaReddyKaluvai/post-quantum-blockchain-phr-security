@@ -28,9 +28,9 @@ def verify_password(password: str, hashed: str) -> bool:
     except VerifyMismatchError:
         return False
 
-def get_encryption_key() -> bytes:
-    settings = get_settings()
-    key = settings.ENCRYPTION_KEY.encode('utf-8')
+def get_encryption_key(key_text: str | None = None) -> bytes:
+    """The AES-256 key: ``key_text`` if given (key rotation), else ENCRYPTION_KEY."""
+    key = (key_text if key_text is not None else get_settings().ENCRYPTION_KEY).encode('utf-8')
     # ensure it's 32 bytes for AES-256
     if len(key) < 32:
         key = key.ljust(32, b'0')
@@ -38,10 +38,10 @@ def get_encryption_key() -> bytes:
         key = key[:32]
     return key
 
-def encrypt_data(data: str) -> str:
+def encrypt_data(data: str, key_text: str | None = None) -> str:
     if not data:
         return data
-    key = get_encryption_key()
+    key = get_encryption_key(key_text)
     cipher = AES.new(key, AES.MODE_CBC)
     ct_bytes = cipher.encrypt(pad(data.encode('utf-8'), AES.block_size))
     iv = base64.b64encode(cipher.iv).decode('utf-8')
@@ -61,6 +61,36 @@ def decrypt_data(data: str) -> str:
         return pt_bytes.decode('utf-8')
     except Exception:
         return data
+
+def looks_encrypted(data: str | None) -> bool:
+    """True when ``data`` has the shape encrypt_data produces: base64(16-byte IV):base64(blocks)."""
+    if not data or data.count(':') != 1:
+        return False
+    iv, ct = data.split(':', 1)
+    try:
+        iv_bytes = base64.b64decode(iv, validate=True)
+        ct_bytes = base64.b64decode(ct, validate=True)
+    except Exception:
+        return False
+    return len(iv_bytes) == 16 and len(ct_bytes) > 0 and len(ct_bytes) % 16 == 0
+
+
+def decrypt_data_strict(data: str, key_text: str) -> str:
+    """Decrypt with exactly this key, raising ValueError on any failure.
+
+    ``decrypt_data`` returns its input when it cannot decrypt, which keeps old
+    plaintext rows readable but cannot tell "not encrypted" from "encrypted
+    under another key". Key rotation must tell them apart, so it uses this.
+    """
+    if not looks_encrypted(data):
+        raise ValueError("not an encrypt_data value")
+    iv, ct = data.split(':', 1)
+    cipher = AES.new(get_encryption_key(key_text), AES.MODE_CBC, base64.b64decode(iv))
+    try:
+        return unpad(cipher.decrypt(base64.b64decode(ct)), AES.block_size).decode('utf-8')
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ValueError("does not decrypt under this key") from exc
+
 
 def create_session_token(payload: dict[str, Any], minutes: int | None = None) -> tuple[str, datetime]:
     settings = get_settings()

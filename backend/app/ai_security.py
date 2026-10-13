@@ -246,13 +246,16 @@ SELECT a.*, COALESCE(b.peak_burst, 0) AS peak_burst
 """
 
 
-def extract_windows(cur, hours: int = 24, actor_id: Optional[str] = None) -> list[ActorWindow]:
+def extract_windows(cur, hours: int = 24, actor_id: Optional[str] = None,
+                    end: Optional[datetime] = None) -> list[ActorWindow]:
     """Build one feature vector per active actor over the last `hours`.
 
     With ``actor_id`` only that actor's window is built — the inline risk check
     in the access path scores one person per request and must stay cheap.
     """
-    end = datetime.now(timezone.utc)
+    # ``end`` lets a window be taken as it stood at a past moment — the label
+    # an investigator gives an incident describes behaviour *then*, not now.
+    end = end or datetime.now(timezone.utc)
     start = end - timedelta(hours=hours)
     cur.execute(FEATURE_SQL, (start, end, actor_id, actor_id))
     windows = []
@@ -362,10 +365,18 @@ def fit_role_baselines(windows: list[ActorWindow]) -> dict[str, Baseline]:
     return {role: fit_baseline(group) for role, group in by_role.items()}
 
 
-def role_parameters(baselines: dict[str, Baseline]) -> dict[str, Any]:
-    """Version-2 parameters: what this institution shares, and all it shares."""
-    return {"version": PARAMETERS_VERSION,
-            "roles": {role: b.to_parameters() for role, b in baselines.items()}}
+def role_parameters(baselines: dict[str, Baseline],
+                    classifier: Optional[dict] = None) -> dict[str, Any]:
+    """Version-2 parameters: what this institution shares, and all it shares.
+
+    ``classifier`` (federated_classifier) adds the trained threat model's
+    weights when this hospital has enough investigated incidents to train one.
+    """
+    params: dict[str, Any] = {"version": PARAMETERS_VERSION,
+                              "roles": {role: b.to_parameters() for role, b in baselines.items()}}
+    if classifier:
+        params["classifier"] = classifier
+    return params
 
 
 def as_role_parameters(parameters: dict[str, Any]) -> dict[str, dict]:
@@ -455,6 +466,10 @@ def sane_parameters(parameters: dict) -> bool:
     """
     if not isinstance(parameters, dict):
         return False
+    if "classifier" in parameters:
+        from app.federated_classifier import sane_classifier
+        if "roles" not in parameters or not sane_classifier(parameters["classifier"]):
+            return False
     if "roles" in parameters:
         roles = parameters.get("roles")
         if not isinstance(roles, dict) or not roles or len(roles) > 20:

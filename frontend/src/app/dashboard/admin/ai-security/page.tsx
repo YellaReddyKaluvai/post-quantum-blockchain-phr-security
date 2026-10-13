@@ -4,21 +4,24 @@ import React, { useEffect, useState, useCallback } from "react";
 import { motion } from "framer-motion";
 import {
   Brain, AlertTriangle, FileWarning, Network, Play, Loader2, Check, X, ShieldAlert,
-  Upload, Download, SlidersHorizontal, ShieldCheck,
+  SlidersHorizontal, ShieldCheck,
 } from "lucide-react";
 import {
   runSecurityAnalysis, getRiskAssessments, getSecurityAlerts,
   acknowledgeAlert, getSecurityIncidents, getFederatedStatus, runFederatedRound,
-  updateSecurityIncident, getSecurityPolicy, submitToFederationHub, pullFromFederationHub,
+  updateSecurityIncident, getSecurityPolicy, IncidentVerdict,
 } from "@/lib/session";
+import FederatedLearningPanel from "@/components/FederatedLearningPanel";
 
 interface Attribution {
   feature: string;
   label: string;
   observed: number;
-  peer_median: number;
-  deviations: number;
+  peer_median?: number;
+  deviations?: number;
+  weight?: number;
   contribution: number;
+  source?: string;        // "FEDERATED_CLASSIFIER" when the trained classifier drove the score
 }
 
 interface Assessment {
@@ -122,9 +125,9 @@ export default function AiSecurityPage() {
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [federated, setFederated] = useState<Federated | null>(null);
   const [policy, setPolicy] = useState<Policy | null>(null);
-  const [hubBusy, setHubBusy] = useState<"" | "submit" | "pull">("");
   const [closing, setClosing] = useState<string | null>(null);
   const [resolution, setResolution] = useState("");
+  const [verdict, setVerdict] = useState<IncidentVerdict | "">("");
   const [incidentBusy, setIncidentBusy] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
@@ -190,32 +193,15 @@ export default function AiSecurityPage() {
     }
   };
 
-  const hub = async (action: "submit" | "pull") => {
-    setHubBusy(action);
-    setError("");
-    try {
-      if (action === "submit") {
-        const r = await submitToFederationHub();
-        setNotice(`Local per-role model submitted to the hub for round ${r.round_number} (${(r.roles || []).join(", ")}). ${r.note}`);
-      } else {
-        const r = await pullFromFederationHub();
-        setNotice(`Global model from hub round ${r.hub_round} (${r.real_nodes} real institutions) is now used for detection.`);
-      }
-      await load(filter);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Federation request failed.");
-    } finally {
-      setHubBusy("");
-    }
-  };
-
   const advanceIncident = async (i: Incident, status: "Investigating" | "Closed") => {
     setIncidentBusy(i.id);
     setError("");
     try {
-      await updateSecurityIncident(i.id, status, status === "Closed" ? resolution : undefined);
+      await updateSecurityIncident(i.id, status, status === "Closed" ? resolution : undefined,
+                                   status === "Closed" && verdict ? verdict : undefined);
       setClosing(null);
       setResolution("");
+      setVerdict("");
       await load(filter);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not update that incident.");
@@ -404,6 +390,7 @@ export default function AiSecurityPage() {
                   <div className="p-3">
                     <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wide mb-2">
                       Why this was flagged
+                      {a.explanation[0]?.source === "FEDERATED_CLASSIFIER" && " — matches confirmed threat patterns (trained classifier)"}
                     </p>
                     <div className="overflow-x-auto">
                       <table className="w-full text-sm min-w-[460px]">
@@ -411,8 +398,17 @@ export default function AiSecurityPage() {
                           <tr className="text-left text-[10px] uppercase tracking-wide text-slate-400">
                             <th className="pb-1.5 font-bold">Indicator</th>
                             <th className="pb-1.5 font-bold text-right">Observed</th>
-                            <th className="pb-1.5 font-bold text-right">Peer median</th>
-                            <th className="pb-1.5 font-bold text-right">Deviation</th>
+                            {a.explanation[0]?.source === "FEDERATED_CLASSIFIER" ? (
+                              <>
+                                <th className="pb-1.5 font-bold text-right">Learned weight</th>
+                                <th className="pb-1.5 font-bold text-right">Contribution</th>
+                              </>
+                            ) : (
+                              <>
+                                <th className="pb-1.5 font-bold text-right">Peer median</th>
+                                <th className="pb-1.5 font-bold text-right">Deviation</th>
+                              </>
+                            )}
                           </tr>
                         </thead>
                         <tbody className="tabular-nums">
@@ -420,8 +416,17 @@ export default function AiSecurityPage() {
                             <tr key={c.feature} className="border-t border-slate-50">
                               <td className="py-1.5 text-slate-700">{c.label}</td>
                               <td className="py-1.5 text-right font-semibold text-slate-800">{c.observed}</td>
-                              <td className="py-1.5 text-right text-slate-500">{c.peer_median}</td>
-                              <td className="py-1.5 text-right text-rose-600 font-semibold">{c.deviations}×</td>
+                              {c.source === "FEDERATED_CLASSIFIER" ? (
+                                <>
+                                  <td className="py-1.5 text-right text-slate-500">{c.weight}</td>
+                                  <td className="py-1.5 text-right text-rose-600 font-semibold">+{c.contribution}</td>
+                                </>
+                              ) : (
+                                <>
+                                  <td className="py-1.5 text-right text-slate-500">{c.peer_median}</td>
+                                  <td className="py-1.5 text-right text-rose-600 font-semibold">{c.deviations}×</td>
+                                </>
+                              )}
                             </tr>
                           ))}
                         </tbody>
@@ -486,6 +491,17 @@ export default function AiSecurityPage() {
                       placeholder="What was found, and what was done about it."
                       className="w-full p-2 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-cyan-200"
                     />
+                    <label htmlFor={`verdict-${i.id}`} className="block text-xs font-bold text-slate-500">
+                      Verdict (trains the threat classifier)
+                    </label>
+                    <select id={`verdict-${i.id}`} value={verdict}
+                            onChange={(e) => setVerdict(e.target.value as IncidentVerdict | "")}
+                            className="w-full p-2 rounded-lg border border-slate-200 text-sm bg-white">
+                      <option value="">No verdict</option>
+                      <option value="confirmed_threat">Confirmed threat</option>
+                      <option value="false_positive">False positive</option>
+                      <option value="inconclusive">Inconclusive</option>
+                    </select>
                     <div className="flex gap-2">
                       <button
                         onClick={() => advanceIncident(i, "Closed")}
@@ -494,7 +510,7 @@ export default function AiSecurityPage() {
                       >
                         {incidentBusy === i.id && <Loader2 className="w-3.5 h-3.5 animate-spin" />} Close incident
                       </button>
-                      <button onClick={() => { setClosing(null); setResolution(""); }}
+                      <button onClick={() => { setClosing(null); setResolution(""); setVerdict(""); }}
                               className="px-3 py-1.5 rounded-lg text-xs font-bold text-slate-600 hover:bg-white">
                         Cancel
                       </button>
@@ -512,7 +528,7 @@ export default function AiSecurityPage() {
                       </button>
                     )}
                     <button
-                      onClick={() => { setClosing(i.id); setResolution(""); }}
+                      onClick={() => { setClosing(i.id); setResolution(""); setVerdict(""); }}
                       className="px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-xs font-bold text-slate-700 hover:bg-slate-50"
                     >
                       Close with resolution
@@ -599,39 +615,8 @@ export default function AiSecurityPage() {
               </p>
             </div>
 
-            {/* This hospital as a participant in another hospital's federation. */}
-            <div className="mt-4 pt-4 border-t border-slate-100">
-              <p className="text-sm font-bold text-slate-700 mb-1">This hospital as a participant</p>
-              {federated.participant?.configured ? (
-                <>
-                  <p className="text-xs text-slate-500 mb-3">
-                    Hub <span className="font-mono">{federated.participant.hub_url}</span> as{" "}
-                    <span className="font-mono">{federated.participant.node_name}</span>
-                    {federated.participant.last_pulled
-                      ? ` · last model pulled from hub round ${federated.participant.last_pulled.hub_round}`
-                      : " · no model pulled yet"}
-                  </p>
-                  <div className="flex gap-2 flex-wrap">
-                    <button onClick={() => hub("submit")} disabled={hubBusy !== ""}
-                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-violet-200 text-violet-700 text-xs font-bold hover:bg-violet-50 disabled:opacity-50">
-                      {hubBusy === "submit" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
-                      Submit local update
-                    </button>
-                    <button onClick={() => hub("pull")} disabled={hubBusy !== ""}
-                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-violet-200 text-violet-700 text-xs font-bold hover:bg-violet-50 disabled:opacity-50">
-                      {hubBusy === "pull" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-                      Pull global model
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <p className="text-xs text-slate-500">
-                  Not configured. To join another hospital&apos;s federation, set FEDERATION_HUB_URL,
-                  FEDERATION_NODE_NAME and FEDERATION_SHARED_SECRET (issued when that hospital registers
-                  this one as a peer). Only per-role medians and scales are ever sent.
-                </p>
-              )}
-            </div>
+            {/* Participation, the trained classifier, and which global model detection uses. */}
+            <FederatedLearningPanel onChanged={() => load(filter)} />
           </>
         )}
       </section>

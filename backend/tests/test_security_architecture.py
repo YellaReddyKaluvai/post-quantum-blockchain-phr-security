@@ -46,6 +46,10 @@ class FakeCursor:
     def fetchone(self):
         return self.rows.pop(0) if self.rows else None
 
+    def fetchall(self):
+        """Scripted as one list in the row queue."""
+        return (self.rows.pop(0) if self.rows else None) or []
+
     def statements(self, fragment):
         return [sql for sql, _ in self.executed if fragment in sql]
 
@@ -171,12 +175,42 @@ def test_one_refusal_is_recorded_but_does_not_alert():
 
 
 def test_repeated_refusals_raise_an_alert():
-    cur = FakeCursor([{"n": secresp.DENIAL_ALERT_THRESHOLD}, None, {"id": "alert-1"}])
+    # count · no open alert · new alert id · patients refused in the window ·
+    # actor's name · patient-account check · no recent identical notice
+    cur = FakeCursor([{"n": secresp.DENIAL_ALERT_THRESHOLD}, None, {"id": "alert-1"},
+                      [{"pid": "p1"}], {"full_name": "Rao", "role": "Doctor"}, {"?": 1}, None])
     alert = secresp.access_denied(cur, actor_id="d1", actor_public_id="DOC-1", actor_role="Doctor",
-                                  resource="patient_chart", reason="no consent")
+                                  resource="patient_chart", reason="no consent", patient_id="p1")
     assert alert == "alert-1"
     sql, params = next((q, p) for q, p in cur.executed if "INSERT INTO SecurityAlerts" in q)
     assert params[2] == "MEDIUM" and params[-1] == secresp.SOURCE_ACCESS_CONTROL
+    # …and the patient whose chart was probed is told, by name of who tried.
+    _, note = next((q, p) for q, p in cur.executed if "INSERT INTO Notifications" in q)
+    assert note[0] == "p1" and note[1] == "SECURITY_ACCESS_REFUSED" and "Dr. Rao" in note[3]
+
+
+def test_a_security_notice_only_ever_reaches_a_patient_account():
+    """§27: never notify the wrong person — an id that is not a patient is refused."""
+    cur = FakeCursor([None])
+    assert not secresp.notify_patient(cur, patient_id="doctor-id", kind="SECURITY_X",
+                                      title="t", body="b")
+    assert not cur.statements("INSERT INTO Notifications")
+
+
+def test_the_same_security_notice_is_not_repeated_within_a_day():
+    cur = FakeCursor([{"?": 1}, {"?": 1}])          # is a patient · already told today
+    assert not secresp.notify_patient(cur, patient_id="p1", kind="SECURITY_X", title="t", body="b")
+    assert not cur.statements("INSERT INTO Notifications")
+
+
+def test_an_integrity_failure_tells_the_records_patient_with_the_incident_ref():
+    # no open incident · alert id · incident number · patient check · not yet told
+    cur = FakeCursor([None, {"id": "al1"}, {"n": 41}, {"?": 1}, None])
+    ref = secresp.integrity_failure(cur, resource="LabReport LR-1", detail="digest differs",
+                                    patient_id="p1")
+    _, note = next((q, p) for q, p in cur.executed if "INSERT INTO Notifications" in q)
+    assert note[0] == "p1" and note[1] == "SECURITY_RECORD_WITHHELD" and ref in note[3]
+    assert ref.endswith("00042")
 
 
 def test_an_open_alert_is_reused_not_duplicated():
@@ -440,7 +474,7 @@ def test_not_configured_is_refused_plainly(monkeypatch):
 
 def test_a_submission_carries_only_signed_parameters(participant):
     params = {"version": 2, "roles": {"Doctor": _flat(samples=7)}}
-    participant.setattr(federation, "fit_local_update", lambda cur: (params, 7))
+    participant.setattr(federation, "fit_local_update", lambda cur: (params, 7, {"trained": False}))
     sent = {}
 
     def fake_http(method, url, *, body=None, headers=None, timeout=30):
@@ -654,3 +688,15 @@ def test_nurse_search_is_limited_to_the_care_team_and_returns_no_emails():
 def test_assigning_a_nurse_needs_the_doctors_own_access_and_no_break_glass():
     src = _src("assign_patient_care_team")
     assert "_require_write_access" in src and "emergency override" in src
+
+
+def test_an_outdated_contract_is_reported_unverified_without_being_asked(ledger):
+    """Deployed before consentStatus: the client knows at connection, so no
+    consent read is attempted, and the result is "unverified", never a verdict."""
+    chain = FakeChain(onchain="revoked")
+    chain.supports_consent_status = False
+    chain.consent_status = lambda *a: pytest.fail("an outdated contract must not be queried")
+    ledger.setattr(consent_ledger, "_client", lambda: chain)
+    assert consent_ledger.chain_state("p", "d") is None
+    assert consent_ledger.verify(FakeCursor(), patient_id="p", doctor_id="d",
+                                 db_authorized=True) == "unverified"

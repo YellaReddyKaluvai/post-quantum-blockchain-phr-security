@@ -92,6 +92,7 @@ def people(env):
     return {
         "admin": admin,
         "patient": _login(env["client"], patient_pub), "patient_uuid": patient_uuid,
+        "patient_pub": patient_pub, "patient_email": f"patient-{env['tag']}@e2e.example.com",
         "doctor": _login(env["client"], doctor_pub), "doctor_uuid": doctor_uuid,
         "tech": _login(env["client"], tech_pub),
         "nurse": _login(env["client"], nurse_pub), "nurse_pub": nurse_pub,
@@ -105,6 +106,10 @@ def _events(env, event_type, actor=None):
         q += " AND actor_id = %s"
         args.append(actor)
     return env["db"].execute(q, args).fetchone()["n"]
+
+
+def _patient_notices(c, headers):
+    return {n["notification_type"] for n in c.get("/api/patient/notifications", headers=headers).json()}
 
 
 def test_the_core_flow(env, people):
@@ -152,6 +157,10 @@ def test_the_core_flow(env, people):
     assert any(p["id"] == pid for p in c.get("/api/nurse/patients", headers=N).json())
     team = c.get("/api/patient/care-team", headers=P).json()
     assert [m["nurse_user_id"] for m in team] == [people["nurse_pub"]]
+    # The admin's review list leaves out a pair that already has an assignment.
+    r = c.get("/api/admin/care-team/suggestions", headers=A)
+    assert r.status_code == 200
+    assert not any(s["patient_id"] == pid and s["nurse_user_id"] == people["nurse_pub"] for s in r.json())
 
     # ── 8–9. Lab request reaches the laboratory ──────────────────────────────
     r = c.post("/api/doctor/requests", headers=D,
@@ -184,6 +193,18 @@ def test_the_core_flow(env, people):
     assert b"%PDF" not in row["encrypted_document"].encode()   # only ciphertext at rest
     if ON_CHAIN:
         assert report["anchored_on"] != "local-simulated" and report["blockchain_tx_hash"]
+    if os.getenv("AWS_S3_ENDPOINT_URL"):
+        # The cloud copy is exactly the ciphertext, and it is a real recovery
+        # path: with the database copy gone the report is still released, and
+        # still has to pass its integrity and signature checks to be.
+        from app.storage_service import download_file_from_s3
+        assert report["s3_key"]
+        assert download_file_from_s3(report["s3_key"]) == row["encrypted_document"].encode("utf-8")
+        db.execute("UPDATE LabReports SET encrypted_document = NULL WHERE id = %s", (report["report_id"],))
+        r = c.get(f"/api/patient/lab-reports/{report['report_id']}/download", headers=P)
+        assert r.status_code == 200 and r.content.startswith(b"%PDF")
+        db.execute("UPDATE LabReports SET encrypted_document = %s WHERE id = %s",
+                   (row["encrypted_document"], report["report_id"]))
     if os.getenv("IPFS_API_URL"):
         # What IPFS holds is exactly the ciphertext — never the report itself.
         from app.storage_service import fetch_from_ipfs
@@ -212,6 +233,7 @@ def test_the_core_flow(env, people):
     assert r.status_code == 409
     assert db.execute("SELECT COUNT(*) AS n FROM SecurityIncidents "
                       "WHERE event_type = 'INTEGRITY_FAILURE' AND status = 'Open'").fetchone()["n"] >= 1
+    assert "SECURITY_RECORD_WITHHELD" in _patient_notices(c, P)     # §27: the patient is told
     db.execute("UPDATE LabReports SET document_hash = %s WHERE id = %s",
                (original, report["report_id"]))
 
@@ -221,6 +243,7 @@ def test_the_core_flow(env, people):
         assert c.get(f"/api/doctor/patients/{pid}", headers=D).status_code == 403
     assert db.execute("SELECT COUNT(*) AS n FROM SecurityAlerts WHERE source = 'ACCESS_CONTROL' "
                       "AND actor_id = %s", (did,)).fetchone()["n"] >= 1
+    assert "SECURITY_ACCESS_REFUSED" in _patient_notices(c, P)
     # …and the nurse that doctor brought in loses access with them.
     assert c.get(f"/api/nurse/patients/{pid}", headers=N).status_code == 403
 
@@ -238,6 +261,7 @@ def test_the_core_flow(env, people):
         assert c.get(f"/api/doctor/patients/{pid}", headers=D).status_code == 403
         assert db.execute("SELECT COUNT(*) AS n FROM SecurityIncidents "
                           "WHERE event_type = 'CONSENT_LEDGER_MISMATCH'").fetchone()["n"] >= 1
+        assert "SECURITY_CONSENT_ALTERED" in _patient_notices(c, P)
         db.execute("UPDATE Consent SET status = 'Pending', prior_refusal = TRUE "
                    "WHERE patient_id = %s AND subject_user_id = %s", (pid, did))
 
@@ -269,8 +293,13 @@ def test_the_core_flow(env, people):
     assert {"EMERGENCY_ACCESS", "INTEGRITY_FAILURE"} <= kinds
     target = next(i for i in incidents if i["event_type"] == "EMERGENCY_ACCESS" and i["status"] == "Open")
     r = c.post(f"/api/admin/security/incidents/{target['id']}", headers=A,
-               json={"status": "Closed", "resolution": "Reviewed in E2E: genuine emergency."})
+               json={"status": "Closed", "resolution": "Reviewed in E2E: genuine emergency.",
+                     "verdict": "false_positive"})
     assert r.status_code == 200
+    # The investigator's verdict becomes a training label for the federated classifier.
+    assert r.json()["training_label"] == "benign"
+    assert db.execute("SELECT label FROM SecurityLabels WHERE source_ref = %s",
+                      (target["id"],)).fetchone()["label"] == 0
     assert c.get("/api/admin/security/policy", headers=A).status_code == 200
 
     # ── Audit trail ──────────────────────────────────────────────────────────
@@ -286,3 +315,24 @@ def test_failed_sign_ins_reach_the_detector_and_alert(env, people):
         assert c.post("/api/login", json={"user_id": public_id, "password": "nope"}).status_code == 401
     assert db.execute("SELECT COUNT(*) AS n FROM SecurityAlerts WHERE title LIKE %s",
                       (f"Repeated failed sign-ins — {public_id}%",)).fetchone()["n"] >= 1
+
+
+@pytest.mark.skipif(not os.getenv("MAILPIT_API_URL"), reason="no mail server to read back from")
+def test_the_approval_email_reaches_the_patient(env, people):
+    """Delivered through a real SMTP exchange and read back from the mail server —
+    not the application's own record that it sent something."""
+    import json
+    import urllib.parse
+    import urllib.request
+    api = os.environ["MAILPIT_API_URL"].rstrip("/")
+    query = urllib.parse.quote(f'to:"{people["patient_email"]}"')
+    with urllib.request.urlopen(f"{api}/api/v1/search?query={query}", timeout=10) as r:
+        messages = json.loads(r.read())["messages"]
+    approval = next(m for m in messages if "Approved" in m["Subject"])
+    with urllib.request.urlopen(f"{api}/api/v1/message/{approval['ID']}", timeout=10) as r:
+        body = json.loads(r.read())["Text"]
+    assert people["patient_pub"] in body                 # the generated User ID, to the right person
+    sent = env["db"].execute(
+        "SELECT sent_status FROM EmailNotifications WHERE email_address = %s AND notification_type = 'APPROVAL'",
+        (people["patient_email"],)).fetchone()
+    assert sent["sent_status"] == "SENT"

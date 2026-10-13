@@ -88,10 +88,14 @@ def _get_client():
                 aws_access_key_id=s.AWS_ACCESS_KEY_ID,
                 aws_secret_access_key=s.AWS_SECRET_ACCESS_KEY,
                 region_name=s.AWS_REGION,
+                # An S3-compatible store (MinIO, Ceph) when set; AWS otherwise.
+                endpoint_url=s.AWS_S3_ENDPOINT_URL or None,
                 # Fail fast: a hung upload must not stall a clinical action.
                 config=Config(
                     connect_timeout=5, read_timeout=15,
                     retries={"max_attempts": 3, "mode": "standard"},
+                    # Self-hosted stores rarely serve bucket subdomains.
+                    s3={"addressing_style": "path"} if s.AWS_S3_ENDPOINT_URL else None,
                 ),
             )
         except Exception as exc:
@@ -158,15 +162,19 @@ def upload_to_aws_s3(
     s3_url = f"https://{settings.AWS_S3_BUCKET}.s3.{settings.AWS_REGION}.amazonaws.com/{s3_key}"
 
     client = _get_client()
+    extra = {}
+    sse = (settings.AWS_S3_SERVER_SIDE_ENCRYPTION or "").strip()
+    if sse and sse.lower() != "none":
+        # Encrypted again at rest by S3. The payload is already AES-GCM
+        # encrypted by us; this is defence in depth, not the primary control.
+        extra["ServerSideEncryption"] = sse
     try:
         client.put_object(
             Bucket=settings.AWS_S3_BUCKET,
             Key=s3_key,
             Body=encrypted_bytes,
             ContentType=content_type,
-            # Encrypted again at rest by S3. The payload is already AES-GCM
-            # encrypted by us; this is defence in depth, not the primary control.
-            ServerSideEncryption="AES256",
+            **extra,
         )
     except Exception as exc:
         raise StorageError(f"S3 upload of {s3_key} failed: {exc}") from exc
