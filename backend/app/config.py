@@ -30,6 +30,17 @@ class Settings(BaseModel):
     access_token_minutes: int = int(os.getenv("ACCESS_TOKEN_MINUTES", "30"))
     refresh_token_days: int = int(os.getenv("REFRESH_TOKEN_DAYS", "14"))
 
+    # ─── Browser sessions ────────────────────────────────────────────────────
+    # The session lives only in an HttpOnly cookie that page scripts cannot
+    # read. CORS_ORIGINS lists the frontends allowed to call the API with it —
+    # never "*", which with credentials would let any site act as the user.
+    CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
+    # "lax" when the frontend and API share a site (the default); "none" when
+    # they are on different sites, which also forces Secure.
+    SESSION_COOKIE_SAMESITE: str = os.getenv("SESSION_COOKIE_SAMESITE", "lax").lower()
+    # Secure (HTTPS only). Off by default for http://localhost development.
+    SESSION_COOKIE_SECURE: bool = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
+
     AWS_ACCESS_KEY_ID: str = os.getenv("AWS_ACCESS_KEY_ID", "AKIA_MOCK_QUANTUMCARE_AWS_KEY")
     AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY", "mock_aws_secret_key_quantumcare_pqc")
     AWS_REGION: str = os.getenv("AWS_REGION", "ap-south-1")
@@ -58,6 +69,10 @@ class Settings(BaseModel):
     BLOCKCHAIN_RPC_URL: str = os.getenv("BLOCKCHAIN_RPC_URL", "http://127.0.0.1:8545")
     BLOCKCHAIN_CHAIN_ID: int = int(os.getenv("BLOCKCHAIN_CHAIN_ID", "31337"))
     BLOCKCHAIN_CONTRACT_ADDRESS: str = os.getenv("BLOCKCHAIN_CONTRACT_ADDRESS", "")
+    # Contracts this deployment used before (comma-separated), e.g. after
+    # migrate_contract.py. Anchors written to them still verify; events from any
+    # other contract never count as this hospital's anchors.
+    BLOCKCHAIN_PREVIOUS_CONTRACT_ADDRESSES: str = os.getenv("BLOCKCHAIN_PREVIOUS_CONTRACT_ADDRESSES", "")
     # anvil's first well-known dev account. Public, unfunded outside local dev,
     # and safe to commit as a default — never use it on a real network.
     BLOCKCHAIN_PRIVATE_KEY: str = os.getenv(

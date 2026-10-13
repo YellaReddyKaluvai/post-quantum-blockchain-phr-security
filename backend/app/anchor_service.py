@@ -134,3 +134,64 @@ def anchor_document(
         "document_hash": document_hash,
         "block_number": block_number,
     }
+
+
+# ─── Late anchoring of what was only anchored locally ────────────────────────
+#
+# Anchors written while no chain was reachable carry a locally derived hash and
+# prove nothing to an outsider. Once a chain is available they can be anchored
+# for real — but late, and that must be stated: an anchor written today proves
+# the digest existed (as recorded in the database) by today's block, not at the
+# row's original time. The on-chain action is prefixed LATE_ANCHOR: so the
+# ledger itself says so, and the row keeps its original simulated hash and the
+# time it was re-anchored.
+
+_ANCHORED_TABLES = {"LabReport": "LabReports", "MedicalDocument": "MedicalDocuments",
+                    "ImagingReport": "ImagingReports"}
+
+
+def reanchor_local(conn, limit: int = 200) -> dict:
+    """Anchor on-chain, now, up to ``limit`` digests that were only anchored locally."""
+    from psycopg.rows import dict_row
+    from app.chain_client import get_chain_client
+    if get_chain_client() is None:
+        return {"chain_available": False, "anchored": 0,
+                "note": "No chain is reachable; nothing can be anchored on-chain yet."}
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("""SELECT id, document_type, document_id, report_id_public, patient_id,
+                              actor_public_id, action, document_hash, tx_hash
+                         FROM DocumentAnchors WHERE anchored_on = %s
+                        ORDER BY created_at LIMIT %s""", (ANCHOR_LOCAL, limit))
+        rows = cur.fetchall()
+    anchored = 0
+    for row in rows:
+        receipt = _submit_to_chain({
+            "document_type": row["document_type"], "document_id": str(row["document_id"]),
+            "report_id_public": row["report_id_public"],
+            "patient_id": str(row["patient_id"]) if row["patient_id"] else None,
+            "actor_public_id": row["actor_public_id"],
+            "action": f"LATE_ANCHOR:{row['action']}"[:60], "document_hash": row["document_hash"]})
+        if not receipt:
+            break                                     # the chain went away; the rest wait
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE DocumentAnchors
+                              SET original_tx_hash = tx_hash, tx_hash = %s, anchored_on = %s,
+                                  block_number = %s, reanchored_at = CURRENT_TIMESTAMP
+                            WHERE id = %s AND anchored_on = %s""",
+                        (receipt["tx_hash"], receipt["network"], receipt["block_number"],
+                         row["id"], ANCHOR_LOCAL))
+            table = _ANCHORED_TABLES.get(row["document_type"])
+            if table:
+                # The document points at the real transaction from now on.
+                cur.execute(f"UPDATE {table} SET blockchain_tx_hash = %s "
+                            f"WHERE id = %s AND blockchain_tx_hash = %s",
+                            (receipt["tx_hash"], row["document_id"], row["tx_hash"]))
+        conn.commit()
+        anchored += 1
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM DocumentAnchors WHERE anchored_on = %s", (ANCHOR_LOCAL,))
+        remaining = cur.fetchone()["n"]
+    return {"chain_available": True, "anchored": anchored, "remaining_local": remaining,
+            "note": ("Anchored late: each proves its digest, as recorded in the database, existed by "
+                     "the block it landed in — not at its original time. The chain records them as "
+                     "LATE_ANCHOR.")}

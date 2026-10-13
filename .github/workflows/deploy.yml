@@ -28,6 +28,9 @@ jobs:
     # The browser prover must agree byte for byte with the Python verifier.
     - name: Check the browser ZKP prover against the server's vectors
       run: node scripts/check-zkp.mjs
+    # The consent token is stored only encrypted under the doctor's passphrase.
+    - name: Check the consent-token vault
+      run: node scripts/check-vault.mjs
     - name: Build Next.js
       run: npm run build
     - name: Build Frontend Docker Image (Dry Run)

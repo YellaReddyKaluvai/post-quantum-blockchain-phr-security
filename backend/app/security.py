@@ -9,6 +9,7 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 import base64
 import os
+import secrets
 
 from app.config import get_settings
 from app.rbac import get_permissions_for_role
@@ -96,6 +97,7 @@ def create_session_token(payload: dict[str, Any], minutes: int | None = None) ->
     settings = get_settings()
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=minutes or settings.access_token_minutes)
     token_payload = {
+        "jti": secrets.token_hex(16),        # names this session, so it can be revoked
         **payload,
         "exp": expires_at,
         "iat": datetime.now(timezone.utc),
@@ -116,6 +118,36 @@ def _extract_token(request: Request, credentials: HTTPAuthorizationCredentials |
         return credentials.credentials
     return request.cookies.get(SESSION_COOKIE_NAME)
 
+
+# A browser attaches the session cookie to any request to this API, including
+# one a hostile page triggers (a form post, an <img>). A state-changing request
+# authenticated by the cookie alone must therefore carry this header, which a
+# page on another origin cannot add without a CORS preflight that CORS_ORIGINS
+# refuses. A Bearer token is never sent automatically, so it needs no such guard.
+CSRF_HEADER = "X-Requested-With"
+CSRF_HEADER_VALUE = "QuantumCare"
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def session_state(user_id: str, jti: str | None) -> tuple[bool, str | None]:
+    """Is this session still good? (revoked, user status) from the database.
+
+    The seam tests replace. A token for a session that was logged out, or for
+    a user since disabled, must stop working at once rather than at expiry.
+    """
+    from app.database import get_db
+    with get_db() as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT u.status::text,
+                      EXISTS (SELECT 1 FROM Sessions s
+                               WHERE s.jti = %s AND NOT s.is_active) AS revoked
+                 FROM Users u WHERE u.id = %s""", (jti, user_id))
+        row = cur.fetchone()
+    if not row:
+        return True, None
+    return bool(row[1]), row[0]
+
+
 def get_current_session(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
@@ -123,7 +155,15 @@ def get_current_session(
     token = _extract_token(request, credentials)
     if token is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+    if credentials is None and request.method not in SAFE_METHODS \
+            and request.headers.get(CSRF_HEADER) != CSRF_HEADER_VALUE:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Cross-site request refused (missing X-Requested-With header).")
     payload = verify_session_token(token)
+    revoked, user_status = session_state(payload.get("user_id"), payload.get("jti"))
+    if revoked or user_status != "Approved":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="This session has ended. Please sign in again.")
     permissions = payload.get("permissions") or []
     if not permissions:
         permissions = list(get_permissions_for_role(payload["role"]))

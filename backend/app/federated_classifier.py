@@ -212,6 +212,25 @@ def privatize(local: Classifier, base: Optional[Classifier], *, clip: float = DE
                   "noise_sigma": round(sigma, 4) if sigma else None}
 
 
+# ─── Privacy accounting across rounds ────────────────────────────────────────
+#
+# One noised release is the Gaussian mechanism with L2 sensitivity ``clip`` and
+# noise ``sigma``, which satisfies ρ-zero-concentrated DP with ρ = clip²/(2σ²)
+# (Bun & Steinke 2016, Prop. 1.6). zCDP composes by adding ρ, and ρ-zCDP implies
+# (ρ + 2·√(ρ·ln(1/δ)), δ)-DP (Prop. 1.3). That is the whole accountant: sum the
+# ρ of every release this hospital has made, convert once. The unit protected
+# is this hospital's set of labelled incidents within one release.
+
+def release_rho(clip: float, sigma: float) -> float:
+    return clip * clip / (2.0 * sigma * sigma)
+
+
+def epsilon_from_rho(rho: float, delta: float) -> float:
+    if rho <= 0:
+        return 0.0
+    return rho + 2.0 * math.sqrt(rho * math.log(1.0 / delta))
+
+
 # ─── At the hub: robust FedAvg ───────────────────────────────────────────────
 
 def _vector(clf: Classifier) -> list[float]:

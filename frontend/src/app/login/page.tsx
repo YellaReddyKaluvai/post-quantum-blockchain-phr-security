@@ -31,11 +31,12 @@ function LoginForm() {
       setLoading(true);
       try {
         const result = await login(id, password);
-        setAuthCookies(result.access_token, result.role, result.public_user_id || id);
+        // The session itself arrived as an HttpOnly cookie; the token in the
+        // response body is deliberately not kept anywhere a script could read it.
+        setAuthCookies(result.role, result.public_user_id || id);
         setSession({
           role: result.role,
           userId: result.public_user_id || id,
-          accessToken: result.access_token,
         });
         const appRole = normalizeRole(result.role);
         const dashPath = appRole ? dashboardRouteMap[appRole] : "/login";
