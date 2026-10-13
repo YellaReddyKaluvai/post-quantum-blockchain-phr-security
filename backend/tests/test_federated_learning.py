@@ -286,3 +286,73 @@ def test_an_incident_verdict_becomes_a_training_label():
     assert req.verdict == "confirmed_threat"
     with pytest.raises(Exception):
         IncidentUpdateRequest(status="Closed", resolution="x", verdict="probably")
+
+
+# ═══ Privacy accounting across rounds ═══════════════════════════════════════
+
+class _Ledger:
+    """Answers the ledger's sums from what was recorded, like the table would."""
+
+    def __init__(self, releases=()):
+        self.releases = list(releases)          # rho per release; None = no noise
+        self.examples = _examples(70, 6, 14)
+
+    def execute(self, sql, params=None):
+        self.last = " ".join(sql.split())
+        if self.last.startswith("INSERT INTO FederatedPrivacyLedger"):
+            self.releases.append(params[5])
+
+    def fetchone(self):
+        noised = [r for r in self.releases if r is not None]
+        return {"noised": len(noised), "unnoised": len(self.releases) - len(noised), "rho": sum(noised)}
+
+    def fetchall(self):
+        return [{"features": f, "label": y} for f, y in self.examples]
+
+
+def test_the_gaussian_release_cost_composes_across_rounds():
+    sigma = fl.DEFAULT_CLIP * math.sqrt(2 * math.log(1.25 / 1e-5)) / 1.0     # ε = 1 per round
+    rho = fl.release_rho(fl.DEFAULT_CLIP, sigma)
+    assert rho == pytest.approx(1 / (4 * math.log(1.25e5)))
+    one, ten = fl.epsilon_from_rho(rho, 1e-5), fl.epsilon_from_rho(10 * rho, 1e-5)
+    # zCDP's total for ten rounds sits well under the naive sum of ten per-round ε.
+    assert one < ten < 10 * 1.0 and ten == pytest.approx(10 * rho + 2 * math.sqrt(10 * rho * math.log(1e5)))
+
+
+def test_every_noised_release_is_recorded_and_added_up(monkeypatch):
+    monkeypatch.setenv("FEDERATION_DP_EPSILON", "1.0")
+    monkeypatch.delenv("FEDERATION_DP_TOTAL_EPSILON", raising=False)
+    cur = _Ledger()
+    for _ in range(3):
+        params, report = federation.train_for_submission(cur, None)
+        assert params and report["privacy"]["dp"]
+    spent = federation.privacy_spent(cur)
+    assert spent["releases_noised"] == 3 and spent["epsilon_total"] > 0
+    assert report["privacy_spent"]["releases_noised"] == 3
+
+
+def test_the_budget_stops_classifier_releases_once_it_would_be_exceeded(monkeypatch):
+    monkeypatch.setenv("FEDERATION_DP_EPSILON", "1.0")
+    monkeypatch.setenv("FEDERATION_DP_TOTAL_EPSILON", "3.0")
+    cur = _Ledger()
+    sent = 0
+    for _ in range(20):
+        params, report = federation.train_for_submission(cur, None)
+        if params is None:
+            break
+        sent += 1
+    assert 1 <= sent < 20 and "budget reached" in report["note"]
+    assert federation.privacy_spent(cur)["epsilon_total"] <= 3.0
+
+
+def test_with_a_budget_nothing_is_released_without_noise(monkeypatch):
+    monkeypatch.delenv("FEDERATION_DP_EPSILON", raising=False)
+    monkeypatch.setenv("FEDERATION_DP_TOTAL_EPSILON", "3.0")
+    params, report = federation.train_for_submission(_Ledger(), None)
+    assert params is None and "only with differential-privacy noise" in report["note"]
+
+
+def test_an_unnoised_release_voids_any_overall_claim(monkeypatch):
+    monkeypatch.delenv("FEDERATION_DP_TOTAL_EPSILON", raising=False)
+    spent = federation.privacy_spent(_Ledger(releases=[0.01, None]))
+    assert spent["releases_without_noise"] == 1 and spent["epsilon_total"] is None

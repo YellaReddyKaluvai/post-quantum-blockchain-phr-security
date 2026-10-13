@@ -19,15 +19,28 @@ function extractErrorDetail(err: unknown, fallback: string): string {
 
 // Cookie names shared with the backend (see backend/app/security.py SESSION_COOKIE_NAME)
 // and the Next.js middleware. Keep these three in sync when renaming.
+// The session token itself is never visible here: the backend sets it as an
+// HttpOnly cookie (TOKEN_COOKIE) that no page script can read, so an injected
+// script cannot steal it. What this file keeps are hints for navigation only —
+// the role, the public user ID, and a marker that a session was started. The
+// backend decides every request on the HttpOnly cookie alone.
 export const TOKEN_COOKIE = "quantumcare_token";
 export const ROLE_COOKIE = "quantumcare_role";
 export const USER_ID_COOKIE = "quantumcare_user_id";
+export const SESSION_MARKER_COOKIE = "quantumcare_session";
+const SESSION_MINUTES = 30;
 
-export function setAuthCookies(accessToken: string, role: string, userId: string) {
+// Sent on every request: the backend refuses a cookie-authenticated change
+// without it, and another site's page cannot add it (cross-site request forgery).
+const CSRF_HEADER = "X-Requested-With";
+const CSRF_HEADER_VALUE = "QuantumCare";
+
+export function setAuthCookies(role: string, userId: string) {
   const secure = typeof window !== "undefined" && window.location.protocol === "https:" ? "; Secure" : "";
-  document.cookie = `${TOKEN_COOKIE}=${accessToken}; Path=/; SameSite=Lax${secure}`;
-  document.cookie = `${ROLE_COOKIE}=${encodeURIComponent(role)}; Path=/; SameSite=Lax${secure}`;
-  document.cookie = `${USER_ID_COOKIE}=${encodeURIComponent(userId)}; Path=/; SameSite=Lax${secure}`;
+  const age = `; Max-Age=${SESSION_MINUTES * 60}`;
+  document.cookie = `${SESSION_MARKER_COOKIE}=1; Path=/; SameSite=Lax${age}${secure}`;
+  document.cookie = `${ROLE_COOKIE}=${encodeURIComponent(role)}; Path=/; SameSite=Lax${age}${secure}`;
+  document.cookie = `${USER_ID_COOKIE}=${encodeURIComponent(userId)}; Path=/; SameSite=Lax${age}${secure}`;
 }
 
 export function getCookie(name: string): string | null {
@@ -38,12 +51,12 @@ export function getCookie(name: string): string | null {
   return null;
 }
 
-export function getAuthToken(): string | null {
-  return getCookie(TOKEN_COOKIE);
+export function hasSessionMarker(): boolean {
+  return getCookie(SESSION_MARKER_COOKIE) === "1";
 }
 
 export function clearAuthCookies() {
-  [TOKEN_COOKIE, ROLE_COOKIE, USER_ID_COOKIE].forEach((name) => {
+  [SESSION_MARKER_COOKIE, ROLE_COOKIE, USER_ID_COOKIE].forEach((name) => {
     document.cookie = `${name}=; Path=/; Max-Age=0; SameSite=Lax`;
   });
 }
@@ -111,15 +124,13 @@ function requestStepUp(info: { message?: string; risk_level?: string; explanatio
 }
 
 async function fetchWithAuth(url: string, options: RequestInit = {}, retried = false): Promise<Response> {
-  const token = getAuthToken();
   const headers = new Headers(options.headers || {});
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
+  headers.set(CSRF_HEADER, CSRF_HEADER_VALUE);
   if (options.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const response = await fetch(url, { ...options, headers });
+  // The HttpOnly session cookie travels with the request; nothing here reads it.
+  const response = await fetch(url, { ...options, headers, credentials: "include" });
 
   // 401 means the token is gone or expired. 403 is a genuine permission
   // decision and must NOT be treated as expiry — that would bounce a user to
@@ -169,8 +180,9 @@ export async function register(data: Record<string, unknown>) {
 export async function login(user_id: string, password: string) {
   const response = await fetch(`${backendBaseUrl}/api/login`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", [CSRF_HEADER]: CSRF_HEADER_VALUE },
     body: JSON.stringify({ user_id, password }),
+    credentials: "include",            // so the browser keeps the HttpOnly session cookie
   });
   if (!response.ok) {
     const err = await response.json().catch(() => null);
@@ -185,8 +197,9 @@ export async function logout() {
   } catch (e) {
     console.error("Logout API failed", e);
   }
+  // The HttpOnly session cookie was revoked and cleared by the backend above.
   const expire = "; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;";
-  for (const name of [TOKEN_COOKIE, ROLE_COOKIE, USER_ID_COOKIE]) {
+  for (const name of [SESSION_MARKER_COOKIE, ROLE_COOKIE, USER_ID_COOKIE]) {
     document.cookie = `${name}=${expire}`;
   }
   if (typeof localStorage !== "undefined") {
@@ -272,6 +285,17 @@ export async function getAuditLogs(params: { action?: string; page?: number; per
   const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/audit-logs?${query.toString()}`);
   if (!response.ok) throw new Error("Failed to fetch audit logs");
   return response.json();
+}
+
+/** Write on-chain, now, the anchors that were only simulated locally (labelled as late). */
+export async function reanchorLocalAnchors() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/blockchain/reanchor`, { method: "POST" });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not anchor on-chain"));
+  }
+  return response.json() as Promise<{ chain_available: boolean; anchored: number;
+                                       remaining_local?: number; note: string }>;
 }
 
 export async function getBlockchainStatus() {
@@ -1326,7 +1350,12 @@ export interface FederatedClassifierStatus {
   needs: { labels: number; per_class: number };
   local_fit: { accuracy: number | null; precision: number | null; recall: number | null; examples: number } | null;
   in_use: { label: string; rounds: number; nodes: number; samples: number } | null;
-  privacy: { clip: number; dp_epsilon: number | null; note: string };
+  privacy: {
+    clip: number; dp_epsilon: number | null; note: string;
+    // Across all rounds (zCDP): null epsilon_total when an earlier release had no noise.
+    spent?: { releases_noised: number; releases_without_noise: number; epsilon_total: number | null;
+              delta: number; budget_epsilon: number | null; budget_remaining: number | null };
+  };
 }
 
 export async function getFederationParticipation(): Promise<FederationParticipation> {
