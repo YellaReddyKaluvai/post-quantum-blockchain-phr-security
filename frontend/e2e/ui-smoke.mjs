@@ -56,13 +56,13 @@ const check = (ok, what) => {
     await page.fill("#peer-name", name);
     await page.getByRole("button", { name: "Register" }).click();
     await page.getByText(`Shared secret for ${name}`).waitFor();
-    const first = (await page.locator("code").first().textContent()).trim();
+    const first = (await page.getByTestId("issued-secret").textContent()).trim();
     check(/^[0-9a-f]{64}$/.test(first), "registering shows a 64-hex secret once");
 
     const row = page.locator("div.p-5", { has: page.getByText(name, { exact: true }) });
     await row.getByRole("button", { name: "Rotate secret" }).click();
     await page.getByText(`New shared secret for ${name}`).waitFor();
-    const second = (await page.locator("code").first().textContent()).trim();
+    const second = (await page.getByTestId("issued-secret").textContent()).trim();
     check(/^[0-9a-f]{64}$/.test(second) && second !== first, "rotating issues a different secret");
 
     await row.getByRole("button", { name: "Suspend" }).click();
