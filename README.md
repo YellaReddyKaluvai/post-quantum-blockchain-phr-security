@@ -261,12 +261,14 @@ listed as not built.
 
 | Area | State | Notes |
 |---|---|---|
-| Registration → admin approval → login | ✅ | Permanent role-scoped User IDs; real SMTP approval/rejection email |
+| Registration → admin approval → login | ✅ | Permanent role-scoped User IDs; real SMTP approval/rejection email — **verified live in CI**: the approval mail is read back from a mail server (Mailpit), addressed to the patient and carrying their User ID |
 | Post-quantum key issuance | ✅ | Real ML-KEM-768 + ML-DSA-65 via liboqs, generated on approval |
 | Doctor → Lab → Patient report pipeline | ✅ | 9 structured panels → hospital PDF → AES-256-GCM → ML-KEM → ML-DSA → chain anchor |
 | Imaging studies | ✅ | Encrypted, signed, anchored — and now readable by the patient and by an entitled doctor |
-| Nurse module | ✅ | Vitals, notes and medication rounds all reach the doctor and the patient; a nurse reaches a patient only through a care-team assignment |
-| Cloud storage (AWS S3) | ✅ | Ciphertext only, verified; doubles as a recovery path if the database copy is lost |
+| Nurse module | ✅ | Vitals, notes and medication rounds all reach the doctor and the patient; a nurse reaches a patient only through a care-team assignment. Existing nurse–patient work is listed for an administrator to review and allocate |
+| Cloud storage (AWS S3) | ✅ | Ciphertext only, verified; doubles as a recovery path if the database copy is lost. **Verified live in CI** against MinIO (`AWS_S3_ENDPOINT_URL` takes any S3-compatible store): the object is exactly the ciphertext, and a report whose database copy is removed is still released from S3 |
+| Patient security notifications | ✅ | A record withheld after failing its integrity or signature check, consent altered against the blockchain, repeated refused attempts at a chart — the patient is told, with the incident reference; only Patient accounts are ever notified |
+| Encryption-key rotation | ✅ | `rotate_encryption_key.py` moves every encrypted column (personal fields, clinical text, post-quantum private keys) to a new key: strict decryption, every value verified, one locked transaction, dry run by default |
 | Blockchain anchoring | ✅ | Real on-chain writes via `PHR.sol` (writes restricted to the backend's key); falls back to a clearly-labelled local anchor. **Verified live in CI** against anvil: consent written on-chain, report digests read back, break-glass through `emergencyAccess()`, a consent row edited in SQL refused as a mismatch |
 | Session handling | ✅ | 30-minute tokens; expiry redirects to login and returns you to where you were |
 | RBAC across 5 roles | ✅ | Enforced server-side; backend/frontend permission parity is test-enforced |
@@ -284,7 +286,7 @@ listed as not built.
 | Medication adherence | ✅ | Refusals and misses reach the prescriber and the patient, not only a percentage |
 | Emergency break-glass access | ✅ | Password re-verification, daily limit, risk-scored, time-boxed, patient notified immediately, anchored on-chain, compliance incident opened automatically |
 | End-to-end flow (spec §37) | ✅ | `tests/test_e2e_flow.py` drives access request → consent → nurse care team → lab request → signed, encrypted report → patient release → tamper detection → withdrawal → break-glass → incidents and audit, against real Postgres and real liboqs. CI runs it twice: database-only, and with the chain, IPFS and a second hospital live |
-| Automated tests | ✅ | 367 Python tests plus a Foundry contract suite and a browser-prover vector check; weighted toward refusals. CI runs them inside the backend image, where liboqs is real |
+| Automated tests | ✅ | 387 Python tests plus a Foundry contract suite and a browser-prover vector check; weighted toward refusals. CI runs them inside the backend image, where liboqs is real |
 | Federated learning between hospitals | ✅ | **Verified live in CI** between two running backends with separate databases: peer registration, signed submission (a wrong secret refused), FedAvg round on the hub, global model pulled back and stored |
 
 🟡 = built and tested in isolation, still to be verified on the running system.
@@ -327,17 +329,18 @@ is listed honestly rather than quietly dropped.
 | **Re-request lifts a withdrawal** | A doctor re-asking after a withdrawal reset the row to Pending, which unblocked them before the patient decided. | The refusal stands until the patient approves |
 | **Chain, IPFS replication, federation in CI** | Exercised only against fakes. | Run live in CI: anvil + deployed contract, two kubo daemons, a second hospital |
 | **ZKP prover in the browser** | Proofs needed `demo/zkp_prove.py`. | "Prove consent" on the patient's page; the token stays in the browser |
+| **Patient security notices** | Integrity and signature failures, altered consent and repeated refused access reached only the admin. | The patient whose record is involved is told |
+| **Public `ENCRYPTION_KEY`** | Data written under the example key could not be moved to a new one. | `rotate_encryption_key.py` |
+| **S3 and e-mail in CI** | Never exercised against a real service. | MinIO and Mailpit in the integration run |
+| **Existing nurse relationships** | Not carried into care teams. | Listed for an administrator to review and allocate |
 | **Lab report progress** | The finalize dialog animated "hashing… ML-KEM… ML-DSA" on client-side timers before the request was sent. | It states what runs on the server; the result shows what the server returned |
 
 ### Still open
 
 | # | Item | Where it stops |
 |---|---|---|
-| 1 | **Rotating a public `ENCRYPTION_KEY`** | Databases created with the example key keep it: the data is encrypted under it, and there is no re-encryption tool yet. The server warns at every start and on the security policy. |
-| 2 | **Existing nurse relationships** | Not migrated into care teams — after this change a nurse sees no patients until assigned. Deliberate (the old access had no basis), but it needs an administrator pass on a live system. |
-| 3 | **Contracts deployed before `consentStatus`** | Cannot answer the new consent query, so every consent reads `unverified` until `PHR.sol` is redeployed (`start.sh` redeploys on a fresh anvil). |
-| 4 | **Browser token storage** | The consent token is kept in the browser's local storage, readable by any script running on this origin. A backup file and a paste-in path exist; hardware-backed storage does not. |
-| 5 | **S3 and SMTP live** | Built and handled honestly when unconfigured, but CI has no AWS or mail account, so neither is exercised against the real service there. |
+| 1 | **Browser token storage** | The consent token is kept in the browser's local storage, readable by any script running on this origin. A backup file and a paste-in path exist; hardware-backed storage does not. |
+| 2 | **Contracts deployed before `consentStatus`** | Detected and reported (startup log, the admin security policy, `start.sh`), but such a contract still has to be redeployed by hand before consent is verified on-chain. |
 
 ### Not implemented
 
