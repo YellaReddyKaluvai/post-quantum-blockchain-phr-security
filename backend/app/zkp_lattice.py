@@ -423,7 +423,7 @@ def prove(token: str, challenge: str, context: str = "") -> dict[str, str]:
         # The abort. A rejected attempt is discarded whole — y, w, c̃ and z — and
         # nothing about it leaves this function; publishing rejected transcripts
         # would undo the zero-knowledge property.
-        if max(abs(v) for poly in z for v in poly) >= GAMMA1 - BETA:
+        if _inf_norm(z) >= GAMMA1 - BETA:
             continue
         return {"scheme": SCHEME, "proof": _encode_proof(c_tilde, z)}
 
@@ -455,7 +455,7 @@ def verify(commitment: str, proof: str, challenge: str, context: str = "") -> bo
     # The bound is half the security argument, not a formality. Without it
     # anyone could pick z1, then set z2 = w + c·t − A·z1 for any w they like:
     # the equation only means something when z is short.
-    if max(abs(v) for poly in z for v in poly) >= GAMMA1 - BETA:
+    if _inf_norm(z) >= GAMMA1 - BETA:
         return False
 
     w = _commitment_side(_expand_a(rho), z, _to_ntt(sample_in_ball(c_tilde)), t)
@@ -484,7 +484,7 @@ def simulate_transcript(commitment: str, c_tilde: bytes) -> tuple[list[list[int]
 def check_transcript(commitment: str, w: list[list[int]], c_tilde: bytes, z: list[list[int]]) -> bool:
     """The interactive verifier: ‖z‖∞ < γ1 − β and A·z1 + z2 − c·t == w."""
     rho, t, _ = _decode_commitment(commitment)
-    if max(abs(v) for poly in z for v in poly) >= GAMMA1 - BETA:
+    if _inf_norm(z) >= GAMMA1 - BETA:
         return False
     return _commitment_side(_expand_a(rho), z, _to_ntt(sample_in_ball(c_tilde)), t) == \
         [[x % Q for x in poly] for poly in w]

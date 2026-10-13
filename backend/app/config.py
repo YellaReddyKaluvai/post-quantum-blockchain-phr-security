@@ -11,7 +11,12 @@ load_dotenv()
 class Settings(BaseModel):
     DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/pqc_hospital")
     SECRET_KEY: str = os.getenv("SECRET_KEY", "change-me-in-production")
-    ENCRYPTION_KEY: str = os.getenv("ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef") # 32 bytes for AES
+    # 32 bytes for AES. NOTE: this default only applies when the variable is
+    # absent entirely. A ".env" line written as documented — "ENCRYPTION_KEY="
+    # with nothing after the "=" — sets it to "", which os.getenv returns as-is
+    # rather than falling through to this default; see get_settings(), which
+    # corrects that case the same way it already does for SECRET_KEY.
+    ENCRYPTION_KEY: str = os.getenv("ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
     # Keys the pseudonymous party references written to the consent contract.
     # Separate from SECRET_KEY so that rotating the session key cannot make every
     # on-chain consent look tampered with. Never change it once consents are on-chain.
@@ -76,6 +81,13 @@ _PUBLIC_ENCRYPTION_KEYS = {"0123456789abcdef0123456789abcdef"}
 _PUBLIC_ADMIN_PASSWORDS = {"Admin@1234", ""}
 MIN_SECRET_KEY_LENGTH = 32
 
+# Chain IDs a local dev chain actually uses (anvil, hardhat). Anything else is
+# a real network, where anvil's well-known dev private key must never sign.
+_LOCAL_DEV_CHAIN_IDS = {31337, 1337}
+_WELL_KNOWN_DEV_PRIVATE_KEYS = {
+    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+}
+
 _KEY_DIR = Path(os.getenv("GENERATED_KEY_DIR") or Path(__file__).resolve().parent.parent)
 _SECRET_KEY_FILE = _KEY_DIR / ".secret_key"
 _LEDGER_KEY_FILE = _KEY_DIR / ".ledger_key"
@@ -126,6 +138,13 @@ def configuration_warnings(settings: "Settings") -> list[str]:
             f"SECRET_KEY is unset, a placeholder or shorter than {MIN_SECRET_KEY_LENGTH} "
             f"characters; a generated key ({_SECRET_KEY_FILE.name}) is in use. Set it "
             "explicitly when running more than one server.")
+    if "BLOCKCHAIN_PRIVATE_KEY" in _GENERATED:
+        warnings.append(
+            "BLOCKCHAIN_PRIVATE_KEY was anvil's well-known public dev key while "
+            f"BLOCKCHAIN_CHAIN_ID ({settings.BLOCKCHAIN_CHAIN_ID}) is not a local dev chain "
+            f"({sorted(_LOCAL_DEV_CHAIN_IDS)}); on-chain anchoring has been disabled rather "
+            "than sign transactions on a real network with a key anyone can look up. Set a "
+            "funded, testnet/mainnet-only private key to enable it.")
     return warnings
 
 
@@ -138,4 +157,29 @@ def get_settings() -> Settings:
     if len(settings.CONSENT_LEDGER_KEY) < MIN_SECRET_KEY_LENGTH:
         settings.CONSENT_LEDGER_KEY = _generated_secret_key(_LEDGER_KEY_FILE)
         _GENERATED.add("CONSENT_LEDGER_KEY")
+    if not settings.ENCRYPTION_KEY:
+        # An absent variable already defaults to this via the field above; this
+        # covers "ENCRYPTION_KEY=" present-but-empty, which os.getenv returns
+        # as "" rather than falling through to that default. Without this, an
+        # empty string is padded to 32 zero-bytes by get_encryption_key() — a
+        # key that matches no data ever encrypted under the documented default,
+        # silently making every existing encrypted column unreadable rather
+        # than failing loudly. configuration_warnings() still reports this as
+        # the public example key, same as if it had been set explicitly.
+        settings.ENCRYPTION_KEY = next(iter(_PUBLIC_ENCRYPTION_KEYS))
+    if (
+        settings.BLOCKCHAIN_ENABLED
+        and settings.BLOCKCHAIN_CHAIN_ID not in _LOCAL_DEV_CHAIN_IDS
+        and settings.BLOCKCHAIN_PRIVATE_KEY.lower() in _WELL_KNOWN_DEV_PRIVATE_KEYS
+    ):
+        # Refuse to anchor rather than sign real-network transactions with a
+        # key every wallet and tutorial on earth already has memorized.
+        logger.critical(
+            "BLOCKCHAIN_CHAIN_ID=%s is not a local dev chain but BLOCKCHAIN_PRIVATE_KEY is "
+            "anvil's published dev key. Disabling on-chain anchoring (falling back to "
+            "local-simulated) rather than using it on a real network.",
+            settings.BLOCKCHAIN_CHAIN_ID,
+        )
+        settings.BLOCKCHAIN_ENABLED = False
+        _GENERATED.add("BLOCKCHAIN_PRIVATE_KEY")
     return settings
