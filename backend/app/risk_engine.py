@@ -221,14 +221,15 @@ def invalidate_baselines() -> None:
 def usable_federated_model(cur) -> tuple[Optional[dict], Optional[str]]:
     """The newest global model that real institutions — not simulations — built.
 
-    Either a local round that included at least one real peer, or a model
-    pulled from a federation hub. Returns ``(parameters, label)``.
+    Either a local round that included at least one real peer and passed
+    evaluation on this hospital's data, or a model pulled from a federation hub
+    that passed it (or that an administrator chose). Returns ``(parameters, label)``.
     """
     candidates = []
     try:
         cur.execute(
             """SELECT parameters, created_at, round_number FROM FederatedGlobalModel
-                WHERE real_nodes >= 2 ORDER BY round_number DESC LIMIT 1""")
+                WHERE real_nodes >= 2 AND adopted ORDER BY round_number DESC LIMIT 1""")
         row = cur.fetchone()
         if row:
             candidates.append((row["created_at"], row["parameters"],

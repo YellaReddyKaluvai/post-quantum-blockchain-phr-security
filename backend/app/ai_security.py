@@ -355,6 +355,16 @@ def federated_average(node_parameters: list[tuple[str, int, dict]]) -> dict[str,
 
 PARAMETERS_VERSION = 2
 ALL_ROLES = "ALL"
+ROLE_SAMPLE_CAP_RATIO = 5.0      # matches federated_classifier.SAMPLE_CAP_RATIO
+ROLE_OUTLIER_FACTOR = 3.0        # matches federated_classifier.OUTLIER_FACTOR
+ROLE_OUTLIER_FLOOR = 1.0         # log-space distance always tolerated (~2.7× on one feature)
+
+
+def _baseline_vector(flat: dict) -> list[float]:
+    """A role baseline in log space, where "twice as many" is the same step at any size."""
+    import math
+    return ([math.log1p(max(0.0, float(flat.get("medians", {}).get(f, 0.0)))) for f in FEATURE_WEIGHTS]
+            + [math.log1p(max(0.0, float(flat.get("scales", {}).get(f, 1.0)))) for f in FEATURE_WEIGHTS])
 
 
 def fit_role_baselines(windows: list[ActorWindow]) -> dict[str, Baseline]:
@@ -386,13 +396,26 @@ def as_role_parameters(parameters: dict[str, Any]) -> dict[str, dict]:
     return {ALL_ROLES: parameters}
 
 
-def federated_average_roles(node_parameters: list[tuple[str, int, dict]]) -> dict[str, Any]:
+def federated_average_roles(node_parameters: list[tuple[str, int, dict]],
+                            report: Optional[dict] = None) -> dict[str, Any]:
     """FedAvg run separately for every role any participant described.
 
     Within a role each node is weighted by the number of actors it observed *in
     that role*, so a hospital with forty doctors and two technicians shapes the
     doctor model far more than the technician model — which is the point.
+
+    No node counts for more than ROLE_SAMPLE_CAP_RATIO × the lower median of
+    the nodes describing that role — the same rule the classifier's FedAvg
+    applies — so a participant cannot buy a role's baseline by claiming a
+    huge number of actors. With three or more nodes in a role, one whose
+    baseline lies further than ROLE_OUTLIER_FACTOR × the median distance from
+    the coordinate-wise median (in log space) is set aside for that role.
+    Who was capped or set aside goes into ``report``, never into the model,
+    which other institutions receive. As for the classifier, these bound what
+    one participant can do in a round; they do not prove robustness against
+    several colluding ones.
     """
+    import math
     per_role: dict[str, list[tuple[str, int, dict]]] = {}
     for name, count, params in node_parameters:
         for role, flat in as_role_parameters(params).items():
@@ -400,7 +423,25 @@ def federated_average_roles(node_parameters: list[tuple[str, int, dict]]) -> dic
             per_role.setdefault(role, []).append((name, samples, flat))
 
     roles = {}
+    capped: dict[str, list[str]] = {} if report is None else report.setdefault("capped", {})
+    excluded: dict[str, list[str]] = {} if report is None else report.setdefault("excluded", {})
     for role, nodes in per_role.items():
+        if len(nodes) >= 3:
+            vectors = [_baseline_vector(flat) for _, _, flat in nodes]
+            centre = [statistics.median(col) for col in zip(*vectors)]
+            dists = [math.dist(v, centre) for v in vectors]
+            limit = max(ROLE_OUTLIER_FACTOR * statistics.median(dists), ROLE_OUTLIER_FLOOR)
+            out = [name for (name, _, _), d in zip(nodes, dists) if d > limit]
+            if out:
+                excluded[role] = out
+                nodes = [n for n, d in zip(nodes, dists) if d <= limit]
+        if len(nodes) >= 2:
+            cap = max(1, int(ROLE_SAMPLE_CAP_RATIO * statistics.median_low(
+                [max(1, n) for _, n, _ in nodes])))
+            over = [name for name, n, _ in nodes if n > cap]
+            if over:
+                capped[role] = over
+            nodes = [(name, min(n, cap), flat) for name, n, flat in nodes]
         agg = federated_average(nodes)
         roles[role] = {"medians": agg["medians"], "scales": agg["scales"],
                        "sample_count": agg["total_samples"],
@@ -422,7 +463,8 @@ def baseline_for_role(parameters: dict[str, Any], role: str) -> Optional[Baselin
 # ─── Peer submission integrity (spec §21) ────────────────────────────────────
 
 def parameters_signature(node_name: str, round_number: int, sample_count: int,
-                         parameters: dict, shared_secret: str) -> str:
+                         parameters: dict, shared_secret: str,
+                         timestamp: Optional[int] = None) -> str:
     """HMAC over a peer's submission.
 
     Federation moves model parameters between institutions, so a peer that can
@@ -434,24 +476,29 @@ def parameters_signature(node_name: str, round_number: int, sample_count: int,
     Signing a canonical JSON form rather than the raw request body means the
     signature survives key reordering and whitespace, which would otherwise
     make valid submissions fail for no reason.
+
+    ``timestamp`` (Unix seconds) is signed with the rest: the hub refuses a
+    submission that is stale or not newer than the last one it accepted from
+    that peer, so a captured submission cannot be replayed to keep an old
+    update alive or to trigger rounds.
     """
     import hmac
     import json as _json
-    canonical = _json.dumps(
-        {"node": node_name, "round": round_number,
-         "samples": sample_count, "parameters": parameters},
-        sort_keys=True, separators=(",", ":"),
-    )
+    body: dict[str, Any] = {"node": node_name, "round": round_number,
+                            "samples": sample_count, "parameters": parameters}
+    if timestamp is not None:
+        body["ts"] = int(timestamp)
+    canonical = _json.dumps(body, sort_keys=True, separators=(",", ":"))
     return hmac.new(shared_secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
 
 
 def verify_parameters_signature(node_name: str, round_number: int, sample_count: int,
                                 parameters: dict, shared_secret: str,
-                                signature: str) -> bool:
+                                signature: str, timestamp: Optional[int] = None) -> bool:
     """Constant-time check of a peer's submission signature."""
     import hmac
     expected = parameters_signature(node_name, round_number, sample_count,
-                                    parameters, shared_secret)
+                                    parameters, shared_secret, timestamp)
     return hmac.compare_digest(expected, signature or "")
 
 
@@ -489,4 +536,8 @@ def sane_parameters(parameters: dict) -> bool:
             return False
         if m > 1e6 or s > 1e6:
             return False
+    # The per-role actor count weights FedAvg; an unbounded one would buy the role.
+    count = parameters.get("sample_count", 1)
+    if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 1_000_000:
+        return False
     return True
