@@ -2,15 +2,16 @@
 
 import React, { createContext, useContext, useMemo, useState, useEffect } from "react";
 import { normalizeRole, type AppRole, rolePermissions, dashboardRouteMap } from "@/lib/iam";
-import { TOKEN_COOKIE, ROLE_COOKIE, USER_ID_COOKIE } from "@/lib/session";
+import { ROLE_COOKIE, USER_ID_COOKIE, SESSION_MARKER_COOKIE } from "@/lib/session";
 
 type AuthState = {
   isAuthenticated: boolean;
   role: AppRole | null;
   permissions: string[];
   userId: string | null;
-  accessToken: string | null;
-  setSession: (input: { role: AppRole | null; permissions?: string[]; userId?: string | null; accessToken?: string | null }) => void;
+  // The session token is an HttpOnly cookie this code never sees; the backend
+  // validates every request. Here we only know that a session was started.
+  setSession: (input: { role: AppRole | null; permissions?: string[]; userId?: string | null }) => void;
   clearSession: () => void;
 };
 
@@ -26,7 +27,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [role, setRole] = useState<AppRole | null>(null);
   const [permissions, setPermissions] = useState<string[]>([]);
   const [userId, setUserId] = useState<string | null>(null);
-  const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [hasSession, setHasSession] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
 
   useEffect(() => {
@@ -38,30 +39,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setRole(cookieRole);
       setPermissions(cookieRole ? rolePermissions[cookieRole] : []);
       setUserId(readCookie(USER_ID_COOKIE) || localStorage.getItem(USER_ID_COOKIE));
-      setAccessToken(readCookie(TOKEN_COOKIE) || localStorage.getItem(TOKEN_COOKIE));
+      setHasSession(readCookie(SESSION_MARKER_COOKIE) === "1");
       setIsMounted(true);
     });
   }, []);
 
   const value = useMemo<AuthState>(() => ({
-    isAuthenticated: Boolean(role && accessToken),
+    isAuthenticated: Boolean(role && hasSession),
     role,
     permissions,
     userId,
-    accessToken,
-    setSession: ({ role: nextRole, permissions: nextPermissions, userId: nextUserId, accessToken: nextToken }) => {
+    setSession: ({ role: nextRole, permissions: nextPermissions, userId: nextUserId }) => {
       setRole(nextRole);
       setPermissions(nextPermissions ?? (nextRole ? rolePermissions[nextRole] : []));
       setUserId(nextUserId ?? null);
-      setAccessToken(nextToken ?? null);
+      setHasSession(Boolean(nextRole));
     },
     clearSession: () => {
       setRole(null);
       setPermissions([]);
       setUserId(null);
-      setAccessToken(null);
+      setHasSession(false);
     },
-  }), [accessToken, permissions, role, userId]);
+  }), [hasSession, permissions, role, userId]);
 
   // Avoid hydration mismatch by not rendering until client-side auth state is loaded
   if (!isMounted) return null;

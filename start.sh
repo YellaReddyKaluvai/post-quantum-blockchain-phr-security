@@ -147,8 +147,11 @@ fi
 if up 8000; then
   say "Backend API (8000)" "already running"
 else
+  # The frontends allowed to call the API with the session cookie (the tunnel
+  # needs none: it goes through the Next.js proxy, on the page's own origin).
+  CORS_ORIGINS="http://localhost:3000,http://127.0.0.1:3000${LAN_IP:+,http://$LAN_IP:3000}"
   ( cd backend && source venv/bin/activate \
-    && DYLD_LIBRARY_PATH="$HOME/_oqs/lib:${DYLD_LIBRARY_PATH:-}" \
+    && DYLD_LIBRARY_PATH="$HOME/_oqs/lib:${DYLD_LIBRARY_PATH:-}" CORS_ORIGINS="$CORS_ORIGINS" \
        nohup python3 -m uvicorn app.main:app --host "$BIND_HOST" --port 8000 > /tmp/backend.log 2>&1 & )
   wait_up 8000 45 && say "Backend API (8000)" "started" || say "Backend API (8000)" "FAILED — see /tmp/backend.log"
 fi

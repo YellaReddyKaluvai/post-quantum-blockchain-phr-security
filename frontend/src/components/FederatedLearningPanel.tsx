@@ -181,6 +181,17 @@ export default function FederatedLearningPanel({ onChanged }: { onChanged: () =>
             <ShieldCheck className="w-3.5 h-3.5" /> Updates clipped to {classifier.privacy.clip} ·{" "}
             {classifier.privacy.dp_epsilon ? `differential privacy ε=${classifier.privacy.dp_epsilon} per round` : classifier.privacy.note}
           </p>
+          {classifier.privacy.dp_epsilon && classifier.privacy.spent && (
+            <p className="text-[11px] text-slate-500 mt-1">
+              {classifier.privacy.spent.epsilon_total !== null
+                ? <>Spent across all rounds: <b>ε={classifier.privacy.spent.epsilon_total}</b> at δ={classifier.privacy.spent.delta}{" "}
+                    ({classifier.privacy.spent.releases_noised} release(s))
+                    {classifier.privacy.spent.budget_epsilon
+                      ? ` · budget ε=${classifier.privacy.spent.budget_epsilon}, ${classifier.privacy.spent.budget_remaining} left`
+                      : " · no total budget set"}</>
+                : `${classifier.privacy.spent.releases_without_noise} earlier release(s) had no noise, so no overall guarantee is claimed.`}
+            </p>
+          )}
         </div>
       )}
 
