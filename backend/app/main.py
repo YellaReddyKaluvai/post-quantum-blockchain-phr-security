@@ -40,9 +40,10 @@ from app.schemas import (
     ActivePrescriptionForNurse, MedicationAdministrationRecord, CreateMedicationAdministrationRequest,
     NursePatientDetail,
     StepUpRequest, IncidentUpdateRequest,
-    CareTeamAssignRequest, CareTeamMember,
+    CareTeamAssignRequest, CareTeamMember, FederationParticipationRequest,
 )
 from app.config import configuration_warnings, get_settings
+from app import federated_classifier as fed_clf
 from app.database import get_db, init_db
 from app.security import (
     hash_password, verify_password, encrypt_data, decrypt_data,
@@ -109,6 +110,7 @@ def on_startup():
         logger.warning("INSECURE CONFIGURATION: %s", warning)
     init_db()
     _start_background_analysis()
+    _start_federation_scheduler()
 
 
 def _start_background_analysis() -> None:
@@ -4912,6 +4914,8 @@ def _run_security_analysis(hours: int) -> dict:
 
             local = aisec.fit_role_baselines(windows)
             federated, federated_label = risk_engine.usable_federated_model(cur)
+            classifier, classifier_label = risk_engine._choose_classifier(
+                cur, federated, federated_label)
             min_peers = risk_engine.policy()["min_peers"]
 
             summary = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
@@ -4922,20 +4926,23 @@ def _run_security_analysis(hours: int) -> dict:
                 # differences as anomalies, so each role is its own peer group.
                 baseline, source, samples = risk_engine.select_baseline(
                     role, local, federated, min_peers)
-                if baseline is None:
+                if baseline is None and classifier is None:
                     too_small.append(role)
                     continue
-                baselines_used[role] = f"{source} ({samples} peers)"
+                baselines_used[role] = (f"{source} ({samples} peers)" if baseline is not None
+                                        else f"classifier only ({classifier_label})")
                 for w in group:
-                    risk, level, contributions = aisec.score(w, baseline)
-                    _persist_assessment(cur, w, risk, level, contributions, source, hours)
-                    summary[level] += 1
+                    d = risk_engine.assess(w, baseline, source, samples, classifier, classifier_label)
+                    _persist_assessment(cur, w, d.risk, d.level, d.contributions,
+                                        d.baseline_source, hours)
+                    summary[d.level] += 1
             conn.commit()
 
     risk_engine.invalidate_baselines()
     return {"analysed": sum(summary.values()), "window_hours": hours,
             "peer_groups": list(by_role.keys()), "risk_breakdown": summary,
             "baselines": baselines_used, "federated_model": federated_label,
+            "classifier": classifier_label,
             "groups_too_small_to_score": too_small}
 
 
@@ -5099,8 +5106,8 @@ def update_security_incident(incident_id: str, req: IncidentUpdateRequest,
     """
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("SELECT incident_ref, status FROM SecurityIncidents WHERE id = %s",
-                        (incident_id,))
+            cur.execute("""SELECT incident_ref, status, actor_id, created_at, event_type
+                             FROM SecurityIncidents WHERE id = %s""", (incident_id,))
             row = cur.fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="Incident not found")
@@ -5116,11 +5123,43 @@ def update_security_incident(incident_id: str, req: IncidentUpdateRequest,
                     WHERE id = %s""",
                 (req.status, (req.resolution or "").strip() or None, req.status,
                  session["user_id"], req.status, incident_id))
+            label = None
+            if req.status == "Closed" and req.verdict:
+                cur.execute("UPDATE SecurityIncidents SET verdict = %s WHERE id = %s",
+                            (req.verdict, incident_id))
+                label = _label_from_incident(cur, row, incident_id, req.verdict, session["user_id"])
             log_admin_action(conn, session["user_id"], session.get("public_user_id"),
                              f"SECURITY_INCIDENT_{req.status.upper()}",
-                             details={"incident_ref": row["incident_ref"]})
+                             details={"incident_ref": row["incident_ref"], "verdict": req.verdict,
+                                      "training_label": label})
             conn.commit()
-    return {"status": "success", "incident_ref": row["incident_ref"], "new_status": req.status}
+    if label:
+        risk_engine.invalidate_baselines()
+    return {"status": "success", "incident_ref": row["incident_ref"], "new_status": req.status,
+            "training_label": label}
+
+
+def _label_from_incident(cur, incident: dict, incident_id: str, verdict: str,
+                         labelled_by: str) -> Optional[str]:
+    """An investigator's verdict, turned into a training example for the threat
+    classifier: the actor's behaviour over the 24 hours before the incident, and
+    whether it was a real threat. Incidents with no actor teach nothing."""
+    if not incident.get("actor_id"):
+        return None
+    windows = aisec.extract_windows(cur, hours=24, actor_id=str(incident["actor_id"]),
+                                    end=incident["created_at"])
+    if not windows:
+        return None
+    w = windows[0]
+    label = 1 if verdict == "confirmed_threat" else 0
+    cur.execute(
+        """INSERT INTO SecurityLabels (actor_id, actor_role, features, label, source,
+                                       source_ref, labelled_by)
+           VALUES (%s, %s, %s, %s, 'INCIDENT', %s, %s)
+           ON CONFLICT (source, source_ref) DO NOTHING""",
+        (incident["actor_id"], w.actor_role, json.dumps(w.features), label, incident_id,
+         labelled_by))
+    return "threat" if label else "benign"
 
 
 # ─── Federated learning / federated IDS (spec §20–21) ────────────────────────
@@ -5143,133 +5182,360 @@ SIMULATED_PEERS = [
 ]
 
 
-@app.post("/api/admin/security/federated/round")
-def run_federated_round(session: dict = Depends(require_role("Administrator"))):
-    """Fit this hospital's local model, then aggregate a federated round."""
+LOCAL_NODE = "This hospital (local)"
+
+
+def _latest_global_classifier(cur) -> Optional[fed_clf.Classifier]:
+    cur.execute("SELECT parameters FROM FederatedGlobalModel ORDER BY round_number DESC LIMIT 1")
+    row = cur.fetchone()
+    clf = (row["parameters"] or {}).get("classifier") if row else None
+    return fed_clf.Classifier.from_parameters(clf) if fed_clf.sane_classifier(clf) else None
+
+
+def _federated_round(cur) -> dict:
+    """One federated round at this hospital as hub (spec §20–21).
+
+    Baselines: per-role FedAvg over this hospital's model and every real peer's.
+    Classifier: this hospital trains from the previous global weights (like any
+    participant), and robust FedAvg combines it with the peers' trained
+    classifiers. Simulated peers, used only before anyone has federated, add
+    baselines but never classifier weights — there is nothing they could have
+    learned from.
+    """
     import json
-    with get_db() as conn:
-        with conn.cursor(row_factory=dict_row) as cur:
-            windows = aisec.extract_windows(cur, hours=720)
-            if not windows:
-                raise HTTPException(status_code=400, detail="No activity to learn from yet.")
+    windows = aisec.extract_windows(cur, hours=720)
+    if not windows:
+        raise HTTPException(status_code=400, detail="No activity to learn from yet.")
 
-            # Per-role local model: detection compares each actor with their own
-            # role, so the shared model must be per role too (version 2 params).
-            local_baselines = aisec.fit_role_baselines(windows)
-            local_params = aisec.role_parameters(local_baselines)
-            local_samples = len(windows)
-            cur.execute("SELECT COALESCE(MAX(round_number), 0) + 1 AS n FROM FederatedRounds")
-            rnd = cur.fetchone()["n"]
+    local_baselines = aisec.fit_role_baselines(windows)
+    previous = _latest_global_classifier(cur)
+    local_classifier, local_training = federation.train_for_submission(cur, previous)
+    local_params = aisec.role_parameters(local_baselines, local_classifier)
+    local_samples = len(windows)
+    cur.execute("SELECT COALESCE(MAX(round_number), 0) + 1 AS n FROM FederatedRounds")
+    rnd = cur.fetchone()["n"]
 
-            nodes: list[tuple[str, int, dict]] = []
+    nodes: list[tuple[str, int, dict]] = []
+    cur.execute(
+        """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,
+                                        sample_count, local_parameters)
+           VALUES (%s,%s,FALSE,%s,%s)""",
+        (rnd, LOCAL_NODE, local_samples, json.dumps(local_params)))
+    nodes.append((LOCAL_NODE, local_samples, local_params))
 
-            # This node is real: parameters fitted from this hospital's activity.
+    # Real peer submissions: those filed against this round, else each peer's
+    # most recent one from the last week (a peer cannot know the round number
+    # this node is about to open).
+    cur.execute(
+        """SELECT node_name, sample_count, local_parameters
+             FROM FederatedRounds
+            WHERE round_number = %s AND is_simulated = FALSE AND node_name <> %s""",
+        (rnd, LOCAL_NODE))
+    real_peers = cur.fetchall()
+    if not real_peers:
+        cur.execute(
+            """SELECT DISTINCT ON (node_name) node_name, sample_count, local_parameters
+                 FROM FederatedRounds
+                WHERE is_simulated = FALSE AND node_name <> %s
+                  AND created_at > CURRENT_TIMESTAMP - INTERVAL '7 days'
+                ORDER BY node_name, round_number DESC""", (LOCAL_NODE,))
+        real_peers = cur.fetchall()
+        for peer in real_peers:
             cur.execute(
                 """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,
                                                 sample_count, local_parameters)
-                   VALUES (%s,%s,FALSE,%s,%s)""",
-                (rnd, "This hospital (local)", local_samples, json.dumps(local_params)))
-            nodes.append(("This hospital (local)", local_samples, local_params))
+                   VALUES (%s, %s, FALSE, %s, %s)
+                   ON CONFLICT (round_number, node_name) DO NOTHING""",
+                (rnd, peer["node_name"], peer["sample_count"],
+                 psycopg.types.json.Json(peer["local_parameters"])))
+    for peer in real_peers:
+        nodes.append((peer["node_name"], peer["sample_count"], peer["local_parameters"]))
 
-            # Real peer submissions for this round take precedence. Simulated
-            # peers exist to demonstrate the aggregation when nobody has
-            # federated yet; the moment a real institution submits, padding the
-            # round with invented nodes would misrepresent the result.
-            cur.execute(
-                """SELECT node_name, sample_count, local_parameters
-                     FROM FederatedRounds
-                    WHERE round_number = %s AND is_simulated = FALSE
-                      AND node_name <> 'This hospital (local)'""",
-                (rnd,))
-            real_peers = cur.fetchall()
-            for peer in real_peers:
-                nodes.append((peer["node_name"], peer["sample_count"], peer["local_parameters"]))
+    simulated_used = 0 if real_peers else len(SIMULATED_PEERS)
+    for name, m_scale, s_scale in (SIMULATED_PEERS if not real_peers else []):
+        roles = {
+            role: {
+                "medians": {k: round(v * m_scale, 4) for k, v in b.medians.items()},
+                "scales": {k: round(v * s_scale, 4) for k, v in b.scales.items()},
+                "sample_count": max(1, int(b.sample_count * m_scale)),
+            } for role, b in local_baselines.items()
+        }
+        params = {"version": aisec.PARAMETERS_VERSION, "roles": roles}
+        samples = max(1, int(local_samples * m_scale))
+        cur.execute(
+            """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,
+                                            sample_count, local_parameters)
+               VALUES (%s,%s,TRUE,%s,%s)""",
+            (rnd, name, samples, json.dumps(params)))
+        nodes.append((name, samples, params))
 
-            # Also pick up submissions filed against the previous round, since a
-            # peer cannot know the round number this node is about to open.
-            if not real_peers:
-                cur.execute(
-                    """SELECT DISTINCT ON (node_name) node_name, sample_count, local_parameters
-                         FROM FederatedRounds
-                        WHERE is_simulated = FALSE AND node_name <> 'This hospital (local)'
-                          AND created_at > CURRENT_TIMESTAMP - INTERVAL '7 days'
-                        ORDER BY node_name, round_number DESC""")
-                recent = cur.fetchall()
-                for peer in recent:
-                    nodes.append((peer["node_name"], peer["sample_count"], peer["local_parameters"]))
-                    cur.execute(
-                        """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,
-                                                        sample_count, local_parameters)
-                           VALUES (%s, %s, FALSE, %s, %s)
-                           ON CONFLICT (round_number, node_name) DO NOTHING""",
-                        (rnd, peer["node_name"], peer["sample_count"],
-                         psycopg.types.json.Json(peer["local_parameters"])))
-                real_peers = recent
+    global_params = aisec.federated_average_roles(nodes)
 
-            simulated_used = 0 if real_peers else len(SIMULATED_PEERS)
-            for name, m_scale, s_scale in (SIMULATED_PEERS if not real_peers else []):
-                roles = {
-                    role: {
-                        "medians": {k: round(v * m_scale, 4) for k, v in b.medians.items()},
-                        "scales": {k: round(v * s_scale, 4) for k, v in b.scales.items()},
-                        "sample_count": max(1, int(b.sample_count * m_scale)),
-                    } for role, b in local_baselines.items()
-                }
-                params = {"version": aisec.PARAMETERS_VERSION, "roles": roles}
-                samples = max(1, int(local_samples * m_scale))
-                cur.execute(
-                    """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,
-                                                    sample_count, local_parameters)
-                       VALUES (%s,%s,TRUE,%s,%s)""",
-                    (rnd, name, samples, json.dumps(params)))
-                nodes.append((name, samples, params))
+    # The trained classifier: real nodes only, robust FedAvg.
+    classifier_nodes = [(name, fed_clf.Classifier.from_parameters(p["classifier"]))
+                        for name, _, p in nodes[:1 + len(real_peers)]
+                        if isinstance(p, dict) and fed_clf.sane_classifier(p.get("classifier"))]
+    global_clf, aggregation = fed_clf.aggregate(
+        classifier_nodes, previous_rounds=previous.rounds if previous else 0)
+    if global_clf is not None:
+        global_params["classifier"] = global_clf.to_parameters()
+    report = {"classifier_nodes": [n for n, _ in classifier_nodes],
+              "classifier_excluded": aggregation["excluded"],
+              "classifier_capped": aggregation["capped"],
+              "local_training": local_training}
 
-            global_params = aisec.federated_average_roles(nodes)
-            real_nodes = 1 + len(real_peers)
-            cur.execute(
-                """INSERT INTO FederatedGlobalModel (round_number, parameters,
-                                                     contributing_nodes, total_samples,
-                                                     real_nodes, simulated_nodes)
-                   VALUES (%s,%s,%s,%s,%s,%s)""",
-                (rnd, json.dumps(global_params), global_params["contributing_nodes"],
-                 global_params["total_samples"], real_nodes, simulated_used))
-            log_admin_action(conn, session["user_id"], session.get("public_user_id"),
-                             "FEDERATED_ROUND_COMPLETED")
-            conn.commit()
-
-    # A model real institutions built replaces the local baseline in detection;
-    # drop the cached one so the next access is scored against it.
+    real_nodes = 1 + len(real_peers)
+    cur.execute(
+        """INSERT INTO FederatedGlobalModel (round_number, parameters,
+                                             contributing_nodes, total_samples,
+                                             real_nodes, simulated_nodes, aggregation_report)
+           VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+        (rnd, json.dumps(global_params), global_params["contributing_nodes"],
+         global_params["total_samples"], real_nodes, simulated_used, json.dumps(report)))
     risk_engine.invalidate_baselines()
+
     real_peer_count = len(real_peers)
     if real_peer_count:
         disclosure = (
             f"{real_peer_count + 1} real nodes: this hospital plus "
             f"{real_peer_count} peer institution(s) that submitted signed parameters. "
-            "No simulated nodes were included. Only medians and scales are "
-            "aggregated — no record, event or identifier crosses the boundary."
-        )
+            "No simulated nodes were included. Only model parameters are aggregated — "
+            "no record, event or identifier crosses the boundary.")
     else:
         disclosure = (
             f"One real node (this hospital) and {simulated_used} simulated peers, "
             "because no peer institution has submitted yet. The aggregation is genuine "
             "FedAvg; the peers are not real institutions. Register a peer and have it "
-            "POST to /api/federated/submit to federate for real."
-        )
-
+            "submit to federate for real.")
     return {
         "round": rnd,
-        "aggregation": "FedAvg (weighted by sample count)",
+        "aggregation": "FedAvg (weighted by sample count); robust FedAvg for the classifier",
         "contributing_nodes": global_params["contributing_nodes"],
         "total_samples": global_params["total_samples"],
         "local_node_is_real": True,
         "real_peer_nodes": real_peer_count,
         "peer_nodes_simulated": simulated_used,
         "used_for_detection": real_peer_count > 0,
+        "classifier": ({**global_clf.to_parameters(), **report} if global_clf
+                       else {"trained": False, **report}),
         "disclosure": disclosure + (
             " This model now replaces the local baseline in detection for the roles it describes."
             if real_peer_count else
             " A model that includes simulated peers is never used to score real people."),
         "global_parameters": global_params,
+    }
+
+
+def _round_due(cur) -> bool:
+    """A scheduled round is due when enough real peers have submitted since the last one."""
+    minimum = max(1, int(os.getenv("FEDERATION_MIN_PEERS", "1") or 1))
+    cur.execute(
+        """SELECT COUNT(DISTINCT node_name) AS n FROM FederatedRounds
+            WHERE is_simulated = FALSE AND node_name <> %s
+              AND created_at > COALESCE((SELECT MAX(created_at) FROM FederatedGlobalModel),
+                                        'epoch'::timestamptz)""", (LOCAL_NODE,))
+    return cur.fetchone()["n"] >= minimum
+
+
+@app.post("/api/admin/security/federated/round")
+def run_federated_round(session: dict = Depends(require_role("Administrator"))):
+    """Fit this hospital's local model, then aggregate a federated round."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            result = _federated_round(cur)
+            log_admin_action(conn, session["user_id"], session.get("public_user_id"),
+                             "FEDERATED_ROUND_COMPLETED", details={"round": result["round"]})
+            conn.commit()
+    return result
+
+
+def _start_federation_scheduler() -> None:
+    """Federated learning without anyone pressing a button (spec §21).
+
+    FEDERATION_ROUND_INTERVAL_MINUTES  as hub: aggregate when real peers have
+                                       submitted since the last round (and at
+                                       least FEDERATION_MIN_PEERS of them)
+    FEDERATION_SYNC_INTERVAL_MINUTES   as participant: pull + evaluate the global
+                                       model, then train and submit
+    0 (the default) leaves either off.
+    """
+    import threading
+    import time as _time
+
+    def minutes(name: str) -> int:
+        try:
+            return max(0, int(os.getenv(name, "0") or 0))
+        except ValueError:
+            return 0
+
+    hub_every, sync_every = minutes("FEDERATION_ROUND_INTERVAL_MINUTES"), minutes(
+        "FEDERATION_SYNC_INTERVAL_MINUTES")
+    if not hub_every and not sync_every:
+        return
+
+    def loop() -> None:
+        last_hub = last_sync = 0.0
+        while True:
+            now = _time.monotonic()
+            if hub_every and now - last_hub >= hub_every * 60:
+                last_hub = now
+                try:
+                    with get_db() as conn, conn.cursor(row_factory=dict_row) as cur:
+                        if _round_due(cur):
+                            result = _federated_round(cur)
+                            log_admin_action(conn, None, "SYSTEM", "FEDERATED_ROUND_COMPLETED",
+                                             details={"round": result["round"], "scheduled": True})
+                            conn.commit()
+                except Exception as exc:  # noqa: BLE001 - the next tick tries again
+                    logger.error("Scheduled federated round failed: %s", exc)
+            if sync_every and now - last_sync >= sync_every * 60:
+                last_sync = now
+                try:
+                    with get_db() as conn, conn.cursor(row_factory=dict_row) as cur:
+                        if federation.is_configured(cur):
+                            federation.sync(cur)
+                            conn.commit()
+                            risk_engine.invalidate_baselines()
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Scheduled federation sync failed: %s", exc)
+            _time.sleep(30)
+
+    threading.Thread(target=loop, name="federation-scheduler", daemon=True).start()
+
+
+# ─── Federated learning administration (spec §20–21) ────────────────────────
+
+@app.get("/api/admin/federated/participation")
+def get_federation_participation(session: dict = Depends(require_role("Administrator"))):
+    """Whether this hospital takes part in another hospital's federation. The secret is never returned."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            s_ = federation.settings(cur)
+            cur.execute("SELECT updated_at, last_sync_at, last_sync_result FROM FederationParticipation "
+                        "WHERE id = 1")
+            row = cur.fetchone() or {}
+    return {"configured": bool(s_["hub_url"] and s_["node_name"] and s_["secret"]),
+            "source": s_["source"], "hub_url": s_["hub_url"], "node_name": s_["node_name"],
+            "secret_set": bool(s_["secret"]), "updated_at": row.get("updated_at"),
+            "last_sync_at": row.get("last_sync_at"), "last_sync_result": row.get("last_sync_result"),
+            "sync_interval_minutes": int(os.getenv("FEDERATION_SYNC_INTERVAL_MINUTES", "0") or 0),
+            "dp_epsilon": federation.dp_epsilon()}
+
+
+@app.put("/api/admin/federated/participation")
+def set_federation_participation(req: FederationParticipationRequest,
+                                 session: dict = Depends(require_role("Administrator"))):
+    """Join a federation: the hub's URL, the name it registered this hospital
+    under, and the secret it issued. Stored encrypted; environment variables,
+    when all three are set, take precedence."""
+    if os.getenv("FEDERATION_HUB_URL") and os.getenv("FEDERATION_NODE_NAME") \
+            and os.getenv("FEDERATION_SHARED_SECRET"):
+        raise HTTPException(status_code=409, detail=(
+            "Participation is set by the server's environment variables, which take "
+            "precedence. Change it there."))
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """INSERT INTO FederationParticipation (id, hub_url, node_name,
+                                                        shared_secret_encrypted, updated_by)
+                   VALUES (1, %s, %s, %s, %s)
+                   ON CONFLICT (id) DO UPDATE SET hub_url = EXCLUDED.hub_url,
+                       node_name = EXCLUDED.node_name,
+                       shared_secret_encrypted = EXCLUDED.shared_secret_encrypted,
+                       updated_by = EXCLUDED.updated_by, updated_at = CURRENT_TIMESTAMP""",
+                (req.hub_url.rstrip("/"), req.node_name, encrypt_data(req.shared_secret),
+                 session["user_id"]))
+            federation.refresh_settings(cur)
+            log_admin_action(conn, session["user_id"], session.get("public_user_id"),
+                             "FEDERATION_JOINED", details={"hub_url": req.hub_url,
+                                                           "node_name": req.node_name})
+            conn.commit()
+    return {"status": "success", "hub_url": req.hub_url.rstrip("/"), "node_name": req.node_name}
+
+
+@app.delete("/api/admin/federated/participation")
+def leave_federation(session: dict = Depends(require_role("Administrator"))):
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("DELETE FROM FederationParticipation WHERE id = 1")
+            federation.refresh_settings(cur)
+            log_admin_action(conn, session["user_id"], session.get("public_user_id"),
+                             "FEDERATION_LEFT")
+            conn.commit()
+    return {"status": "success"}
+
+
+@app.get("/api/admin/federated/models")
+def list_federated_models(session: dict = Depends(require_role("Administrator"))):
+    """Every global model pulled from the hub, its evaluation here, and which one detection uses."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""SELECT id, hub_url, hub_round, contributing_nodes, real_nodes, total_samples,
+                                  pulled_at, evaluation, adopted, active, decided_at,
+                                  parameters -> 'classifier' AS classifier
+                             FROM FederatedHubModels ORDER BY pulled_at DESC LIMIT 50""")
+            rows = cur.fetchall()
+    return [{**r, "id": str(r["id"])} for r in rows]
+
+
+@app.post("/api/admin/federated/models/{model_id}/activate")
+def activate_federated_model(model_id: str, session: dict = Depends(require_role("Administrator"))):
+    """Use this global model for detection — including one its evaluation refused,
+    which is an administrator's decision to make and is recorded as such."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT hub_round, adopted FROM FederatedHubModels WHERE id = %s", (model_id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Model not found")
+            cur.execute("UPDATE FederatedHubModels SET active = FALSE WHERE active")
+            cur.execute("""UPDATE FederatedHubModels SET active = TRUE, decided_by = %s,
+                                  decided_at = CURRENT_TIMESTAMP WHERE id = %s""",
+                        (session["user_id"], model_id))
+            log_admin_action(conn, session["user_id"], session.get("public_user_id"),
+                             "FEDERATED_MODEL_ACTIVATED",
+                             details={"hub_round": row["hub_round"], "passed_evaluation": row["adopted"]})
+            conn.commit()
+    risk_engine.invalidate_baselines()
+    return {"status": "success", "hub_round": row["hub_round"]}
+
+
+@app.post("/api/admin/federated/models/deactivate")
+def deactivate_federated_models(session: dict = Depends(require_role("Administrator"))):
+    """Roll back to this hospital's own models for detection."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("UPDATE FederatedHubModels SET active = FALSE, decided_by = %s, "
+                        "decided_at = CURRENT_TIMESTAMP WHERE active", (session["user_id"],))
+            log_admin_action(conn, session["user_id"], session.get("public_user_id"),
+                             "FEDERATED_MODEL_DEACTIVATED")
+            conn.commit()
+    risk_engine.invalidate_baselines()
+    return {"status": "success", "detection": "local models only"}
+
+
+@app.get("/api/admin/federated/classifier")
+def federated_classifier_status(session: dict = Depends(require_role("Administrator"))):
+    """The trained half of the federated IDS: labels, local fit, and the model in use."""
+    with get_db() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            examples = federation.load_labels(cur)
+            in_use, in_use_label = risk_engine._choose_classifier(
+                cur, *risk_engine.usable_federated_model(cur))
+    threats = sum(1 for _, y in examples if y)
+    local_fit = (fed_clf.evaluate(fed_clf.train(examples), examples)
+                 if fed_clf.trainable(examples) else None)
+    return {
+        "labels": {"total": len(examples), "threats": threats, "benign": len(examples) - threats},
+        "trainable": fed_clf.trainable(examples),
+        "needs": {"labels": fed_clf.MIN_TRAINING_LABELS, "per_class": fed_clf.MIN_PER_CLASS},
+        "local_fit": local_fit,
+        "in_use": ({"label": in_use_label, **in_use.to_parameters()} if in_use else None),
+        "privacy": {"clip": fed_clf.DEFAULT_CLIP, "dp_epsilon": federation.dp_epsilon(),
+                    "note": ("Gaussian mechanism per round on the clipped update; rounds compose."
+                             if federation.dp_epsilon() else
+                             "Updates are clipped; differential-privacy noise is off "
+                             "(set FEDERATION_DP_EPSILON).")},
     }
 
 
@@ -5290,10 +5556,14 @@ def federated_status(session: dict = Depends(require_role("Administrator"))):
             nodes = cur.fetchall()
             cur.execute("SELECT COUNT(DISTINCT round_number) AS n FROM FederatedRounds")
             rounds = cur.fetchone()["n"]
-            cur.execute("""SELECT hub_url, hub_round, real_nodes, pulled_at
+            cur.execute("""SELECT hub_url, hub_round, real_nodes, pulled_at, adopted, active,
+                                  evaluation
                              FROM FederatedHubModels ORDER BY pulled_at DESC LIMIT 1""")
             hub_model = cur.fetchone()
             in_use, in_use_label = risk_engine.usable_federated_model(cur)
+            s_ = federation.settings(cur)
+            classifier_in_use, classifier_label = risk_engine._choose_classifier(
+                cur, in_use, in_use_label)
 
     real_nodes = (latest or {}).get("real_nodes") or 0
     simulated = (latest or {}).get("simulated_nodes") or 0
@@ -5310,7 +5580,6 @@ def federated_status(session: dict = Depends(require_role("Administrator"))):
                       "submitted yet, so the other nodes in the latest round are simulated. "
                       "That model is not used to score anyone.")
 
-    s_ = federation.settings()
     return {
         "rounds_completed": rounds,
         "latest_round": latest["round_number"] if latest else None,
@@ -5322,12 +5591,18 @@ def federated_status(session: dict = Depends(require_role("Administrator"))):
                    "samples": n["sample_count"]} for n in nodes],
         "status": state,
         "detection_baseline": in_use_label or "local (no real federated model yet)",
+        "detection_classifier": classifier_label,
+        "classifier": (classifier_in_use.to_parameters() if classifier_in_use else None),
+        "aggregation_report": (latest or {}).get("aggregation_report"),
         "participant": {
-            "configured": federation.is_configured(),
+            "configured": bool(s_["hub_url"] and s_["node_name"] and s_["secret"]),
+            "source": s_["source"],
             "hub_url": s_["hub_url"], "node_name": s_["node_name"],
             "last_pulled": ({"hub_round": hub_model["hub_round"],
                              "real_nodes": hub_model["real_nodes"],
-                             "pulled_at": hub_model["pulled_at"]} if hub_model else None),
+                             "pulled_at": hub_model["pulled_at"],
+                             "adopted": hub_model["adopted"], "active": hub_model["active"],
+                             "evaluation": hub_model["evaluation"]} if hub_model else None),
         },
         "disclosure": disclosure,
     }
@@ -5337,13 +5612,14 @@ def federated_status(session: dict = Depends(require_role("Administrator"))):
 
 @app.post("/api/admin/federated/hub/submit")
 def submit_to_federation_hub(session: dict = Depends(require_role("Administrator"))):
-    """Fit this hospital's per-role model and submit it, signed, to the hub."""
-    if not federation.is_configured():
-        raise HTTPException(status_code=409, detail=(
-            "This hospital is not configured as a federation participant. Set "
-            "FEDERATION_HUB_URL, FEDERATION_NODE_NAME and FEDERATION_SHARED_SECRET."))
+    """Fit this hospital's models, train its classifier, and submit them, signed, to the hub."""
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
+            if not federation.is_configured(cur):
+                raise HTTPException(status_code=409, detail=(
+                    "This hospital is not a federation participant yet. Join a federation "
+                    "under Federated IDS, or set FEDERATION_HUB_URL, FEDERATION_NODE_NAME "
+                    "and FEDERATION_SHARED_SECRET."))
             try:
                 result = federation.submit_local_update(cur)
             except federation.FederationError as exc:
@@ -5351,35 +5627,43 @@ def submit_to_federation_hub(session: dict = Depends(require_role("Administrator
             log_admin_action(conn, session["user_id"], session.get("public_user_id"),
                              "FEDERATED_UPDATE_SUBMITTED",
                              details={"round": result.get("round_number"),
-                                      "roles": result.get("roles")})
+                                      "roles": result.get("roles"),
+                                      "classifier_trained": result["classifier"]["trained"]})
             conn.commit()
-    return {**result, "note": "Only per-role medians and scales were sent. No records, "
-                              "events or identifiers left this hospital."}
+    return {**result, "note": "Only model parameters were sent — per-role medians and scales, "
+                              "and classifier weights when trained. No records, events, labels "
+                              "or identifiers left this hospital."}
 
 
 @app.post("/api/admin/federated/hub/pull")
 def pull_from_federation_hub(session: dict = Depends(require_role("Administrator"))):
-    """Fetch the hub's global model and start scoring with it."""
-    if not federation.is_configured():
-        raise HTTPException(status_code=409, detail=(
-            "This hospital is not configured as a federation participant."))
-    try:
-        model = federation.pull_global_model()
-    except federation.FederationError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    """Fetch the hub's global model, evaluate it on local data, and adopt it if it passes."""
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            federation.store_pulled_model(cur, model)
+            if not federation.is_configured(cur):
+                raise HTTPException(status_code=409, detail=(
+                    "This hospital is not a federation participant yet."))
+            try:
+                model = federation.pull_global_model(cur)
+            except federation.FederationError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+            evaluation = federation.store_pulled_model(cur, model)
             log_admin_action(conn, session["user_id"], session.get("public_user_id"),
                              "FEDERATED_MODEL_PULLED",
-                             details={"hub_round": model.get("round_number")})
+                             details={"hub_round": model.get("round_number"),
+                                      "adopted": evaluation["adopt"],
+                                      "reasons": evaluation["reasons"]})
             conn.commit()
     risk_engine.invalidate_baselines()
     roles = sorted(aisec.as_role_parameters(model["parameters"]))
     return {"status": "success", "hub_round": model.get("round_number"),
             "contributing_nodes": model.get("contributing_nodes"),
             "real_nodes": model.get("real_nodes"), "roles": roles,
-            "note": "Detection now uses this global model for the roles it describes."}
+            "has_classifier": bool(model["parameters"].get("classifier")),
+            "adopted": evaluation["adopt"], "evaluation": evaluation,
+            "note": ("Adopted: detection now uses this global model." if evaluation["adopt"] else
+                     "Not adopted: " + "; ".join(evaluation["reasons"]) + ". Detection keeps the "
+                     "model it was using; an administrator can still activate this one.")}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

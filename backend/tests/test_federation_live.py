@@ -1,55 +1,65 @@
-"""Federated learning between two running hospitals (spec §20–21).
+"""Federated learning between three running hospitals (spec §20–21).
 
-Hospital A is this process (the app under FastAPI's TestClient, on its own
-database). Hospital B — the hub — is a separate backend server with a separate
-database, reached over real HTTP. Nothing is shared between them but the
-signed parameters the protocol sends:
+    Hospital A  this process (the app under FastAPI's TestClient), its own database
+    Hospital B  the hub — a separate backend server with its own database
+    Hospital C  another participant — a third server with its own database
 
-    B's admin registers A as a peer          → shared secret, shown once
-    A fits its per-role model and submits it → HMAC-signed, verified by B
-    B's admin runs a federated round         → FedAvg over B's model and A's
-    A pulls the global model                 → signed request; stored and used
+Nothing passes between them but the signed model parameters the protocol
+sends. The run follows the spec's picture exactly:
 
-CI starts the hub as a second container (see .github/workflows/deploy.yml).
-Opt-in, like the end-to-end flow:
+    A, C: local security data (investigated incidents) → local training
+          → model update (clipped, signed) ──────────────► B
+    B:    federated aggregation (per-role FedAvg + robust FedAvg of the classifier)
+    A, C: ◄── global security model, evaluated locally before adoption
+    …a second round, each hospital training from the global weights.
 
-    RUN_E2E=1 FED_HUB_URL=http://127.0.0.1:8001 FED_HUB_DATABASE_URL=postgresql://…
+A and C join through the admin API (participation stored in their databases),
+not environment variables. CI starts B and C as containers
+(.github/workflows/deploy.yml). Opt-in, like the end-to-end flow:
+
+    RUN_E2E=1 FED_HUB_URL=… FED_HUB_DATABASE_URL=… FED_C_URL=… FED_C_DATABASE_URL=…
 """
 
 import json
 import os
+import random
+import urllib.error
 import urllib.request
 import uuid
 
 import pytest
 
 pytestmark = pytest.mark.skipif(
-    os.getenv("RUN_E2E") != "1" or not os.getenv("FED_HUB_URL"),
-    reason="live federation needs RUN_E2E=1, FED_HUB_URL and FED_HUB_DATABASE_URL")
+    os.getenv("RUN_E2E") != "1" or not os.getenv("FED_HUB_URL") or not os.getenv("FED_C_URL"),
+    reason="live federation needs RUN_E2E=1 and running hospitals B and C (FED_HUB_URL, FED_C_URL)")
 
 PASSWORD = "Str0ng-Fed-pass!"
 
 
-def _hub(method, path, token=None, body=None):
-    """One HTTP call to hospital B — a different server, not this process."""
+def _http(base, method, path, token=None, body=None):
+    """One HTTP call to another hospital — a different server, not this process."""
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(
-        os.environ["FED_HUB_URL"].rstrip("/") + path, method=method, headers=headers,
+        base.rstrip("/") + path, method=method, headers=headers,
         data=json.dumps(body).encode() if body is not None else None)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=60) as response:
             return response.status, json.loads(response.read() or b"null")
     except urllib.error.HTTPError as exc:
         return exc.code, json.loads(exc.read() or b"null")
 
 
-def _seed_admin(database_url, user_id):
-    """An approved administrator, written straight into one hospital's database."""
+def _db(url):
     import psycopg
+    from psycopg.rows import dict_row
+    return psycopg.connect(url, autocommit=True, row_factory=dict_row)
+
+
+def _seed_admin(database_url, user_id):
     from app.security import encrypt_data, hash_password
-    with psycopg.connect(database_url, autocommit=True) as db:
+    with _db(database_url) as db:
         db.execute(
             """INSERT INTO Users (user_id, full_name, email, password_hash, role, gender,
                                   date_of_birth_encrypted, status)
@@ -58,81 +68,139 @@ def _seed_admin(database_url, user_id):
              encrypt_data("1980-01-01")))
 
 
+def _behaviour(rng, threat):
+    if threat:
+        return {"records_accessed": rng.randint(60, 300), "distinct_patients": rng.randint(40, 150),
+                "off_hours_ratio": rng.uniform(0.4, 0.9), "failed_logins": rng.randint(0, 6),
+                "emergency_declarations": rng.randint(0, 2), "peak_burst": rng.randint(20, 80),
+                "access_denied": rng.randint(3, 12)}
+    return {"records_accessed": rng.randint(3, 25), "distinct_patients": rng.randint(1, 10),
+            "off_hours_ratio": rng.uniform(0.0, 0.25), "failed_logins": rng.randint(0, 1),
+            "emergency_declarations": 0, "peak_burst": rng.randint(1, 8),
+            "access_denied": rng.randint(0, 1)}
+
+
+def _seed_investigated_incidents(database_url, seed, threats, benign):
+    """Each hospital's own investigators' verdicts — local data that never leaves it."""
+    rng = random.Random(seed)
+    with _db(database_url) as db:
+        for label, count in ((1, threats), (0, benign)):
+            for _ in range(count):
+                db.execute("""INSERT INTO SecurityLabels (actor_role, features, label, source, source_ref)
+                              VALUES ('Doctor', %s, %s, 'INCIDENT', %s)""",
+                           (json.dumps(_behaviour(rng, bool(label))), label, str(uuid.uuid4())))
+
+
+def _login(base, user_id):
+    status, body = _http(base, "POST", "/api/login", body={"user_id": user_id, "password": PASSWORD})
+    assert status == 200, body
+    return body["access_token"]
+
+
 @pytest.fixture(scope="module")
 def hospitals():
     os.environ["SECURITY_ANALYSIS_INTERVAL_MINUTES"] = "0"
+    for name in ("FEDERATION_HUB_URL", "FEDERATION_NODE_NAME", "FEDERATION_SHARED_SECRET"):
+        os.environ.pop(name, None)                 # A joins through the admin API
     from fastapi.testclient import TestClient
     from app.main import app
 
+    hub, c_url = os.environ["FED_HUB_URL"], os.environ["FED_C_URL"]
     tag = uuid.uuid4().hex[:6]
-    with TestClient(app) as a:                      # startup creates A's schema
-        status, _ = _hub("GET", "/api/health")
-        assert status == 200, "hospital B (the hub) is not running"
-
-        hub_admin = f"ADM-HUB-{tag}"
-        _seed_admin(os.environ["FED_HUB_DATABASE_URL"], hub_admin)
-        status, body = _hub("POST", "/api/login", body={"user_id": hub_admin, "password": PASSWORD})
-        assert status == 200, body
-        hub_token = body["access_token"]           # the login is also B's own activity
-
-        a_admin = f"ADM-A-{tag}"
-        _seed_admin(os.environ["DATABASE_URL"], a_admin)
-        r = a.post("/api/login", json={"user_id": a_admin, "password": PASSWORD})
+    with TestClient(app) as a:
+        for base in (hub, c_url):
+            assert _http(base, "GET", "/api/health")[0] == 200, f"{base} is not running"
+        _seed_admin(os.environ["FED_HUB_DATABASE_URL"], f"ADM-B-{tag}")
+        _seed_admin(os.environ["FED_C_DATABASE_URL"], f"ADM-C-{tag}")
+        _seed_admin(os.environ["DATABASE_URL"], f"ADM-A-{tag}")
+        _seed_investigated_incidents(os.environ["DATABASE_URL"], seed=1, threats=4, benign=10)
+        _seed_investigated_incidents(os.environ["FED_C_DATABASE_URL"], seed=2, threats=5, benign=8)
+        r = a.post("/api/login", json={"user_id": f"ADM-A-{tag}", "password": PASSWORD})
         assert r.status_code == 200, r.text
-        a_headers = {"Authorization": f"Bearer {r.json()['access_token']}"}
+        yield {"a": a, "a_auth": {"Authorization": f"Bearer {r.json()['access_token']}"},
+               "hub": hub, "hub_token": _login(hub, f"ADM-B-{tag}"),
+               "c": c_url, "c_token": _login(c_url, f"ADM-C-{tag}"), "tag": tag}
 
-        yield {"a": a, "a_headers": a_headers, "hub_token": hub_token,
-               "node": f"hospital-a-{tag}"}
 
+def test_three_hospitals_train_a_shared_threat_model(hospitals):
+    a, A, hub, B, c, C, tag = (hospitals["a"], hospitals["a_auth"], hospitals["hub"],
+                               hospitals["hub_token"], hospitals["c"], hospitals["c_token"],
+                               hospitals["tag"])
+    node_a, node_c = f"hospital-a-{tag}", f"hospital-c-{tag}"
 
-def test_two_hospitals_federate_and_share_only_parameters(hospitals, monkeypatch):
-    a, a_headers, hub_token, node = (hospitals["a"], hospitals["a_headers"],
-                                     hospitals["hub_token"], hospitals["node"])
+    # Not a participant yet; then a participant the hub has never heard of.
+    assert a.post("/api/admin/federated/hub/submit", headers=A).status_code == 409
+    join = {"hub_url": hub, "node_name": node_a, "shared_secret": "0" * 64}
+    assert a.put("/api/admin/federated/participation", headers=A, json=join).status_code == 200
+    assert a.post("/api/admin/federated/hub/submit", headers=A).status_code == 502
 
-    # Before registration the hub refuses A outright.
-    monkeypatch.setenv("FEDERATION_HUB_URL", os.environ["FED_HUB_URL"])
-    monkeypatch.setenv("FEDERATION_NODE_NAME", node)
-    monkeypatch.setenv("FEDERATION_SHARED_SECRET", "0" * 64)
-    assert a.post("/api/admin/federated/hub/submit", headers=a_headers).status_code == 502
-
-    # B's administrator registers A; the secret is handed over once.
-    status, peer = _hub("POST", "/api/admin/federated/peers", hub_token,
-                        {"node_name": node, "contact_url": "https://hospital-a.example.org"})
-    assert status == 200, peer
-    secret = peer["shared_secret"]
-
-    # A wrong secret is refused by B's signature check…
-    r = a.post("/api/admin/federated/hub/submit", headers=a_headers)
-    assert r.status_code == 502 and "401" in r.text
-
-    # …the right one is accepted.
-    monkeypatch.setenv("FEDERATION_SHARED_SECRET", secret)
-    r = a.post("/api/admin/federated/hub/submit", headers=a_headers)
+    # B registers A and C; each joins with the secret it was issued, through its admin API.
+    secrets_ = {}
+    for node in (node_a, node_c):
+        status, peer = _http(hub, "POST", "/api/admin/federated/peers", B,
+                             {"node_name": node, "contact_url": f"https://{node}.example.org"})
+        assert status == 200, peer
+        secrets_[node] = peer["shared_secret"]
+    r = a.put("/api/admin/federated/participation", headers=A,
+              json={"hub_url": hub, "node_name": node_a, "shared_secret": secrets_[node_a]})
     assert r.status_code == 200, r.text
-    submitted = r.json()
-    assert submitted["accepted"] is True and submitted["roles"]
+    status, body = _http(c, "PUT", "/api/admin/federated/participation", C,
+                         {"hub_url": hub, "node_name": node_c, "shared_secret": secrets_[node_c]})
+    assert status == 200, body
+    participation = a.get("/api/admin/federated/participation", headers=A).json()
+    assert participation["configured"] and participation["source"] == "database"
+    assert "shared_secret" not in participation                      # never echoed back
 
-    # Nothing to pull until B has aggregated a round with a real peer in it.
-    assert a.post("/api/admin/federated/hub/pull", headers=a_headers).status_code == 502
+    for round_no in (1, 2):
+        # Local training at A and C (C over HTTP), from the global weights after round 1.
+        r = a.post("/api/admin/federated/hub/submit", headers=A)
+        assert r.status_code == 200, r.text
+        training = r.json()["classifier"]
+        assert training["trained"] and training["labels"] >= 14
+        assert training["started_from"] == ("zero" if round_no == 1 else "global model")
+        status, body = _http(c, "POST", "/api/admin/federated/hub/submit", C)
+        assert status == 200 and body["classifier"]["trained"], body
 
-    # B runs FedAvg over its own model and A's submission.
-    status, round_ = _hub("POST", "/api/admin/security/federated/round", hub_token)
-    assert status == 200, round_
-    status, fed = _hub("GET", "/api/admin/security/federated/status", hub_token)
-    assert status == 200 and fed["real_nodes"] >= 2 and fed["simulated_nodes"] == 0, fed
+        # Aggregation at B.
+        status, result = _http(hub, "POST", "/api/admin/security/federated/round", B)
+        assert status == 200, result
+        assert result["real_peer_nodes"] == 2 and result["peer_nodes_simulated"] == 0
+        assert set(result["classifier"]["classifier_nodes"]) >= {node_a, node_c}
+        assert result["classifier"]["rounds"] == round_no
 
-    # A pulls the global model both hospitals built, and stores it for scoring.
-    r = a.post("/api/admin/federated/hub/pull", headers=a_headers)
-    assert r.status_code == 200, r.text
-    pulled = r.json()
-    assert pulled["real_nodes"] >= 2 and pulled["contributing_nodes"] >= 2
+        # Distribution: A and C pull; A evaluates it on its own incidents and adopts it.
+        r = a.post("/api/admin/federated/hub/pull", headers=A)
+        assert r.status_code == 200, r.text
+        pulled = r.json()
+        assert pulled["real_nodes"] == 3 and pulled["has_classifier"]
+        assert pulled["adopted"], pulled["evaluation"]
+        assert pulled["evaluation"]["classifier"]["global"]["accuracy"] >= 0.8
+        status, body = _http(c, "POST", "/api/admin/federated/hub/pull", C)
+        assert status == 200 and body["adopted"], body
 
-    import psycopg
-    from psycopg.rows import dict_row
-    with psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row) as db:
-        row = db.execute("SELECT hub_url, real_nodes, parameters FROM FederatedHubModels "
-                         "ORDER BY pulled_at DESC LIMIT 1").fetchone()
-    assert row["hub_url"] == os.environ["FED_HUB_URL"].rstrip("/") and row["real_nodes"] >= 2
-    # Parameters only: per-role medians and scales, no identifiers or events.
-    text = json.dumps(row["parameters"])
-    assert "medians" in text and node not in text and "@" not in text
+    # A's detection now uses the federated classifier built by both participants.
+    clf = a.get("/api/admin/federated/classifier", headers=A).json()
+    assert clf["in_use"]["label"].startswith("federated classifier")
+    assert clf["in_use"]["nodes"] >= 2 and clf["in_use"]["rounds"] == 2
+    models = a.get("/api/admin/federated/models", headers=A).json()
+    assert len(models) >= 2 and models[0]["active"] and not models[1]["active"]
+
+    # Rollback: local models only, then back to the older global model.
+    assert a.post("/api/admin/federated/models/deactivate", headers=A).status_code == 200
+    assert a.get("/api/admin/federated/classifier", headers=A).json()["in_use"]["label"] \
+        .startswith("local classifier")
+    assert a.post(f"/api/admin/federated/models/{models[1]['id']}/activate", headers=A).status_code == 200
+    assert a.get("/api/admin/federated/models", headers=A).json()[1]["active"]
+
+    # What crossed the boundary: parameters only. B holds no labels, and nothing
+    # A stored from the hub names a person or a node.
+    with _db(os.environ["FED_HUB_DATABASE_URL"]) as db:
+        assert db.execute("SELECT COUNT(*) AS n FROM SecurityLabels").fetchone()["n"] == 0
+        submitted = db.execute("SELECT local_parameters FROM FederatedRounds WHERE node_name = %s "
+                               "ORDER BY round_number DESC LIMIT 1", (node_a,)).fetchone()
+    assert set(submitted["local_parameters"]) == {"version", "roles", "classifier"}
+    with _db(os.environ["DATABASE_URL"]) as db:
+        stored = db.execute("SELECT parameters FROM FederatedHubModels ORDER BY pulled_at DESC "
+                            "LIMIT 1").fetchone()["parameters"]
+    text = json.dumps(stored)
+    assert "medians" in text and node_a not in text and node_c not in text and "@" not in text

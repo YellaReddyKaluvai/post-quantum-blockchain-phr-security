@@ -474,7 +474,7 @@ def test_not_configured_is_refused_plainly(monkeypatch):
 
 def test_a_submission_carries_only_signed_parameters(participant):
     params = {"version": 2, "roles": {"Doctor": _flat(samples=7)}}
-    participant.setattr(federation, "fit_local_update", lambda cur: (params, 7))
+    participant.setattr(federation, "fit_local_update", lambda cur: (params, 7, {"trained": False}))
     sent = {}
 
     def fake_http(method, url, *, body=None, headers=None, timeout=30):

@@ -36,6 +36,7 @@ ENCRYPTED_COLUMNS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("Prescriptions", "id", ("medicine_name", "dosage", "frequency", "duration", "instructions")),
     ("Consent", "consent_id", ("zkp_token_encrypted",)),
     ("FederatedPeers", "id", ("shared_secret_encrypted",)),
+    ("FederationParticipation", "id", ("shared_secret_encrypted",)),
 )
 
 
