@@ -1126,10 +1126,13 @@ export async function runFederatedRound() {
 
 // ─── Incidents, policy, federation as a participant ──────────────────────────
 
-export async function updateSecurityIncident(incidentId: string, status: "Investigating" | "Closed", resolution?: string) {
+export type IncidentVerdict = "confirmed_threat" | "false_positive" | "inconclusive";
+
+export async function updateSecurityIncident(incidentId: string, status: "Investigating" | "Closed",
+                                             resolution?: string, verdict?: IncidentVerdict) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/security/incidents/${encodeURIComponent(incidentId)}`, {
     method: "POST",
-    body: JSON.stringify({ status, resolution: resolution || null }),
+    body: JSON.stringify({ status, resolution: resolution || null, verdict: verdict || null }),
   });
   if (!response.ok) {
     const err = await response.json().catch(() => null);
@@ -1268,4 +1271,81 @@ export async function getPatientAdherence(patientId: string) {
     throw new Error(extractErrorDetail(err, "Failed to load adherence"));
   }
   return response.json();
+}
+
+
+// ─── Federated learning (participant side) ───────────────────────────────────
+
+export interface FederationParticipation {
+  configured: boolean;
+  source: "environment" | "database" | null;
+  hub_url: string | null;
+  node_name: string | null;
+  secret_set: boolean;
+  updated_at?: string | null;
+  last_sync_at?: string | null;
+  last_sync_result?: Record<string, unknown> | null;
+  sync_interval_minutes: number;
+  dp_epsilon: number | null;
+}
+
+export interface FederatedModelRecord {
+  id: string;
+  hub_url: string;
+  hub_round: number;
+  contributing_nodes: number;
+  real_nodes: number;
+  total_samples: number;
+  pulled_at: string;
+  adopted: boolean;
+  active: boolean;
+  decided_at?: string | null;
+  evaluation?: { adopt: boolean; reasons: string[];
+    classifier?: { global?: { accuracy: number | null }; note?: string };
+    baselines?: { actors_scored: number; high_share_global?: number; high_share_local?: number; note?: string } } | null;
+  classifier?: { rounds: number; nodes: number; samples: number } | null;
+}
+
+export interface FederatedClassifierStatus {
+  labels: { total: number; threats: number; benign: number };
+  trainable: boolean;
+  needs: { labels: number; per_class: number };
+  local_fit: { accuracy: number | null; precision: number | null; recall: number | null; examples: number } | null;
+  in_use: { label: string; rounds: number; nodes: number; samples: number } | null;
+  privacy: { clip: number; dp_epsilon: number | null; note: string };
+}
+
+export async function getFederationParticipation(): Promise<FederationParticipation> {
+  return jsonOrThrow(await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/participation`),
+    "Failed to load federation participation");
+}
+
+export async function joinFederation(data: { hub_url: string; node_name: string; shared_secret: string }) {
+  return jsonOrThrow(await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/participation`, {
+    method: "PUT", body: JSON.stringify(data),
+  }), "Failed to join the federation");
+}
+
+export async function leaveFederation() {
+  return jsonOrThrow(await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/participation`, { method: "DELETE" }),
+    "Failed to leave the federation");
+}
+
+export async function getFederatedModels(): Promise<FederatedModelRecord[]> {
+  return jsonOrThrow(await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/models`), "Failed to load models");
+}
+
+export async function activateFederatedModel(id: string) {
+  return jsonOrThrow(await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/models/${id}/activate`, { method: "POST" }),
+    "Failed to activate the model");
+}
+
+export async function switchToLocalModels() {
+  return jsonOrThrow(await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/models/deactivate`, { method: "POST" }),
+    "Failed to switch to local models");
+}
+
+export async function getFederatedClassifierStatus(): Promise<FederatedClassifierStatus> {
+  return jsonOrThrow(await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/classifier`),
+    "Failed to load the classifier status");
 }
