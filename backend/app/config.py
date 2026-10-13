@@ -36,6 +36,10 @@ class Settings(BaseModel):
     AWS_S3_BUCKET: str = os.getenv("AWS_S3_BUCKET", "quantumcare-pqc-phr-storage")
     # An S3-compatible endpoint (SeaweedFS, MinIO, Ceph, …) instead of AWS. Blank = AWS.
     AWS_S3_ENDPOINT_URL: str = os.getenv("AWS_S3_ENDPOINT_URL", "")
+    # S3's own at-rest encryption, on top of the AES-GCM the app applies first.
+    # "AES256" (default) for AWS; "none" for a store without server-side
+    # encryption configured (SeaweedFS refuses the header otherwise).
+    AWS_S3_SERVER_SIDE_ENCRYPTION: str = os.getenv("AWS_S3_SERVER_SIDE_ENCRYPTION", "AES256")
     # No IPFS gateway or pinning settings: nothing is published to the IPFS
     # network. The system computes an IPFS-style CIDv0 purely as a content
     # address for the encrypted document (see storage_service), which needs no

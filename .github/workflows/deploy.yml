@@ -149,11 +149,11 @@ jobs:
     # API accepts any signed request, which is all a disposable CI store needs.
     - name: Start S3-compatible storage (SeaweedFS) with a bucket
       run: |
-        docker run -d --name s3 --network host chrislusf/seaweedfs:latest           server -dir=/data -s3 -s3.port=9000 -ip=127.0.0.1 -ip.bind=127.0.0.1
+        docker run -d --name s3 --network host chrislusf/seaweedfs:latest server -dir=/data -s3 -s3.port=9000 -ip=127.0.0.1 -ip.bind=127.0.0.1 -master.volumeSizeLimitMB=256
         for i in $(seq 1 90); do
           [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/)" != "000" ] && break; sleep 1
         done
-        docker run --rm --network host $IMAGE python -c "import boto3; boto3.client('s3', endpoint_url='$S3_ENDPOINT', aws_access_key_id='$S3_USER', aws_secret_access_key='$S3_SECRET', region_name='us-east-1').create_bucket(Bucket='$S3_BUCKET')"
+        docker run --rm --network host $IMAGE python -c "import boto3; s3 = boto3.client('s3', endpoint_url='$S3_ENDPOINT', aws_access_key_id='$S3_USER', aws_secret_access_key='$S3_SECRET', region_name='us-east-1'); s3.create_bucket(Bucket='$S3_BUCKET'); s3.put_object(Bucket='$S3_BUCKET', Key='ci-probe', Body=b'ok'); assert s3.get_object(Bucket='$S3_BUCKET', Key='ci-probe')['Body'].read() == b'ok'; print('S3 store ready')"
     - name: Wait for both IPFS nodes
       run: |
         for port in 5001 5002; do
@@ -185,9 +185,10 @@ jobs:
         -e AWS_SECRET_ACCESS_KEY=$S3_SECRET
         -e AWS_S3_BUCKET=$S3_BUCKET
         -e AWS_REGION=us-east-1
+        -e AWS_S3_SERVER_SIDE_ENCRYPTION=none
         -e SMTP_HOST=127.0.0.1
         -e SMTP_PORT=1025
-        -e SMTP_USER=quantumcare-ci
+        -e SMTP_USER=ci-mailer@e2e.example.com
         -e SMTP_PASSWORD=quantumcare-ci
         -e SMTP_STARTTLS=false
         -e ADMIN_EMAIL=admin@e2e.example.com
