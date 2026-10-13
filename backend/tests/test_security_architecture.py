@@ -232,10 +232,10 @@ def test_a_refusal_is_committed_before_it_is_raised():
 # ═══ Smart-contract consent (§7) ═════════════════════════════════════════════
 
 class FakeChain:
-    def __init__(self, onchain=True, fail=False):
+    def __init__(self, onchain="granted", fail=False):
         self.onchain, self.fail, self.writes = onchain, fail, []
 
-    def check_consent(self, patient_ref, doctor_ref):
+    def consent_status(self, patient_ref, doctor_ref):
         if self.fail:
             raise ConnectionError("node down")
         return self.onchain
@@ -261,28 +261,95 @@ def test_on_chain_references_are_pseudonymous():
 
 
 def test_consent_without_an_on_chain_record_is_unverified(ledger):
-    cur = FakeCursor([{"onchain_tx_hash": None}])
-    assert consent_ledger.verify(cur, patient_id="p", doctor_id="d", db_authorized=True) == "unverified"
+    ledger.setattr(consent_ledger, "_client", lambda: FakeChain(onchain="none"))
+    assert consent_ledger.verify(FakeCursor(), patient_id="p", doctor_id="d",
+                                 db_authorized=True) == "unverified"
 
 
 def test_agreement_with_the_chain_verifies(ledger):
-    ledger.setattr(consent_ledger, "_client", lambda: FakeChain(onchain=True))
-    cur = FakeCursor([{"onchain_tx_hash": "0x1"}])
-    assert consent_ledger.verify(cur, patient_id="p", doctor_id="d", db_authorized=True) == "verified"
+    ledger.setattr(consent_ledger, "_client", lambda: FakeChain(onchain="granted"))
+    assert consent_ledger.verify(FakeCursor(), patient_id="p", doctor_id="d",
+                                 db_authorized=True) == "verified"
 
 
 def test_a_row_the_chain_contradicts_is_a_mismatch(ledger):
     """The row says Authorized; the contract says the patient withdrew."""
-    ledger.setattr(consent_ledger, "_client", lambda: FakeChain(onchain=False))
-    cur = FakeCursor([{"onchain_tx_hash": "0x1"}])
-    assert consent_ledger.verify(cur, patient_id="p", doctor_id="d", db_authorized=True) == "mismatch"
+    ledger.setattr(consent_ledger, "_client", lambda: FakeChain(onchain="revoked"))
+    assert consent_ledger.verify(FakeCursor(), patient_id="p", doctor_id="d",
+                                 db_authorized=True) == "mismatch"
+
+
+def test_the_check_does_not_ask_the_database_whether_to_run(ledger):
+    """A column saying "there is an on-chain record" could be cleared to skip it."""
+    ledger.setattr(consent_ledger, "_client", lambda: FakeChain(onchain="revoked"))
+    cur = FakeCursor()
+    consent_ledger.verify(cur, patient_id="p", doctor_id="d", db_authorized=True)
+    assert not cur.executed
 
 
 @pytest.mark.parametrize("client", [None, FakeChain(fail=True)])
 def test_an_unreachable_chain_is_reported_as_unverified_not_as_agreement(ledger, client):
     ledger.setattr(consent_ledger, "_client", lambda: client)
-    cur = FakeCursor([{"onchain_tx_hash": "0x1"}])
-    assert consent_ledger.verify(cur, patient_id="p", doctor_id="d", db_authorized=True) == "unverified"
+    assert consent_ledger.verify(FakeCursor(), patient_id="p", doctor_id="d",
+                                 db_authorized=True) == "unverified"
+
+
+def test_a_treating_relationship_cannot_paper_over_an_on_chain_withdrawal(ledger):
+    """The consent row was deleted or flipped; the chain still says withdrawn."""
+    from app.main import _doctor_patient_authorization
+    ledger.setattr(consent_ledger, "_client", lambda: FakeChain(onchain="revoked"))
+    # blocked check · no open incident · no recent alert · new alert id · incident number
+    cur = FakeCursor([{"blocked": False, "emergency": False}, None, None, {"id": "al1"}, {"n": 0}])
+    allowed, basis = _doctor_patient_authorization(cur, "doc-1", "patient-1")
+    assert not allowed and "blockchain" in basis
+    assert cur.statements("INSERT INTO SecurityIncidents")
+
+
+def test_consent_confirmed_on_chain_is_reported_as_verified(ledger):
+    from app.main import _doctor_patient_authorization
+    ledger.setattr(consent_ledger, "_client", lambda: FakeChain(onchain="granted"))
+    cur = FakeCursor([{"blocked": False, "emergency": False},
+                      {"treating": False, "consented": True}])
+    assert _doctor_patient_authorization(cur, "doc-1", "patient-1") == (
+        True, "patient consent (verified on-chain)")
+
+
+def test_asking_again_does_not_lift_a_withdrawal():
+    import app.main as m
+    assert "prior_refusal" in m._CONSENT_REVOKED
+    assert "prior_refusal = TRUE" in _src("create_access_request")
+    assert "revoked_at = NULL" not in _src("create_access_request")
+
+
+def test_a_reverted_transaction_is_not_reported_as_recorded():
+    from app import chain_client as cc
+
+    class Eth:
+        gas_price = 1
+
+        def get_transaction_count(self, address):
+            return 0
+
+        def send_raw_transaction(self, raw):
+            return b"h"
+
+        def wait_for_transaction_receipt(self, tx_hash, timeout):
+            return {"status": 0, "transactionHash": bytes.fromhex("ab"),
+                    "blockNumber": 1, "gasUsed": 21000}
+
+    class Account:
+        address = "0x1"
+
+        def sign_transaction(self, tx):
+            return type("Signed", (), {"raw_transaction": b"r"})()
+
+    client = object.__new__(cc.ChainClient)
+    client.web3 = type("W3", (), {"eth": Eth()})()
+    client.account = Account()
+    client.settings = type("S", (), {"BLOCKCHAIN_CHAIN_ID": 31337})()
+    call = type("Call", (), {"build_transaction": lambda self, tx: tx})()
+    with pytest.raises(RuntimeError, match="reverted"):
+        client._transact(call)
 
 
 def test_recording_without_a_chain_says_so_and_writes_nothing(ledger):
@@ -530,3 +597,60 @@ def test_a_failed_audit_insert_cannot_abort_the_callers_transaction():
     log_admin_action(conn, "a1", "ADM-1", "TEST_ACTION", ip_address="testclient")
     assert Savepoint.rolled_back           # the failure stayed inside the savepoint
     assert conn.commits == 0
+
+
+# ═══ Nurse access is a care-team relationship, not a role property (§4, §34) ═
+
+def _assignment(role="Doctor", by="doc-1"):
+    return {"id": "a1", "assigned_by": by, "assigned_by_role": role, "reason": "Post-op obs",
+            "expires_at": None, "assigned_by_name": "Dr. A"}
+
+
+def _nurse_auth(rows):
+    from app.main import _nurse_patient_authorization
+    return _nurse_patient_authorization(FakeCursor(rows), "nurse-1", "patient-1")
+
+
+def test_a_nurse_without_an_assignment_is_refused():
+    allowed, basis, _ = _nurse_auth([None])
+    assert not allowed and "care team" in basis
+
+
+def test_a_ward_allocation_by_an_administrator_stands_on_its_own():
+    allowed, basis, _ = _nurse_auth([_assignment("Administrator", "adm-1")])
+    assert allowed and "ward" in basis
+
+
+def test_a_doctor_delegated_assignment_holds_while_the_doctor_is_authorized():
+    rows = [_assignment(), {"blocked": False, "emergency": False},
+            {"treating": True, "consented": False}]
+    allowed, basis, _ = _nurse_auth(rows)
+    assert allowed and "delegated" in basis
+
+
+def test_withdrawing_the_doctor_also_withdraws_the_nurse_they_brought_in():
+    rows = [_assignment(), {"blocked": True, "emergency": False}]
+    allowed, basis, _ = _nurse_auth(rows)
+    assert not allowed and "no longer has access" in basis
+
+
+def test_a_doctors_break_glass_is_not_passed_on_to_the_nurse():
+    rows = [_assignment(), {"blocked": True, "emergency": True}]
+    allowed, _, _ = _nurse_auth(rows)
+    assert not allowed
+
+
+@pytest.mark.parametrize("endpoint", ["get_nurse_patient_detail", "record_patient_vitals",
+                                      "add_nursing_note", "administer_medication"])
+def test_every_nurse_patient_endpoint_requires_the_care_team(endpoint):
+    assert "_require_nurse_access" in _src(endpoint)
+
+
+def test_nurse_search_is_limited_to_the_care_team_and_returns_no_emails():
+    src = _src("search_nurse_patients")
+    assert "_nurse_care_team" in src and "email" not in _src("_nurse_care_team")
+
+
+def test_assigning_a_nurse_needs_the_doctors_own_access_and_no_break_glass():
+    src = _src("assign_patient_care_team")
+    assert "_require_write_access" in src and "emergency override" in src

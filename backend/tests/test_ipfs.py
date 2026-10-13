@@ -114,3 +114,32 @@ def test_node_cid_differs_from_the_raw_fingerprint():
         pytest.skip("configured but not running")
     payload = b"UNIXFS-FRAMING-" + os.urandom(32)
     assert pin_to_ipfs(payload, "framing.enc") != generate_ipfs_cid_v0(payload)
+
+
+# ─── Replication to a second, independent node ───────────────────────────────
+
+needs_replica = pytest.mark.skipif(not os.getenv("IPFS_REPLICA_NODES"),
+                                   reason="no replica node configured")
+
+
+@needs_node
+@needs_replica
+def test_a_published_document_is_replicated_to_a_second_node():
+    """Run against two real kubo daemons in CI. The replica's own pin list is
+    the evidence — not this application's record that it asked."""
+    import json
+    from app import ipfs_replication
+
+    if not ipfs_status()["connected"]:
+        pytest.skip("configured but not running")
+    payload = b"REPLICA-" + os.urandom(64)
+    cid = pin_to_ipfs(payload, "replica.enc")
+    assert cid in (ipfs_replication.primary_pins() or set())
+
+    results = ipfs_replication.replicate(cid, "replica.enc")
+    assert results and all(r["status"] == "pinned" for r in results), results
+
+    for target in ipfs_replication.targets():
+        status, body = ipfs_replication._http(
+            "POST", f"{target.url}/api/v0/pin/ls?arg={cid}&type=recursive", timeout=30)
+        assert status == 200 and cid in json.loads(body)["Keys"], (target.name, body[:200])

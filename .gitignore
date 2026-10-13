@@ -21,3 +21,7 @@ contracts/out/
 
 # Generated demo dataset credentials (regenerate with generate_dataset.py)
 backend/dataset_credentials.csv
+
+# Keys generated on first start when none is configured (see app/config.py)
+backend/.secret_key
+backend/.ledger_key

@@ -258,10 +258,11 @@ export default function PatientAccessRequestsPage() {
                 ? `Dr. ${deciding.req.doctor_name} will be able to read your medical record. They will be notified.`
                 : `Dr. ${deciding.req.doctor_name} will not be able to read your record. They will be notified.`}
             </p>
-            <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">
+            <label htmlFor="ar-note" className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">
               Note (optional)
             </label>
             <textarea
+              id="ar-note"
               className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-cyan-500 outline-none"
               rows={3}
               placeholder="Only you and an administrator can see this."

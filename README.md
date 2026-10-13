@@ -69,6 +69,8 @@ The design rule throughout: *the system never claims a protection it did not act
 - **Medication Administration**: Records each round against the prescription as Administered, Refused, Held or Missed, with the last outcome shown per medicine.
 
 > Vitals recorded here are readable by the treating **doctor** and by the **patient**. Nursing notes go to the doctor only — they are clinical handover between staff.
+>
+> **A nurse sees only their care team.** Access to a patient is an assignment — made by a doctor who is already authorized for that patient (and lasting only while that doctor's access does) or by an administrator as a ward allocation — time-boxed, visible to the patient, and ended rather than deleted. Search covers the care team only.
 
 ---
 
@@ -263,9 +265,9 @@ listed as not built.
 | Post-quantum key issuance | ✅ | Real ML-KEM-768 + ML-DSA-65 via liboqs, generated on approval |
 | Doctor → Lab → Patient report pipeline | ✅ | 9 structured panels → hospital PDF → AES-256-GCM → ML-KEM → ML-DSA → chain anchor |
 | Imaging studies | ✅ | Encrypted, signed, anchored — and now readable by the patient and by an entitled doctor |
-| Nurse module | ✅ | Vitals, notes and medication rounds all reach the doctor and the patient |
+| Nurse module | ✅ | Vitals, notes and medication rounds all reach the doctor and the patient; a nurse reaches a patient only through a care-team assignment |
 | Cloud storage (AWS S3) | ✅ | Ciphertext only, verified; doubles as a recovery path if the database copy is lost |
-| Blockchain anchoring | ✅ | Real on-chain writes via `PHR.sol`; falls back to a clearly-labelled local anchor |
+| Blockchain anchoring | ✅ | Real on-chain writes via `PHR.sol` (writes restricted to the backend's key); falls back to a clearly-labelled local anchor. **Verified live in CI** against anvil: consent written on-chain, report digests read back, break-glass through `emergencyAccess()`, a consent row edited in SQL refused as a mismatch |
 | Session handling | ✅ | 30-minute tokens; expiry redirects to login and returns you to where you were |
 | RBAC across 5 roles | ✅ | Enforced server-side; backend/frontend permission parity is test-enforced |
 | Doctor-authored documents | ✅ | Encrypted, signed and anchored — and readable by the patient they concern, completing the spec's "patient receives authorized access" |
@@ -275,14 +277,15 @@ listed as not built.
 | Doctor access requests | ✅ | Doctor requests with a stated purpose → patient approves or declines → the backend enforces it. Verified: no request 403, pending 403, rejected 403, approved 200 |
 | AI security layer | ✅ | Anomaly detection (scheduled, and inline at every clinician read), XAI explanations, configurable risk policy with password re-verification, alerts from every security source, incidents worked to closure |
 | Federated learning loop | 🟡 | Per-role FedAvg; a hospital can submit its signed per-role update to a hub and pull the global model back; detection uses a global model only when real institutions built it. Tested against a fake hub — **not yet between two running hospitals** |
-| Zero-knowledge consent proof | ✅ | **Post-quantum**: lattice proof (Fiat–Shamir with aborts, ML-DSA-65 parameters). Consents approved before the switch keep their Schnorr commitment, which still verifies and is reported as *not* post-quantum. See its own section |
-| IPFS publishing | ✅ | Really pinned to a running kubo node; joins the recovery chain behind the database and S3 |
+| Zero-knowledge consent proof | ✅ | **Post-quantum**: lattice proof (Fiat–Shamir with aborts, ML-DSA-65 parameters), **made in the doctor's browser** — the token never leaves it. The TypeScript prover and the Python verifier are checked against each other in CI. Consents approved before the switch keep their Schnorr commitment, which still verifies and is reported as *not* post-quantum. See its own section |
+| IPFS publishing | ✅ | Really pinned to a running kubo node; joins the recovery chain behind the database and S3. **Verified live in CI** with two kubo daemons: the stored object is exactly the ciphertext, and replication is confirmed by the replica's own pin list |
 | IPFS replication | 🟡 | Copies on other IPFS nodes and/or Pinning-Service-API providers; only copies a target confirms count. Unit-tested against a scripted HTTP fake — **not yet run against a real second node or pinning service** |
 | Federation peer admin screen | 🟡 | Register a peer (secret shown once), suspend, reinstate. Rendered and exercised against sample data — **not yet against a live backend** |
 | Medication adherence | ✅ | Refusals and misses reach the prescriber and the patient, not only a percentage |
 | Emergency break-glass access | ✅ | Password re-verification, daily limit, risk-scored, time-boxed, patient notified immediately, anchored on-chain, compliance incident opened automatically |
-| End-to-end flow (spec §37) | ✅ | `tests/test_e2e_flow.py` drives access request → consent → lab request → signed, encrypted report → patient release → tamper detection → withdrawal → break-glass → incidents and audit, against real Postgres and real liboqs, in CI |
-| Automated tests | ✅ | 327 tests, mutation-checked; weighted toward refusals. CI runs them inside the backend image, where liboqs is real |
+| End-to-end flow (spec §37) | ✅ | `tests/test_e2e_flow.py` drives access request → consent → nurse care team → lab request → signed, encrypted report → patient release → tamper detection → withdrawal → break-glass → incidents and audit, against real Postgres and real liboqs. CI runs it twice: database-only, and with the chain, IPFS and a second hospital live |
+| Automated tests | ✅ | 367 Python tests plus a Foundry contract suite and a browser-prover vector check; weighted toward refusals. CI runs them inside the backend image, where liboqs is real |
+| Federated learning between hospitals | ✅ | **Verified live in CI** between two running backends with separate databases: peer registration, signed submission (a wrong secret refused), FedAvg round on the hub, global model pulled back and stored |
 
 🟡 = built and tested in isolation, still to be verified on the running system.
 
@@ -317,21 +320,30 @@ is listed honestly rather than quietly dropped.
 | **Federated loop** | The global model was computed and never used; no hospital could send its update or receive the model. | Per-role models, participant submit/pull, global model used for detection when real institutions built it |
 | **Smart-contract consent** | `updateConsent`/`checkConsent` existed in `PHR.sol` and were never called. | Decisions written on-chain; consent-based reads checked against the contract |
 | **Blockchain in the image** | `web3` was missing from `requirements.txt`, so the container could never reach a chain. | Added |
+| **Forgeable sessions** | `SECRET_KEY` defaulted to a string published in this repository, so a deployment without its own key let anyone mint an Administrator token. | A placeholder or short key is replaced by a generated one; the consent ledger has its own key; no default admin password |
+| **Nurse access scope** | Any nurse could search every patient (with e-mail addresses), open any chart, record vitals and medicate anyone. | Care-team assignments by an authorized doctor or an administrator; everything else refused and recorded |
+| **Contract write guard** | `PHR.sol` defined `onlyAdmin` and applied it to nothing — any address could rewrite consent. | Every write needs the backend's key; consent keeps none / granted / revoked |
+| **On-chain consent check** | Ran only for consent-based reads, and only when a database column said there was a record to check. | Every non-emergency doctor read asks the chain; an on-chain withdrawal the database no longer shows is refused with an incident |
+| **Re-request lifts a withdrawal** | A doctor re-asking after a withdrawal reset the row to Pending, which unblocked them before the patient decided. | The refusal stands until the patient approves |
+| **Chain, IPFS replication, federation in CI** | Exercised only against fakes. | Run live in CI: anvil + deployed contract, two kubo daemons, a second hospital |
+| **ZKP prover in the browser** | Proofs needed `demo/zkp_prove.py`. | "Prove consent" on the patient's page; the token stays in the browser |
+| **Lab report progress** | The finalize dialog animated "hashing… ML-KEM… ML-DSA" on client-side timers before the request was sent. | It states what runs on the server; the result shows what the server returned |
 
 ### Still open
 
-| # | Workflow | Where it stops |
+| # | Item | Where it stops |
 |---|---|---|
-| 1 | **Live verification of replication** | Tested against a scripted fake only. Needs a run with a real second kubo node (`IPFS_REPLICA_NODES`) or a pinning-service account (`IPFS_PINNING_SERVICES`). |
-| 2 | **ZKP prover in the browser** | Proofs are made on the doctor's side with `backend/demo/zkp_prove.py`; the web UI has no prover, because the token must never be sent to the server to make one. |
-| 3 | **Chain-dependent paths in CI** | CI runs with the chain disabled, so on-chain consent, `emergencyAccess()` and anchoring are exercised only by unit tests with a fake chain. Needs a run with anvil and the deployed contract. |
-| 4 | **Nurse access scope** | A nurse can open any approved patient's chart; there is no ward or assignment model to restrict it. Needs a decision on what a nurse's relationship to a patient is. |
+| 1 | **Rotating a public `ENCRYPTION_KEY`** | Databases created with the example key keep it: the data is encrypted under it, and there is no re-encryption tool yet. The server warns at every start and on the security policy. |
+| 2 | **Existing nurse relationships** | Not migrated into care teams — after this change a nurse sees no patients until assigned. Deliberate (the old access had no basis), but it needs an administrator pass on a live system. |
+| 3 | **Contracts deployed before `consentStatus`** | Cannot answer the new consent query, so every consent reads `unverified` until `PHR.sol` is redeployed (`start.sh` redeploys on a fresh anvil). |
+| 4 | **Browser token storage** | The consent token is kept in the browser's local storage, readable by any script running on this origin. A backup file and a paste-in path exist; hardware-backed storage does not. |
+| 5 | **S3 and SMTP live** | Built and handled honestly when unconfigured, but CI has no AWS or mail account, so neither is exercised against the real service there. |
 
 ### Not implemented
 
 | Area | Status |
 |---|---|
-| **Multi-hospital federation in practice** | Both sides are built — hub (aggregate, serve the global model) and participant (submit, pull). A live federation needs a second running hospital; nothing here pretends one exists. |
+| **A federation of independent institutions** | The protocol runs live between two backends in CI. An actual federation needs other hospitals to deploy and register; nothing here pretends they exist. |
 | **Standardised post-quantum ZKP** | The lattice proof uses ML-DSA-65's parameters and assumptions, but the construction itself (Lyubashevsky's, uncompressed) is not a NIST standard and has not been independently reviewed. |
 
 > On AI: the security layer performs **behavioural anomaly detection**, not
@@ -569,7 +581,14 @@ neither proof nor commitment. Three deliberate mutations — no abort, no norm c
 in the verifier, context dropped from the hash — each make a test fail.
 
 **Making a proof.** The token never goes back to the server, so proofs are made
-where it is kept:
+where it is kept. On the patient's page a doctor collects the token once and
+then presses **Prove consent**: the browser asks for a challenge, proves locally
+with `frontend/src/lib/zkpLattice.ts` (a line-for-line port of the Python
+module, ~20–40 ms), checks the proof against the commitment, and sends only the
+proof. `backend/tests/fixtures/zkp_vectors.json` holds a fixed token, its
+commitment and a proof from each implementation; the Python suite verifies the
+browser's proof and `frontend/scripts/check-zkp.mjs` (run in CI) verifies
+Python's. Outside the browser, the same proof from the command line:
 
 ```bash
 # token from GET /api/doctor/consent-token/{patient_id} (delivered once)
@@ -708,6 +727,10 @@ endpoint's disclosure states which case applied.
 
 Verified: a signed submission accepted, a forged signature **401**, poisoned
 parameters **400**, and a round that ran with **2 real nodes and 0 simulated**.
+CI repeats this between two running backends with separate databases
+(`tests/test_federation_live.py`): hospital B registers hospital A, A's signed
+model is accepted (and a wrong secret refused), B runs the round, and A pulls
+the global model both built.
 
 What federation buys is precise: no record, event or identifier ever leaves the
 institution — only the few numbers describing what normal looks like.

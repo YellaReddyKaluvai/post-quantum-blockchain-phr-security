@@ -220,7 +220,7 @@ export default function DoctorAccessRequestsPage() {
 
             <form onSubmit={submit} className="space-y-4">
               <div>
-                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">
+                <label htmlFor="ar-patient" className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">
                   Patient
                 </label>
                 {chosen ? (
@@ -241,6 +241,7 @@ export default function DoctorAccessRequestsPage() {
                   <>
                     <div className="flex gap-2">
                       <input
+                        id="ar-patient"
                         type="text"
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
@@ -278,10 +279,11 @@ export default function DoctorAccessRequestsPage() {
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">
+                <label htmlFor="ar-purpose" className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">
                   Clinical reason
                 </label>
                 <textarea
+                  id="ar-purpose"
                   className="w-full border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-cyan-500 outline-none"
                   rows={3}
                   required
