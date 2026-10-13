@@ -860,6 +860,9 @@ class PeerSubmissionRequest(BaseModel):
     round_number: int = Field(..., ge=1)
     sample_count: int = Field(..., ge=1, le=10_000_000)
     parameters: dict = Field(...)
+    # Unix seconds, covered by the signature: the hub refuses a stale one, or one
+    # not newer than the last it accepted from this peer (replay).
+    timestamp: int = Field(..., ge=0)
     signature: str = Field(..., min_length=64, max_length=64)
 
 

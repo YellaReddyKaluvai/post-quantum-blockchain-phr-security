@@ -79,6 +79,10 @@ interface Federated {
   real_nodes?: number;
   simulated_nodes?: number;
   detection_baseline?: string;
+  latest_round_adopted?: boolean | null;
+  latest_round_evaluation?: { adopt: boolean; reasons: string[] } | null;
+  open_round?: number;
+  pending_peer_submissions?: number;
   participant?: {
     configured: boolean;
     hub_url?: string | null;
@@ -576,6 +580,18 @@ export default function AiSecurityPage() {
             {federated.detection_baseline && (
               <p className="text-sm text-slate-600 mb-4">
                 Detection is scoring against: <b className="text-slate-800">{federated.detection_baseline}</b>
+              </p>
+            )}
+            {federated.latest_round_adopted === false && (
+              <p role="alert" className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
+                Round {federated.latest_round} was not adopted here: it would make detection on this
+                hospital&apos;s data worse ({federated.latest_round_evaluation?.reasons.join("; ")}).
+                Peers still receive it and judge it on their own data.
+              </p>
+            )}
+            {!!federated.pending_peer_submissions && (
+              <p className="text-xs text-slate-500 mb-4">
+                {federated.pending_peer_submissions} peer update(s) waiting for round {federated.open_round}.
               </p>
             )}
 

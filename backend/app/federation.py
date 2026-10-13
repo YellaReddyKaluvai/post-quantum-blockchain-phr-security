@@ -38,7 +38,11 @@ Optional:
 
 Requests to the hub are signed with the shared secret and a timestamp, and the
 hub refuses a signature more than five minutes old, so a captured request
-cannot be replayed later to read the model.
+cannot be replayed later to read the model. Submissions carry a signed
+timestamp too, and the hub accepts only one newer than the last it took from
+that peer. The hub signs the model it returns, bound to the requesting node
+and its timestamp, so a model altered or replayed in transit is refused here
+before it is even evaluated.
 """
 
 from __future__ import annotations
@@ -67,6 +71,7 @@ class FederationError(RuntimeError):
 
 
 _db_settings: Optional[dict[str, Optional[str]]] = None    # last read of FederationParticipation
+_last_submission_ts = 0          # the hub accepts only a newer one; two in one second must differ
 
 
 def refresh_settings(cur) -> None:
@@ -79,7 +84,8 @@ def refresh_settings(cur) -> None:
     if not row:
         _db_settings = None
         return
-    hub, node, secret = (row["hub_url"], row["node_name"], row["shared_secret_encrypted"])         if isinstance(row, dict) else row
+    hub, node, secret = ((row["hub_url"], row["node_name"], row["shared_secret_encrypted"])
+                         if isinstance(row, dict) else row)
     _db_settings = {"hub_url": hub.rstrip("/"), "node_name": node, "secret": decrypt_data(secret)}
 
 
@@ -127,6 +133,35 @@ def verify_request_signature(node_name: str, timestamp: str, purpose: str,
         return False
     expected = request_signature(node_name, ts, purpose, secret)
     return hmac.compare_digest(expected, signature or "")
+
+
+def model_signature(node_name: str, timestamp: int, model: dict, secret: str) -> str:
+    """The hub's HMAC over the global model it hands one peer for one request."""
+    body = {k: v for k, v in model.items() if k != "signature"}
+    canonical = json.dumps({"node": node_name, "ts": int(timestamp), "model": body},
+                           sort_keys=True, separators=(",", ":"), default=str)
+    return hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def verify_model_signature(node_name: str, timestamp: int, model: dict, secret: str) -> bool:
+    return hmac.compare_digest(model_signature(node_name, timestamp, model, secret),
+                               str(model.get("signature") or ""))
+
+
+def transport_warning(hub_url: Optional[str]) -> Optional[str]:
+    """Plain HTTP to a hub that is not on this machine exposes the exchange.
+
+    Every message is HMAC-authenticated either way, so it cannot be altered
+    unnoticed; but the parameters themselves would travel unencrypted.
+    """
+    from urllib.parse import urlparse
+    if not hub_url:
+        return None
+    parsed = urlparse(hub_url)
+    if parsed.scheme == "https" or (parsed.hostname or "") in ("localhost", "127.0.0.1", "::1"):
+        return None
+    return ("The hub is reached over plain HTTP. Messages are signed, so they cannot be altered "
+            "unnoticed, but model parameters travel unencrypted; use an https:// hub URL.")
 
 
 # ─── HTTP ────────────────────────────────────────────────────────────────────
@@ -244,6 +279,9 @@ def pull_global_model(cur=None) -> dict[str, Any]:
         "Accept": "application/json",
     })
     model = _json_or_raise(status, payload, "Pulling the global model")
+    if not verify_model_signature(s["node_name"], ts, model, s["secret"]):
+        raise FederationError("The global model was not signed by the hub for this request "
+                              "(altered or replayed in transit); not used.")
     if not aisec.sane_parameters(model.get("parameters") or {}):
         raise FederationError("The hub's global model failed the plausibility check; not used.")
     return model
@@ -256,15 +294,18 @@ def submit_local_update(cur, round_number: Optional[int] = None) -> dict[str, An
         raise FederationError("Federation hub is not configured.")
     params, samples, training = fit_local_update(cur)
     if round_number is None:
-        # The hub opens round = its latest + 1; ask what that is rather than guess.
+        # The hub says which round is open; an older hub only its latest + 1.
         try:
-            round_number = int(pull_global_model(cur).get("round_number") or 0) + 1
+            model = pull_global_model(cur)
+            round_number = int(model.get("open_round") or 0) or int(model.get("round_number") or 0) + 1
         except FederationError:
             round_number = 1
+    global _last_submission_ts
+    ts = _last_submission_ts = max(int(time.time()), _last_submission_ts + 1)
     signature = aisec.parameters_signature(s["node_name"], round_number, samples, params,
-                                           s["secret"])
+                                           s["secret"], ts)
     body = json.dumps({"node_name": s["node_name"], "round_number": round_number,
-                       "sample_count": samples, "parameters": params,
+                       "sample_count": samples, "parameters": params, "timestamp": ts,
                        "signature": signature}).encode("utf-8")
     status, payload = _http("POST", f"{s['hub_url']}/api/federated/submit", body=body,
                             headers={"Content-Type": "application/json"})
