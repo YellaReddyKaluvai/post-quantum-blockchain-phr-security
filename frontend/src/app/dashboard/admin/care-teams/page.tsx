@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { Users, UserPlus, Loader2, Search, CheckCircle, Clock } from "lucide-react";
 import { CareTeamMember, adminAssignCareTeam, adminEndCareTeam, getAdminCareTeams } from "@/lib/session";
+import CareTeamSuggestions from "@/components/CareTeamSuggestions";
 
 const DURATIONS = [
   { hours: 24, label: "24 hours" },
@@ -143,6 +144,8 @@ export default function AdminCareTeamsPage() {
           </button>
         </div>
       </motion.form>
+
+      <CareTeamSuggestions onAllocated={() => load(query.trim())} />
 
       <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
         <div className="flex items-center gap-3 mb-4">
