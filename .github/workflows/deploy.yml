@@ -163,6 +163,28 @@ jobs:
           for i in $(seq 1 60); do curl -fs -X POST http://127.0.0.1:$port/api/v0/id >/dev/null && break; sleep 1; done
           curl -fsS -X POST http://127.0.0.1:$port/api/v0/id | head -c 200; echo
         done
+    # A real IPFS Pinning Service, so the replication client is checked against
+    # somebody else's implementation of the specification rather than our own
+    # fake. ipfs-cluster serves the same API a commercial provider does.
+    - name: Start an IPFS Pinning Service (ipfs-cluster)
+      continue-on-error: true
+      run: |
+        docker run -d --name cluster --network host \
+          -e CLUSTER_SECRET=$(openssl rand -hex 32) \
+          -e CLUSTER_IPFSHTTP_NODEMULTIADDRESS=/ip4/127.0.0.1/tcp/5001 \
+          -e CLUSTER_PINSVCAPI_HTTPLISTENMULTIADDRESS=/ip4/127.0.0.1/tcp/9097 \
+          -e CLUSTER_RESTAPI_HTTPLISTENMULTIADDRESS=/ip4/127.0.0.1/tcp/9094 \
+          ipfs/ipfs-cluster:latest daemon --upgrade
+        for i in $(seq 1 60); do
+          curl -fs http://127.0.0.1:9097/pins >/dev/null && break; sleep 2
+        done
+        if curl -fsS http://127.0.0.1:9097/pins | head -c 200; then
+          echo
+          echo "PINNING_SERVICE_URL=http://127.0.0.1:9097" >> "$GITHUB_ENV"
+        else
+          echo "ipfs-cluster did not come up; the live pinning test will skip."
+          docker logs cluster 2>&1 | tail -30 || true
+        fi
     # On-chain consent, anchoring and break-glass against the deployed contract;
     # the encrypted report published to IPFS and replicated to the second node,
     # stored in S3 and recovered from it; approval e-mail delivered over SMTP;
@@ -179,6 +201,7 @@ jobs:
         -e BLOCKCHAIN_CONTRACT_ADDRESS=$CONTRACT_ADDRESS
         -e IPFS_API_URL=http://127.0.0.1:5001
         -e IPFS_REPLICA_NODES=http://127.0.0.1:5002
+        -e PINNING_SERVICE_URL=$PINNING_SERVICE_URL
         -e FED_HUB_URL=http://127.0.0.1:8001
         -e FED_HUB_DATABASE_URL=$DB_ROOT/hospital_b
         -e FED_C_URL=http://127.0.0.1:8002
@@ -199,7 +222,7 @@ jobs:
         $IMAGE
         python -m pytest -p no:cacheprovider -rs
         tests/test_e2e_flow.py tests/test_ipfs.py tests/test_federation_live.py
-        tests/test_contract_migration_live.py
+        tests/test_contract_migration_live.py tests/test_pinning_service_live.py
     # The real frontend in a real browser against a real backend (hospital B):
     # sign-in with the HttpOnly cookie, the federation peers screen end to end,
     # the CSRF header on every change, and a cookie that is dead after logout.
@@ -214,18 +237,38 @@ jobs:
       env:
         UI_ADMIN_ID: ADM-UI-SMOKE
         UI_ADMIN_PASSWORD: UiSmoke-Pass-1!
+        UI_DOCTOR_ID: DOC-UI-SMOKE
       run: |
-        docker run --rm --network host -e UI_ADMIN_ID -e UI_ADMIN_PASSWORD $IMAGE python -c "
+        # An administrator, and a doctor with three approved consents — one per
+        # scenario, because a consent token is deliberately delivered only once.
+        # Each is minted exactly as the patient's approval mints it.
+        docker run --rm --network host -e UI_ADMIN_ID -e UI_ADMIN_PASSWORD -e UI_DOCTOR_ID $IMAGE python -c "
         import os, psycopg
         from app.security import hash_password, encrypt_data
+        from app import zkp_service as zkp
+        pw = hash_password(os.environ['UI_ADMIN_PASSWORD'])
+        dob = encrypt_data('1980-01-01')
         with psycopg.connect('$DB_ROOT/hospital_b', autocommit=True) as db:
-            db.execute('''INSERT INTO Users (user_id, full_name, email, password_hash, role, gender,
-                                             date_of_birth_encrypted, status)
-                          VALUES (%s, 'UI Smoke Admin', 'ui-smoke@e2e.example.com', %s, 'Administrator',
-                                  'Other', %s, 'Approved')''',
-                       (os.environ['UI_ADMIN_ID'], hash_password(os.environ['UI_ADMIN_PASSWORD']),
-                        encrypt_data('1980-01-01')))
-        "
+            def user(uid, name, role):
+                return db.execute('''INSERT INTO Users (user_id, full_name, email, password_hash, role,
+                                                        gender, date_of_birth_encrypted, status)
+                                     VALUES (%s, %s, %s, %s, %s, 'Other', %s, 'Approved') RETURNING id''',
+                                  (uid, name, uid.lower() + '@e2e.example.com', pw, role, dob)).fetchone()[0]
+            user(os.environ['UI_ADMIN_ID'], 'UI Smoke Admin', 'Administrator')
+            doctor = user(os.environ['UI_DOCTOR_ID'], 'UI Smoke Doctor', 'Doctor')
+            patients = []
+            for n in (1, 2, 3):
+                patient = user(f'PAT-UI-SMOKE-{n}', f'UI Smoke Patient {n}', 'Patient')
+                token, commitment = zkp.issue_consent_token()
+                db.execute('''INSERT INTO Consent (patient_id, subject_user_id, subject_role, status,
+                                                   zkp_commitment, zkp_token_encrypted)
+                              VALUES (%s, %s, 'Doctor', 'Authorized', %s, %s)''',
+                           (patient, doctor, commitment, encrypt_data(token)))
+                patients.append(str(patient))
+            print('UI_PATIENT_UUIDS=' + ','.join(patients))
+        " | tee /tmp/ui-seed.log
+        export UI_PATIENT_UUIDS=$(grep -oE 'UI_PATIENT_UUIDS=.*' /tmp/ui-seed.log | cut -d= -f2)
+        test -n "$UI_PATIENT_UUIDS"
         cd frontend
         npm ci
         NEXT_PUBLIC_BACKEND_URL=http://localhost:8001 npm run build
@@ -244,6 +287,7 @@ jobs:
         name: ui-smoke
         path: |
           /tmp/ui-smoke-failure.png
+          /tmp/ui-smoke-passkey-failure.png
           /tmp/frontend.log
         if-no-files-found: ignore
     - name: Hub and chain logs
@@ -252,4 +296,5 @@ jobs:
         docker logs hospital-b 2>&1 | tail -80 || true
         docker logs hospital-c 2>&1 | tail -40 || true
         docker logs s3 2>&1 | tail -30 || true
+        docker logs cluster 2>&1 | tail -40 || true
         tail -40 /tmp/anvil.log || true

@@ -1,14 +1,17 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
-import { Fingerprint, Loader2, CheckCircle, XCircle, Download, KeyRound, Trash2, Lock, ShieldAlert } from "lucide-react";
+import { Fingerprint, Loader2, CheckCircle, XCircle, Download, KeyRound, Trash2, Lock, ShieldAlert, ScanFace } from "lucide-react";
 import { USER_ID_COOKIE, collectConsentToken, requestZkpChallenge, submitZkpProof } from "@/lib/session";
 import { PREFIX, ZKPError, commitmentFor, prove, verify } from "@/lib/zkpLattice";
-import { MIN_PASSPHRASE_LENGTH, SealedToken, VaultError, isSealed, openToken, sealToken } from "@/lib/tokenVault";
+import {
+  MIN_PASSPHRASE_LENGTH, SealedToken, VaultError, isPasskeySealed, isSealed,
+  openToken, openTokenWithPasskey, passkeySupported, sealToken, sealTokenWithPasskey,
+} from "@/lib/tokenVault";
 
-// What this browser keeps: the public commitment, and the token sealed under the
-// doctor's passphrase. ``token`` is only ever present in records written before
-// sealing existed; the panel asks to protect those.
+// What this browser keeps: the public commitment, and the token sealed under a
+// passkey or a passphrase. ``token`` is only ever present in records written
+// before sealing existed; the panel asks to protect those.
 interface StoredToken {
   commitment: string;
   sealed?: SealedToken;
@@ -63,6 +66,9 @@ export default function ConsentProofPanel({ patientId }: { patientId: string }) 
   const [unlocked, setUnlocked] = useState<string | null>(null);
   const [passphrase, setPassphrase] = useState("");
   const [confirmPassphrase, setConfirmPassphrase] = useState("");
+  // Passkeys when this device has one that can hold a key; otherwise a passphrase.
+  const [passkeyReady, setPasskeyReady] = useState(false);
+  const [method, setMethod] = useState<"passkey" | "passphrase">("passphrase");
   const [busy, setBusy] = useState<"" | "collect" | "prove" | "seal">("");
   const [error, setError] = useState("");
   const [note, setNote] = useState("");
@@ -72,15 +78,27 @@ export default function ConsentProofPanel({ patientId }: { patientId: string }) 
 
   useEffect(() => { setStored(readStored(patientId)); setUnlocked(null); }, [patientId]);
 
+  useEffect(() => {
+    let live = true;
+    passkeySupported().then((ok) => {
+      if (!live) return;
+      setPasskeyReady(ok);
+      setMethod(ok ? "passkey" : "passphrase");
+    });
+    return () => { live = false; };
+  }, []);
+
   const newPassphraseProblem = (): string | null => {
     if (passphrase.length < MIN_PASSPHRASE_LENGTH) return `Choose a passphrase of at least ${MIN_PASSPHRASE_LENGTH} characters.`;
     if (passphrase !== confirmPassphrase) return "The two passphrases do not match.";
     return null;
   };
 
-  /** Seal ``token`` under the passphrase entered and keep only the sealed form. */
+  /** Seal ``token`` under the chosen protection and keep only the sealed form. */
   const keepSealed = useCallback(async (token: string, commitment: string) => {
-    const sealed = await sealToken(token, passphrase, patientId);
+    const sealed = method === "passkey"
+      ? await sealTokenWithPasskey(token, patientId, doctorId())
+      : await sealToken(token, passphrase, patientId);
     const value: StoredToken = { commitment, sealed };
     setStored(value);
     setUnlocked(token);
@@ -89,11 +107,11 @@ export default function ConsentProofPanel({ patientId }: { patientId: string }) 
     if (!writeStored(patientId, value)) {
       setNote("This browser will not keep the token (storage is blocked). Download the encrypted backup now — it cannot be collected again.");
     }
-  }, [passphrase, patientId]);
+  }, [method, passphrase, patientId]);
 
   const collect = async () => {
     if (busy) return;
-    const problem = newPassphraseProblem();
+    const problem = method === "passphrase" ? newPassphraseProblem() : null;
     if (problem) { setError(problem); return; }
     setBusy("collect");
     setError("");
@@ -105,7 +123,8 @@ export default function ConsentProofPanel({ patientId }: { patientId: string }) 
         return;
       }
       await keepSealed(t.consent_token, t.commitment);
-      setNote("Token collected and stored encrypted under your passphrase. The server has discarded its copy — download the encrypted backup if you use more than one device.");
+      setNote(`Token collected and stored encrypted under your ${method}. The server has discarded its `
+        + "copy — download the encrypted backup if you use more than one device.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to collect the token");
     } finally {
@@ -127,7 +146,7 @@ export default function ConsentProofPanel({ patientId }: { patientId: string }) 
       } else {
         const token = parsed ? parsed.token ?? "" : raw;
         const commitment = commitmentFor(token);              // throws on a malformed token
-        const problem = newPassphraseProblem();
+        const problem = method === "passphrase" ? newPassphraseProblem() : null;
         if (problem) { setError(problem); return; }
         setBusy("seal");
         await keepSealed(token, commitment);
@@ -144,13 +163,13 @@ export default function ConsentProofPanel({ patientId }: { patientId: string }) 
   /** A token stored before sealing existed: encrypt it in place. */
   const protectLegacy = async () => {
     if (!stored?.token || busy) return;
-    const problem = newPassphraseProblem();
+    const problem = method === "passphrase" ? newPassphraseProblem() : null;
     if (problem) { setError(problem); return; }
     setBusy("seal");
     setError("");
     try {
       await keepSealed(stored.token, stored.commitment);
-      setNote("The token is now stored encrypted under your passphrase.");
+      setNote(`The token is now stored encrypted under your ${method}.`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not protect the token");
     } finally {
@@ -166,11 +185,13 @@ export default function ConsentProofPanel({ patientId }: { patientId: string }) 
     try {
       let token = unlocked ?? stored.token ?? null;
       if (!token && stored.sealed) {
-        token = await openToken(stored.sealed, passphrase, patientId);
+        token = isPasskeySealed(stored.sealed)
+          ? await openTokenWithPasskey(stored.sealed, patientId)
+          : await openToken(stored.sealed, passphrase, patientId);
         setUnlocked(token);
         setPassphrase("");
       }
-      if (!token) throw new VaultError("Enter your passphrase to unlock the token.");
+      if (!token) throw new VaultError("Unlock the token first.");
       const ch = await requestZkpChallenge(patientId);
       // Yield once so the "Proving…" state paints before the computation runs.
       await new Promise((r) => setTimeout(r, 0));
@@ -213,6 +234,7 @@ export default function ConsentProofPanel({ patientId }: { patientId: string }) 
   };
 
   const input = "w-full px-3 py-2 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200";
+
   const newPassphraseFields = (
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
       <div>
@@ -229,6 +251,36 @@ export default function ConsentProofPanel({ patientId }: { patientId: string }) 
         At least {MIN_PASSPHRASE_LENGTH} characters. The token is stored only encrypted under it (AES-256-GCM,
         PBKDF2-SHA-256); it cannot be recovered without it.
       </p>
+    </div>
+  );
+
+  // How the token will be protected. A passkey is offered only where the device
+  // has one that can hold a key; the choice is explained rather than assumed.
+  const protection = (
+    <div className="space-y-2">
+      {passkeyReady && (
+        <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="How to protect the token">
+          {(["passkey", "passphrase"] as const).map((m) => (
+            <button key={m} type="button" role="radio" aria-checked={method === m}
+              data-testid={`protect-with-${m}`}
+              onClick={() => setMethod(m)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold border flex items-center gap-1.5 ${
+                method === m ? "bg-indigo-600 text-white border-indigo-600"
+                             : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"}`}>
+              {m === "passkey" ? <ScanFace className="w-3.5 h-3.5" /> : <KeyRound className="w-3.5 h-3.5" />}
+              {m === "passkey" ? "This device (Touch ID, Windows Hello, security key)" : "A passphrase"}
+            </button>
+          ))}
+        </div>
+      )}
+      {method === "passkey" ? (
+        <p className="text-[11px] text-slate-400">
+          The key comes from this device&apos;s authenticator and never exists as anything you type,
+          so a script injected into this page has no keystrokes to steal. You will be asked to confirm
+          twice now, and once each time you prove consent. The token cannot be opened on another device
+          — keep the encrypted backup if you use more than one.
+        </p>
+      ) : newPassphraseFields}
     </div>
   );
 
@@ -252,10 +304,10 @@ export default function ConsentProofPanel({ patientId }: { patientId: string }) 
         <div className="space-y-3">
           <p className="text-sm text-slate-600">
             When the patient approved your request a one-time consent token was issued. Collect it once;
-            it is kept in this browser, encrypted under your passphrase, and the server keeps only its
+            it is kept in this browser, encrypted, and the server keeps only its
             public commitment.
           </p>
-          {newPassphraseFields}
+          {protection}
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={collect} disabled={busy !== ""}
               className="px-4 py-2 rounded-xl text-sm font-bold bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2">
@@ -282,8 +334,14 @@ export default function ConsentProofPanel({ patientId }: { patientId: string }) 
       ) : (
         <div className="space-y-3">
           <p className="text-sm text-slate-600 flex items-center gap-1.5 flex-wrap">
-            {stored.sealed && <Lock className="w-3.5 h-3.5 text-emerald-600" />}
-            Token held in this browser{stored.sealed ? ", encrypted" : ""} · <span className="font-semibold">mlwe-v1</span> (Module-LWE / Module-SIS, ML-DSA-65 parameters)
+            {stored.sealed && (isPasskeySealed(stored.sealed)
+              ? <ScanFace className="w-3.5 h-3.5 text-emerald-600" />
+              : <Lock className="w-3.5 h-3.5 text-emerald-600" />)}
+            <span data-testid="token-protection">
+              Token held in this browser
+              {stored.sealed ? (isPasskeySealed(stored.sealed) ? ", protected by a passkey" : ", encrypted under a passphrase") : ""}
+            </span>
+            · <span className="font-semibold">mlwe-v1</span> (Module-LWE / Module-SIS, ML-DSA-65 parameters)
             {unlocked && <span className="text-emerald-700 font-semibold">· unlocked for this page</span>}
           </p>
           {!stored.sealed && stored.token && (
@@ -293,9 +351,9 @@ export default function ConsentProofPanel({ patientId }: { patientId: string }) 
               </p>
               <p className="text-xs text-amber-900">
                 This token was saved before tokens were encrypted, so any script on this site could read it.
-                Set a passphrase to encrypt it in place.
+                Protect it now and it is encrypted in place.
               </p>
-              {newPassphraseFields}
+              {protection}
               <button type="button" onClick={protectLegacy} disabled={busy !== ""}
                 className="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50 flex items-center gap-1.5">
                 {busy === "seal" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Lock className="w-3.5 h-3.5" />}
@@ -303,7 +361,7 @@ export default function ConsentProofPanel({ patientId }: { patientId: string }) 
               </button>
             </div>
           )}
-          {stored.sealed && !unlocked && (
+          {stored.sealed && !unlocked && !isPasskeySealed(stored.sealed) && (
             <div>
               <label htmlFor="zkp-unlock" className="block text-xs font-bold text-slate-500 mb-1">Passphrase</label>
               <input id="zkp-unlock" type="password" autoComplete="current-password" value={passphrase}
@@ -312,9 +370,15 @@ export default function ConsentProofPanel({ patientId }: { patientId: string }) 
                 className={input} />
             </div>
           )}
+          {stored.sealed && !unlocked && isPasskeySealed(stored.sealed) && (
+            <p className="text-xs text-slate-500">
+              Proving asks this device to confirm it is you; the key never leaves the authenticator.
+            </p>
+          )}
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={runProof}
-              disabled={busy !== "" || (Boolean(stored.sealed) && !unlocked && !passphrase)}
+              disabled={busy !== "" || (Boolean(stored.sealed) && !unlocked && !passphrase
+                                        && !isPasskeySealed(stored.sealed!))}
               className="px-4 py-2 rounded-xl text-sm font-bold bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2">
               {busy === "prove" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Fingerprint className="w-4 h-4" />}
               {busy === "prove" ? "Proving…" : "Prove consent"}

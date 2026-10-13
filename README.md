@@ -281,19 +281,19 @@ listed as not built.
 | Zero-knowledge consent proof | ✅ | **Post-quantum**: lattice proof (Fiat–Shamir with aborts, ML-DSA-65 parameters), **made in the doctor's browser** — the token never leaves it. The TypeScript prover and the Python verifier are checked against each other in CI. Consents approved before the switch keep their Schnorr commitment, which still verifies and is reported as *not* post-quantum. See its own section |
 | IPFS publishing | ✅ | Really pinned to a running kubo node; joins the recovery chain behind the database and S3. **Verified live in CI** with two kubo daemons: the stored object is exactly the ciphertext, and replication is confirmed by the replica's own pin list |
 | IPFS replication | ✅ | Copies on other IPFS nodes and/or Pinning-Service-API providers; only copies a target confirms count. **Verified live in CI** against a second kubo node; a commercial pinning service is unit-tested against a scripted fake only |
-| Federation peer admin screen | 🟡 | Register a peer (secret shown once), rotate its secret, suspend, reinstate. The API behind it is **verified live in CI** across three hospitals; the screen itself has been exercised only against sample data |
+| Federation peer admin screen | ✅ | Register a peer (secret shown once), rotate its secret, suspend, reinstate. **Verified live in CI**: Chromium drives the built frontend against a running backend, and the API is asked afterwards whether it agrees |
 | Medication adherence | ✅ | Refusals and misses reach the prescriber and the patient, not only a percentage |
 | Emergency break-glass access | ✅ | Password re-verification, daily limit, risk-scored, time-boxed, patient notified immediately, anchored on-chain, compliance incident opened automatically |
 | End-to-end flow (spec §37) | ✅ | `tests/test_e2e_flow.py` drives access request → consent → nurse care team → lab request → signed, encrypted report → patient release → tamper detection → withdrawal → break-glass → incidents and audit, against real Postgres and real liboqs. CI runs it twice: database-only, and with the chain, IPFS and a second hospital live |
 | Browser sessions | ✅ | The session token lives only in an HttpOnly cookie (scripts cannot read it); CORS is limited to `CORS_ORIGINS`; a cookie-authenticated change needs an `X-Requested-With` header (CSRF); each token has an id checked on every request, so logout revokes it and disabling a user ends their sessions at once |
-| Consent-token storage | ✅ | Sealed in the browser with AES-256-GCM under the doctor's passphrase; backups are the sealed form; tokens stored before this are flagged with a one-step encrypt. Checked in CI by `scripts/check-vault.mjs` |
+| Consent-token storage | ✅ | Sealed in the browser with AES-256-GCM under **a passkey** — the key comes from the device's authenticator through the WebAuthn PRF extension, so nothing secret is typed — or under a passphrase where no such authenticator exists. Backups are the sealed form; tokens stored before this are flagged with a one-step protect. Checked in CI by `scripts/check-vault.mjs` and, with a virtual authenticator, in the browser |
 | Differential privacy across rounds | ✅ | Every classifier release is recorded with its zCDP cost and composed across rounds into a total (ε, δ); `FEDERATION_DP_TOTAL_EPSILON` stops releases at the budget; a release without noise voids any overall claim and is shown as such |
 | Late anchoring | ✅ | Anchors recorded while no chain was reachable can be written on-chain later (Admin → Security), marked `LATE_ANCHOR` on the chain itself: they prove the digest existed by that block, not at the original time |
 | Anchor provenance | ✅ | A digest verifies only from events our own contract (or a listed previous one) emitted — a look-alike contract's event does not count |
-| Automated tests | ✅ | 453 Python tests plus a Foundry contract suite and a browser-prover vector check; weighted toward refusals. CI runs them inside the backend image, where liboqs is real |
+| Automated tests | ✅ | 459 Python tests plus a Foundry contract suite and a browser-prover vector check; weighted toward refusals. CI runs them inside the backend image, where liboqs is real |
 | Federated learning between hospitals | ✅ | Per-role baselines **and a threat classifier trained on investigated incidents**, federated with robust FedAvg, clipped updates and optional differential privacy; each global model evaluated locally before adoption, with rollback. **Verified live in CI across three hospitals** (separate servers and databases), over two training rounds |
 
-🟡 = built and tested in isolation, still to be verified on the running system.
+Every row above is ✅: nothing in this table is still waiting to be tried on a running system.
 
 ---
 
@@ -343,8 +343,9 @@ is listed honestly rather than quietly dropped.
 
 | # | Item | Where it stops |
 |---|---|---|
-| 1 | **Consent token while in use** | Stored only encrypted under the doctor's passphrase (AES-256-GCM, PBKDF2-SHA-256), so a copy of browser storage or a backup is useless without it. A script running on the page *while* the passphrase is typed could still capture it; hardware-backed keys (WebAuthn) are not used. |
-| 2 | **Replacing an outdated contract** | `migrate_contract.py` deploys the current contract and carries consent from the old contract's own state (dry run first). Running it, and updating `.env`, is still an operator's step. |
+| 1 | **Consent token on a device without a passkey** | Where the browser or device has no authenticator that supports the WebAuthn PRF extension, the token falls back to a passphrase (AES-256-GCM, PBKDF2-SHA-256). A script running on the page *while* that passphrase is typed could still capture it. With a passkey there is nothing to type and nothing to capture. |
+| 2 | **Replacing an outdated contract** | `migrate_contract.py` deploys the current contract and carries consent from the old contract's own state (dry run first), **verified in CI against a real chain**. Running it, and updating `.env`, is still an operator's step. |
+| 3 | **A commercial pinning service** | Replication to a second IPFS node is verified live in CI. The Pinning-Service-API path (Pinata, Filebase, …) is unit-tested against a scripted fake only, because a live test needs a paid account. |
 
 ### Not implemented
 
@@ -360,7 +361,7 @@ is listed honestly rather than quietly dropped.
 
 ### Known data caveats
 - Two lab reports predate the encryption pipeline and hold no ciphertext, so they cannot be given a cloud copy or be decrypted. They are counted honestly in `/api/admin/storage/status`.
-- Anchors written before the chain integration are marked `local-simulated` and carry no on-chain proof. The admin Security page reports the on-chain vs simulated split rather than hiding it.
+- Anchors written before the chain integration were marked `local-simulated` and carried no on-chain proof. They can now be written on-chain from the admin Security page; the chain records them as `LATE_ANCHOR`, because a late anchor proves its digest existed by *that* block, not at the original time. The page reports the on-chain, simulated and late counts rather than hiding the difference.
 
 ---
 
