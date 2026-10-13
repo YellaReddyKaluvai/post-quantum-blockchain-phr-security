@@ -176,13 +176,31 @@ def verify(commitment_hex: str, proof: dict[str, str],
 
 
 def simulate(commitment_hex: str, challenge: str, context: str = "") -> dict[str, str]:
-    """Produce an accepting transcript *without* the token.
+    """Attempt the textbook HVZK simulator — and demonstrate why it cannot work here.
 
-    This is the zero-knowledge property made executable rather than asserted.
-    Choosing s and c first and solving t = g^s · y^-c yields a transcript that
-    verifies and is distributed identically to a real one — which is precisely
-    why a real transcript cannot leak the secret. Used only by the tests; it
-    proves nothing about knowledge and must never gate access.
+    The interactive Schnorr protocol is simulatable trivially: pick s and c
+    first, then solve t = g^s · y^-c; the resulting (t, s) is distributed
+    identically to a real transcript, and that is the whole zero-knowledge
+    argument. The classic proof that Fiat-Shamir preserves this property
+    requires a *programmable* random oracle: the simulator picks t, s and c in
+    that argument, then defines H(..., t, ...) := c by fiat.
+
+    A concrete hash function cannot be programmed — its outputs are fixed by
+    its input, not chosen by the simulator — so the only way to find a (t, c)
+    pair with H(..., t, ...) == c here is to search for one, which is a
+    preimage search over Q's ~2047-bit space. It will not finish, not in 64
+    tries, not in any practical number. This function exists to make that
+    limitation concrete rather than asserted: see
+    ``test_zkp.py::test_schnorr_simulate_cannot_converge_on_a_concrete_hash``,
+    which calls it and checks the ZKPError that results.
+
+    Contrast ``zkp_lattice.simulate_transcript``, which sidesteps this
+    entirely by taking the challenge c̃ as a given input and solving forward
+    for w — no hash preimage needed, so it genuinely produces accepting
+    transcripts. That asymmetry is specific to how each scheme's Fiat-Shamir
+    transform binds the challenge, not a defect in this one.
+
+    Never used to gate access, and only ever called from tests.
     """
     y = int(commitment_hex, 16)
     for _ in range(64):
@@ -194,7 +212,6 @@ def simulate(commitment_hex: str, challenge: str, context: str = "") -> dict[str
         if _h_int(_b(G), _b(y), _b(t), challenge.encode(), context.encode()) == c_guess:
             return {"t": format(t, "x"), "s": format(s, "x")}
     raise ZKPError(
-        "Simulation did not converge — expected, since Fiat-Shamir binds c to t. "
-        "The interactive protocol simulates trivially; the non-interactive one "
-        "is simulatable only in the random-oracle model."
+        "Simulation did not converge — expected every time, since programming a "
+        "concrete hash function is not possible; see this function's docstring."
     )

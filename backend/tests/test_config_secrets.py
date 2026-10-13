@@ -60,9 +60,57 @@ def test_the_public_example_encryption_key_is_reported():
     assert any("public example key" in w for w in config.configuration_warnings(s))
 
 
+def test_an_empty_encryption_key_falls_back_to_the_public_default(fresh_settings):
+    """ENCRYPTION_KEY="" (present, blank — exactly what .env.example asks for)
+    must fall back the same way an absent variable does, not get silently
+    padded to 32 zero-bytes, which would match no data ever encrypted under
+    the documented default.
+    """
+    settings = config.Settings(ENCRYPTION_KEY="")
+    fresh_settings.setattr(config, "Settings", lambda: settings)
+    s = config.get_settings()
+    assert s.ENCRYPTION_KEY == "0123456789abcdef0123456789abcdef"
+    assert any("public example key" in w for w in config.configuration_warnings(s))
+
+
 def test_no_administrator_password_ships_as_a_default():
     assert config.Settings(ADMIN_PASSWORD="").ADMIN_PASSWORD == ""
     assert "Admin@1234" in config._PUBLIC_ADMIN_PASSWORDS
+
+
+def test_anvil_dev_key_is_refused_on_a_real_chain(fresh_settings):
+    settings = config.Settings(
+        BLOCKCHAIN_ENABLED=True,
+        BLOCKCHAIN_CHAIN_ID=11155111,  # Sepolia — a real network
+        BLOCKCHAIN_PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+    )
+    fresh_settings.setattr(config, "Settings", lambda: settings)
+    s = config.get_settings()
+    assert s.BLOCKCHAIN_ENABLED is False
+    assert any("real network" in w for w in config.configuration_warnings(s))
+
+
+def test_anvil_dev_key_is_kept_on_a_local_dev_chain(fresh_settings):
+    settings = config.Settings(
+        BLOCKCHAIN_ENABLED=True,
+        BLOCKCHAIN_CHAIN_ID=31337,  # anvil's own chain id
+        BLOCKCHAIN_PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+    )
+    fresh_settings.setattr(config, "Settings", lambda: settings)
+    s = config.get_settings()
+    assert s.BLOCKCHAIN_ENABLED is True
+    assert not any("real network" in w for w in config.configuration_warnings(s))
+
+
+def test_a_funded_private_key_is_kept_on_a_real_chain(fresh_settings):
+    settings = config.Settings(
+        BLOCKCHAIN_ENABLED=True,
+        BLOCKCHAIN_CHAIN_ID=11155111,
+        BLOCKCHAIN_PRIVATE_KEY="0x" + "f" * 64,
+    )
+    fresh_settings.setattr(config, "Settings", lambda: settings)
+    s = config.get_settings()
+    assert s.BLOCKCHAIN_ENABLED is True
 
 
 def test_consent_references_do_not_depend_on_the_session_key(monkeypatch):

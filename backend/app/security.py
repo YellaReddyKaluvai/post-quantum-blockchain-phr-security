@@ -11,7 +11,7 @@ import base64
 import os
 
 from app.config import get_settings
-from app.rbac import get_permissions_for_role
+from app.rbac import get_permissions_for_role, has_permission
 
 bearer_scheme = HTTPBearer(auto_error=False)
 ph = PasswordHasher()
@@ -142,7 +142,10 @@ def require_role(*allowed_roles: str):
 
 def require_permission(permission: str):
     def _dependency(session: dict[str, Any] = Depends(get_current_session)) -> dict[str, Any]:
-        if permission not in session.get("permissions", []):
+        # Checked against the role fresh via rbac, not the token's own
+        # "permissions" claim: a session token must never be the thing that
+        # decides what it is allowed to do, only who it belongs to.
+        if not has_permission(session.get("role", ""), permission):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden: insufficient permission.")
         return session
 

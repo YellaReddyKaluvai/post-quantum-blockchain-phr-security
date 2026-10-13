@@ -25,3 +25,4 @@ backend/dataset_credentials.csv
 # Keys generated on first start when none is configured (see app/config.py)
 backend/.secret_key
 backend/.ledger_key
+db_backups/
