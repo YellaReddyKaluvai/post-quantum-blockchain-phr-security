@@ -7,6 +7,10 @@ const backendBaseUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:
 function extractErrorDetail(err: unknown, fallback: string): string {
   const detail = (err as { detail?: unknown } | null)?.detail;
   if (typeof detail === "string") return detail;
+  // The security layer answers with {code, message, …} (e.g. RISK_BLOCKED).
+  if (detail && typeof detail === "object" && !Array.isArray(detail) && "message" in detail) {
+    return String((detail as { message: unknown }).message);
+  }
   if (Array.isArray(detail) && detail.length > 0) {
     return detail.map((d) => (typeof d === "object" && d && "msg" in d ? String((d as { msg: unknown }).msg) : String(d))).join("; ");
   }
@@ -70,7 +74,43 @@ export class SessionExpiredError extends Error {
   }
 }
 
-async function fetchWithAuth(url: string, options: RequestInit = {}) {
+// ─── Step-up verification (risk policy "verify") ─────────────────────────────
+//
+// When the backend's risk gate scores the current user MEDIUM/HIGH under a
+// "verify" policy it answers 428 with code STEP_UP_REQUIRED. The user re-enters
+// their password in <StepUpDialog/> (mounted in the root layout), and the
+// original request is retried once. Concurrent 428s share one prompt.
+export const STEP_UP_EVENT = "quantumcare:step-up";
+
+export interface StepUpPrompt {
+  message: string;
+  risk_level?: string;
+  explanation?: string;
+  resolve: (verified: boolean) => void;
+}
+
+let pendingStepUp: Promise<boolean> | null = null;
+
+function requestStepUp(info: { message?: string; risk_level?: string; explanation?: string }): Promise<boolean> {
+  if (typeof window === "undefined") return Promise.resolve(false);
+  // No dialog mounted (e.g. a page outside the app shell): fail closed.
+  if (!(window as unknown as { __quantumcareStepUpReady?: boolean }).__quantumcareStepUpReady) {
+    return Promise.resolve(false);
+  }
+  if (!pendingStepUp) {
+    pendingStepUp = new Promise<boolean>((resolve) => {
+      window.dispatchEvent(new CustomEvent<StepUpPrompt>(STEP_UP_EVENT, {
+        detail: {
+          message: info.message || "Please re-enter your password to continue.",
+          risk_level: info.risk_level, explanation: info.explanation, resolve,
+        },
+      }));
+    }).finally(() => { pendingStepUp = null; });
+  }
+  return pendingStepUp;
+}
+
+async function fetchWithAuth(url: string, options: RequestInit = {}, retried = false): Promise<Response> {
   const token = getAuthToken();
   const headers = new Headers(options.headers || {});
   if (token) {
@@ -89,7 +129,28 @@ async function fetchWithAuth(url: string, options: RequestInit = {}) {
     throw new SessionExpiredError();
   }
 
+  if (response.status === 428 && !retried) {
+    const body = await response.clone().json().catch(() => null);
+    const detail = (body as { detail?: { code?: string } } | null)?.detail;
+    if (detail && typeof detail === "object" && detail.code === "STEP_UP_REQUIRED") {
+      const verified = await requestStepUp(detail as { message?: string; risk_level?: string; explanation?: string });
+      if (verified) return fetchWithAuth(url, options, true);
+    }
+  }
+
   return response;
+}
+
+export async function stepUpVerify(password: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/auth/step-up`, {
+    method: "POST",
+    body: JSON.stringify({ password }),
+  }, true);
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Verification failed"));
+  }
+  return response.json();
 }
 
 export async function register(data: Record<string, unknown>) {
@@ -342,6 +403,8 @@ export async function declareEmergencyAccess(data: {
   patient_id: string;
   reason: string;
   duration_hours?: number;
+  /** Identity verification: break-glass requires re-entering the password. */
+  password: string;
 }) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/emergency-access`, {
     method: "POST",
@@ -933,6 +996,44 @@ export async function runFederatedRound() {
   if (!response.ok) {
     const err = await response.json().catch(() => null);
     throw new Error(extractErrorDetail(err, "Could not run a federated round"));
+  }
+  return response.json();
+}
+
+// ─── Incidents, policy, federation as a participant ──────────────────────────
+
+export async function updateSecurityIncident(incidentId: string, status: "Investigating" | "Closed", resolution?: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/security/incidents/${encodeURIComponent(incidentId)}`, {
+    method: "POST",
+    body: JSON.stringify({ status, resolution: resolution || null }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not update that incident"));
+  }
+  return response.json();
+}
+
+export async function getSecurityPolicy() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/security/policy`);
+  if (!response.ok) throw new Error("Failed to load the security policy");
+  return response.json();
+}
+
+export async function submitToFederationHub() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/hub/submit`, { method: "POST" });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not submit to the federation hub"));
+  }
+  return response.json();
+}
+
+export async function pullFromFederationHub() {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/hub/pull`, { method: "POST" });
+  if (!response.ok) {
+    const err = await response.json().catch(() => null);
+    throw new Error(extractErrorDetail(err, "Could not pull the global model"));
   }
   return response.json();
 }

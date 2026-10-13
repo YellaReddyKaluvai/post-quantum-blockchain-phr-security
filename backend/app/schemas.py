@@ -688,6 +688,11 @@ class EmergencyAccessRequest(BaseModel):
     patient_id: str
     reason: str = Field(min_length=10)
     duration_hours: int = Field(default=4, ge=1, le=24)
+    # Identity verification (spec §9, §30). Break-glass overrides a patient's
+    # decision, so it is not enough to hold a session token — which may be
+    # stolen or left open on a ward terminal. The declarer re-enters their
+    # password, and the backend checks it before anything is granted.
+    password: str = Field(min_length=1, max_length=256)
 
     @field_validator("reason")
     @classmethod
@@ -820,3 +825,22 @@ class PeerSubmissionRequest(BaseModel):
     sample_count: int = Field(..., ge=1, le=10_000_000)
     parameters: dict = Field(...)
     signature: str = Field(..., min_length=64, max_length=64)
+
+
+class StepUpRequest(BaseModel):
+    """Password re-entry demanded by the risk policy (spec §23 'additional verification')."""
+    password: str = Field(min_length=1, max_length=256)
+
+
+class IncidentUpdateRequest(BaseModel):
+    """Move an incident through its lifecycle (spec §25)."""
+    status: Literal["Investigating", "Closed"]
+    resolution: Optional[str] = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def _closing_needs_a_resolution(self):
+        # A closed incident with no stated outcome is not a compliance record,
+        # it is a deletion with extra steps.
+        if self.status == "Closed" and not (self.resolution and self.resolution.strip()):
+            raise ValueError("Closing an incident requires a resolution.")
+        return self

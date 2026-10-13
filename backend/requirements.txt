@@ -10,6 +10,7 @@ requests
 argon2-cffi
 PyJWT
 boto3
+web3           # on-chain anchoring and consent (chain_client.py)
 reportlab
 pytest
 httpx          # required by starlette's TestClient
