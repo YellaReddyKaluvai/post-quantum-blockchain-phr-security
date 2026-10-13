@@ -14,7 +14,7 @@ import pytest
 
 from app.zkp_schnorr import (
     P, Q, G, ZKPError,
-    issue_consent_token, make_challenge, prove, verify,
+    issue_consent_token, make_challenge, prove, verify, simulate,
 )
 
 
@@ -148,3 +148,23 @@ def test_tokens_are_unpredictable():
 
 def test_challenges_are_unpredictable():
     assert len({make_challenge() for _ in range(50)}) == 50
+
+
+# ─── Honest-verifier simulation ──────────────────────────────────────────────
+
+def test_schnorr_simulate_cannot_converge_on_a_concrete_hash():
+    """``simulate`` always raises against a real commitment and hash.
+
+    The textbook HVZK simulator for a Fiat-Shamir proof needs a *programmable*
+    random oracle: pick t, s and c, then define H(..., t, ...) := c. A concrete
+    SHA-256 cannot be programmed, so the only way to satisfy it is a preimage
+    search over Q's ~2047-bit space — infeasible in any practical number of
+    tries, let alone the 64 this function allows itself. This is not a bug to
+    fix: it is the reason ``zkp_lattice.simulate_transcript`` takes the
+    opposite approach (solve forward from a given challenge) and the reason
+    this scheme was superseded for new consents. See ``simulate``'s own
+    docstring for the full argument.
+    """
+    _, commitment = issue_consent_token()
+    with pytest.raises(ZKPError):
+        simulate(commitment, make_challenge(), "ctx")
