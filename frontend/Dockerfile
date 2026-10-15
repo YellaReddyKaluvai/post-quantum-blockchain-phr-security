@@ -19,6 +19,14 @@ COPY . .
 # Next.js telemetry is disabled
 ENV NEXT_TELEMETRY_DISABLED=1
 
+# NEXT_PUBLIC_* is compiled into the browser bundle, so it has to be set here
+# rather than at run time. Empty is the right default: the browser then calls
+# /api on whatever host served the page, and next.config.ts proxies that to
+# BACKEND_ORIGIN. An absolute URL baked in here would point every visitor at
+# one machine — "localhost" would send them to their own.
+ARG NEXT_PUBLIC_BACKEND_URL=""
+ENV NEXT_PUBLIC_BACKEND_URL=$NEXT_PUBLIC_BACKEND_URL
+
 RUN npm run build
 
 # Production image, copy all the files and run next
