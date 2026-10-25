@@ -27,3 +27,9 @@ Reusable resources include [the SQL schema](../backend/db/init.sql),
 The README describes source capabilities. A deployment has only the external
 integrations it actually configures; consult [DEPLOY.md](../DEPLOY.md) for the
 hosted baseline and verification limits.
+
+## Working demonstration
+
+[Run instructions and video coverage](../backend/demo/WORKING_DEMO.md),
+[measured results](demo-results/2026-10-25-summary.md), and
+[raw timing/configuration evidence](demo-results/2026-10-25-results.json).
