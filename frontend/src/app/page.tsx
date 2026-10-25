@@ -2,7 +2,7 @@
 
 import React from "react";
 import { motion, Variants } from "framer-motion";
-import { Lock, Cpu, Database, Network } from "lucide-react";
+import { Lock, Cpu, Database, Network, PlayCircle, Clock, Captions } from "lucide-react";
 import Navbar from "@/components/Navbar";
 import Link from "next/link";
 
@@ -24,7 +24,7 @@ export default function LandingPage() {
     {
       icon: Lock,
       title: "Lattice Cryptography",
-      desc: "Immune to Shor's algorithm running on future quantum hardware.",
+      desc: "ML-KEM-768 and ML-DSA-65 protect report keys and verify signatures.",
       color: "text-cyan-600",
       iconBg: "bg-gradient-to-br from-cyan-400 to-sky-500",
       borderTop: "border-t-4 border-t-cyan-400",
@@ -32,8 +32,8 @@ export default function LandingPage() {
     },
     {
       icon: Database,
-      title: "IPFS Storage",
-      desc: "Decentralized, encrypted fragments prevent single points of failure.",
+      title: "Encrypted Records",
+      desc: "Encrypted reports are stored in PostgreSQL. IPFS publishing is an optional integration.",
       color: "text-teal-600",
       iconBg: "bg-gradient-to-br from-teal-400 to-emerald-500",
       borderTop: "border-t-4 border-t-teal-400",
@@ -41,8 +41,8 @@ export default function LandingPage() {
     },
     {
       icon: Network,
-      title: "Smart Contracts",
-      desc: "Immutable access logs audited natively on the Ethereum VM.",
+      title: "Auditable Access",
+      desc: "Trace clinical actions through audit logs. Live blockchain anchoring is not enabled in this demo.",
       color: "text-emerald-600",
       iconBg: "bg-gradient-to-br from-emerald-400 to-green-500",
       borderTop: "border-t-4 border-t-emerald-400",
@@ -85,7 +85,7 @@ export default function LandingPage() {
             className="inline-flex items-center gap-2 px-5 py-2 rounded-full border border-cyan-200 bg-white text-cyan-700 text-sm font-semibold mb-10 badge-glow shadow-sm"
           >
             <span className="flex h-2.5 w-2.5 rounded-full bg-cyan-500 pulse-glow" />
-            Kyber-1024 Post-Quantum Encryption Active
+            ML-KEM-768 + ML-DSA-65 Post-Quantum Security
           </motion.div>
 
           {/* Main Headline */}
@@ -106,9 +106,9 @@ export default function LandingPage() {
             variants={item}
             className="mt-4 text-xl text-slate-500 max-w-3xl mx-auto mb-12 leading-relaxed"
           >
-            The world&apos;s first Personal Health Record (PHR) platform utilizing
-            lattice-based cryptography and decentralized ledger technology to
-            secure medical data against quantum computing threats.
+            Explore a Personal Health Record (PHR) platform that connects patients
+            and care teams with consent-based access, encrypted reports and
+            post-quantum signatures.
           </motion.p>
 
           {/* CTA Buttons */}
@@ -116,6 +116,13 @@ export default function LandingPage() {
             variants={item}
             className="flex flex-col sm:flex-row gap-4 justify-center items-center"
           >
+            <a
+              href="#project-demo"
+              className="inline-flex items-center justify-center gap-2 px-8 py-4 bg-slate-900 text-white font-bold rounded-2xl hover:bg-slate-700 transition-colors w-full sm:w-auto focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-cyan-600"
+            >
+              <PlayCircle className="h-5 w-5" aria-hidden="true" />
+              Watch Project Demo
+            </a>
             <Link
               href="/signup"
               className="px-9 py-4 bg-gradient-to-r from-cyan-500 to-teal-500 text-white font-bold rounded-2xl hover:from-cyan-600 hover:to-teal-600 transition-all w-full sm:w-auto text-center glow-teal shadow-lg hover:-translate-y-1 hover:scale-105"
@@ -131,9 +138,63 @@ export default function LandingPage() {
           </motion.div>
         </motion.div>
 
+        <section
+          id="project-demo"
+          aria-labelledby="project-demo-title"
+          className="scroll-mt-24 mt-20 w-full max-w-6xl overflow-hidden rounded-3xl border border-cyan-200 bg-white shadow-xl shadow-cyan-900/10"
+        >
+          <div className="grid lg:grid-cols-[0.8fr_1.2fr]">
+            <div className="p-6 sm:p-9 lg:p-10 flex flex-col justify-center">
+              <span className="inline-flex items-center gap-2 self-start rounded-full bg-cyan-50 px-3 py-1 text-xs font-bold uppercase tracking-wider text-cyan-800">
+                <PlayCircle className="h-4 w-4" aria-hidden="true" />
+                Project demonstration
+              </span>
+              <h2 id="project-demo-title" className="mt-5 text-3xl sm:text-4xl font-extrabold tracking-tight text-slate-900">
+                See QuantumCare in action
+              </h2>
+              <p className="mt-4 text-slate-600 leading-relaxed">
+                Follow a patient&apos;s journey from consent and clinical care to a
+                signed lab report. Tour the patient, doctor, nurse, laboratory and
+                administrator portals in this recorded walkthrough of the live app.
+              </p>
+              <div className="mt-5 flex flex-wrap gap-x-5 gap-y-2 text-sm font-medium text-slate-700">
+                <span className="inline-flex items-center gap-2"><Clock className="h-4 w-4 text-cyan-700" aria-hidden="true" />3 min 59 sec</span>
+                <span className="inline-flex items-center gap-2"><Captions className="h-4 w-4 text-cyan-700" aria-hidden="true" />Explanations on screen</span>
+              </div>
+              <p id="project-demo-description" className="mt-5 text-sm text-slate-500 leading-relaxed">
+                Free to watch, no sign-in needed. Captions are built into the video;
+                there is no spoken audio. All demonstration records are fictional.
+              </p>
+              <a href="/demo/quantumcare-demo-transcript.txt" className="mt-5 self-start text-sm font-semibold text-cyan-800 underline underline-offset-4 hover:text-cyan-600">
+                Read the full video transcript
+              </a>
+            </div>
+            <div className="flex items-center bg-slate-950 p-3 sm:p-5">
+              <video
+                controls
+                playsInline
+                preload="none"
+                poster="/demo/quantumcare-demo-poster.jpg"
+                aria-label="QuantumCare project demonstration with embedded explanatory captions"
+                aria-describedby="project-demo-description"
+                className="aspect-[4/3] w-full rounded-xl bg-slate-950"
+                width={1440}
+                height={1080}
+              >
+                <source src="/demo/quantumcare-captioned-demo.mp4" type="video/mp4" />
+                Your browser does not support embedded video. <a href="/demo/quantumcare-captioned-demo.mp4">Open the project demo video</a>.
+              </video>
+            </div>
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between border-t border-cyan-100 bg-cyan-50/60 px-6 py-4 sm:px-9">
+            <p className="text-sm text-slate-600">Core workflow, security checks and measured results • Recorded 25 October 2026</p>
+            <a href="/demo/quantumcare-captioned-demo.mp4" className="shrink-0 text-sm font-semibold text-cyan-800 underline underline-offset-4 hover:text-cyan-600">Open video in full size</a>
+          </div>
+        </section>
+
         {/* ── Feature Cards ─────────────────────────────────── */}
         <motion.div
-          className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8 mt-36 max-w-7xl mx-auto w-full"
+          className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8 mt-20 max-w-7xl mx-auto w-full"
           variants={container}
           initial="hidden"
           whileInView="show"
