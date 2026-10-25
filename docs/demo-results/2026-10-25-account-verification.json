@@ -1,0 +1,38 @@
+{
+  "checked_at_utc": "2026-10-25T13:29:48.464970+00:00",
+  "origin": "https://post-quantum-blockchain-phr-securit.vercel.app",
+  "accounts": [
+    {
+      "role": "Patient",
+      "user_id": "PAT-2026-000002",
+      "login_verified": true,
+      "session_verified": true,
+      "records": {
+        "lab_reports": 1,
+        "vitals": 1,
+        "medical_records": 1
+      }
+    },
+    {
+      "role": "Doctor",
+      "user_id": "DOC-2026-000001",
+      "login_verified": true,
+      "session_verified": true,
+      "demo_patient_access_verified": true
+    },
+    {
+      "role": "Lab Technician",
+      "user_id": "LAB-2026-000001",
+      "login_verified": true,
+      "session_verified": true,
+      "completed_demo_report_present": true
+    },
+    {
+      "role": "Nurse",
+      "user_id": "NUR-2026-000001",
+      "login_verified": true,
+      "session_verified": true,
+      "demo_patient_access_verified": true
+    }
+  ]
+}
