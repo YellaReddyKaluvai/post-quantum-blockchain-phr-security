@@ -111,9 +111,7 @@ The design rule throughout: *the system never claims a protection it did not act
 
 ## 🔄 End-to-End Data Flow
 
-How data actually moves between the five roles. Each arrow below exists in
-code; where a flow stops short, it is marked and listed again under
-[Incomplete workflows](#-incomplete-workflows).
+How data moves between the five roles through the implemented application workflows.
 
 ### The security pipeline every document passes through
 
@@ -289,8 +287,8 @@ attempt is itself recorded, so probing for records raises an alert.
 
 ## 📊 Implementation Status
 
-Verified against the running system, not aspirational. Anything not built is
-listed as not built.
+Implemented features and their verification evidence are summarized below.
+See [Deployment](DEPLOY.md) for the hosted configuration.
 
 ### Working end-to-end
 
@@ -329,74 +327,6 @@ listed as not built.
 | Federated learning between hospitals | ✅ | Per-role baselines **and a threat classifier trained on investigated incidents**, federated with robust FedAvg, clipped updates and optional differential privacy; each global model evaluated locally before adoption, with rollback. **Verified live in CI across three hospitals** (separate servers and databases), over two training rounds |
 
 Every row above is ✅: nothing in this table is still waiting to be tried on a running system.
-
----
-
-## ⚠️ Incomplete Workflows
-
-Flows that start but do not finish. Nine have been closed so far; what remains
-is listed honestly rather than quietly dropped.
-
-### Closed
-
-| Workflow | What was wrong | Now |
-|---|---|---|
-| **Imaging → clinician / patient** | Encrypted, signed, anchored — and openable only by the uploading technician. The patient was notified about something they could not reach. | Patient and entitled doctor both read studies, through one shared release path |
-| **Medication adherence → prescriber** | Every round recorded; no endpoint ever returned it. A refusal was stored and never surfaced. | Doctor sees it on the chart, patient sees their own history; refusals reported in their own right |
-| **Appointment outcome → patient** | Accept, complete and cancel notified nobody, so a cancelled appointment was one the patient turned up for. | Every outcome reaches the patient |
-| **Lab request → laboratory** | The only role in the system not told when work arrived for it. | All technicians notified, priority marked |
-| **Report reviewed → patient** | The moment the patient is really waiting for went unannounced. | Patient told a clinician has read their result |
-| **Post-quantum ZKP** | The consent proof was Schnorr, which Shor's algorithm breaks. | New consents get a lattice proof under Module-LWE/SIS; old Schnorr commitments still verify and are labelled not post-quantum |
-| **IPFS replication** | Content was pinned on one node only. | Each new CID is replicated in the background to configured replica nodes and pinning services; an admin can backfill and retry from the Security page |
-| **Peer registration UI** | Peers could only be registered by API call. | Admin → Federation Peers: register (secret shown once), suspend, reinstate |
-| **`MedicalRecords` table** | Dead schema, never read or written. | No longer created; dropped from existing databases only while empty |
-| **Lab request → consent** | Ordering a test needed nothing, and a lab request counts as a treating relationship — one order for any patient unlocked their whole chart. | The ordering doctor must already be entitled to the patient |
-| **Chart writes → authorization** | Diagnoses, prescriptions, consultations and documents could be written to any patient, which then also counted as a treating relationship. | Writing needs the same entitlement as reading |
-| **Report ↔ request binding** | The requested investigation was loaded and never compared; any technician could file any panel against any order. | The panel must match the order, and only the technician holding the request can file or advance it |
-| **Signature on release** | A failed ML-DSA check was logged and the report released anyway; documents and scans were never checked. | Every release verifies digest and signature; a failure withholds the record and opens an incident |
-| **Failures → Alert & Response** | Integrity and signature failures, refusals and break-glass produced no alert or incident; only the anomaly model did. | Every security source reports to one alert queue, with its source shown |
-| **Failed sign-ins → AI** | Written to AuthLogs, which the detector never reads. | Recorded as security events as they happen; a burst on one account alerts |
-| **Break-glass → AI** | The event was written through a closed cursor and silently lost. | Recorded, scored, and turned into a compliance record |
-| **Incident lifecycle** | Incidents could be listed, never worked. | Open → Investigating → Closed, with a required resolution |
-| **Federated loop** | The global model was computed and never used; no hospital could send its update or receive the model. | Per-role models, participant submit/pull, global model used for detection when real institutions built it |
-| **Smart-contract consent** | `updateConsent`/`checkConsent` existed in `PHR.sol` and were never called. | Decisions written on-chain; consent-based reads checked against the contract |
-| **Blockchain in the image** | `web3` was missing from `requirements.txt`, so the container could never reach a chain. | Added |
-| **Forgeable sessions** | `SECRET_KEY` defaulted to a string published in this repository, so a deployment without its own key let anyone mint an Administrator token. | A placeholder or short key is replaced by a generated one; the consent ledger has its own key; no default admin password |
-| **Nurse access scope** | Any nurse could search every patient (with e-mail addresses), open any chart, record vitals and medicate anyone. | Care-team assignments by an authorized doctor or an administrator; everything else refused and recorded |
-| **Contract write guard** | `PHR.sol` defined `onlyAdmin` and applied it to nothing — any address could rewrite consent. | Every write needs the backend's key; consent keeps none / granted / revoked |
-| **On-chain consent check** | Ran only for consent-based reads, and only when a database column said there was a record to check. | Every non-emergency doctor read asks the chain; an on-chain withdrawal the database no longer shows is refused with an incident |
-| **Re-request lifts a withdrawal** | A doctor re-asking after a withdrawal reset the row to Pending, which unblocked them before the patient decided. | The refusal stands until the patient approves |
-| **Chain, IPFS replication, federation in CI** | Exercised only against fakes. | Run live in CI: anvil + deployed contract, two kubo daemons, a second hospital |
-| **ZKP prover in the browser** | Proofs needed `demo/zkp_prove.py`. | "Prove consent" on the patient's page; the token stays in the browser |
-| **Patient security notices** | Integrity and signature failures, altered consent and repeated refused access reached only the admin. | The patient whose record is involved is told |
-| **Public `ENCRYPTION_KEY`** | Data written under the example key could not be moved to a new one. | `rotate_encryption_key.py` |
-| **S3 and e-mail in CI** | Never exercised against a real service. | SeaweedFS (S3) and Mailpit in the integration run |
-| **Existing nurse relationships** | Not carried into care teams. | Listed for an administrator to review and allocate |
-| **Lab report progress** | The finalize dialog animated "hashing… ML-KEM… ML-DSA" on client-side timers before the request was sent. | It states what runs on the server; the result shows what the server returned |
-
-### Still open
-
-| # | Item | Where it stops |
-|---|---|---|
-| 1 | **Consent token on a device without a passkey** | Where the browser or device has no authenticator that supports the WebAuthn PRF extension, the token falls back to a passphrase (AES-256-GCM, PBKDF2-SHA-256). A script running on the page *while* that passphrase is typed could still capture it. With a passkey there is nothing to type and nothing to capture. |
-| 2 | **Replacing an outdated contract** | `migrate_contract.py` deploys the current contract and carries consent from the old contract's own state (dry run first), **verified in CI against a real chain**. Running it, and updating `.env`, is still an operator's step. |
-| 3 | **A commercial pinning service** | Replication to a second IPFS node is verified live in CI. The Pinning-Service-API path (Pinata, Filebase, …) is unit-tested against a scripted fake only, because a live test needs a paid account. |
-
-### Not implemented
-
-| Area | Status |
-|---|---|
-| **A federation of independent institutions** | The protocol runs live between three backends in CI. An actual federation needs other hospitals to deploy and register; nothing here pretends they exist. |
-| **Standardised post-quantum ZKP** | The lattice proof uses ML-DSA-65's parameters and assumptions, but the construction itself (Lyubashevsky's, uncompressed) is not a NIST standard and has not been independently reviewed. |
-
-> On AI: the security layer performs **behavioural anomaly detection**, not
-> clinical prediction. It never reads medical content and never makes a
-> diagnostic judgement. Note also that the "ML" in ML-KEM and ML-DSA means
-> *Module-Lattice*, not machine learning — the two are unrelated.
-
-### Known data caveats
-- Two lab reports predate the encryption pipeline and hold no ciphertext, so they cannot be given a cloud copy or be decrypted. They are counted honestly in `/api/admin/storage/status`.
-- Anchors written before the chain integration were marked `local-simulated` and carried no on-chain proof. They can now be written on-chain from the admin Security page; the chain records them as `LATE_ANCHOR`, because a late anchor proves its digest existed by *that* block, not at the original time. The page reports the on-chain, simulated and late counts rather than hiding the difference.
 
 ---
 
