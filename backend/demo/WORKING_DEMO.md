@@ -4,6 +4,10 @@ This package demonstrates the deployed software through its public frontend
 URL. It complements the existing cryptography scripts and disposable-database
 integration tests. It does not require a database password or direct SQL access.
 
+Watch the captioned video on the [public homepage](https://post-quantum-blockchain-phr-securit.vercel.app/#project-demo)
+without signing in. The video, poster and transcript are versioned under
+`frontend/public/demo/` and served with the frontend deployment.
+
 ## Submission contents
 
 | Requirement | Deliverable |

@@ -1,0 +1,93 @@
+# Captioned demonstration transcript
+
+## 00:00:00,000 — Role-based sign-in
+
+Users sign in with their assigned User ID. The demo verifies secure HttpOnly sessions, role restrictions, and access denial after logout.
+
+## 00:00:09,000 — Registration and approval
+
+Patients, doctors, nurses and lab technicians register separately. An administrator approves each account before it can sign in; real PQC keys are issued on approval.
+
+## 00:00:19,000 — Patient portal | one connected record
+
+The fictional patient sees the clinical review, completed CBC report, care-team assignment and notifications created by the reproducible demo run.
+
+## 00:00:29,000 — A report reaches the patient
+
+The doctor ordered a CBC, the lab technician accepted it and filed a report. The patient receives the completed report and a notification.
+
+## 00:00:38,000 — Verify integrity and authorship
+
+The live API confirms the document digest matches and the ML-DSA-65 signature is valid. ML-KEM-768 protects the report key; AES-256-GCM encrypts the payload.
+
+## 00:00:50,000 — Nursing observations reach the patient
+
+A nurse can record observations only after a care-team assignment. These fictional readings were written by the demo nurse and read back through the patient API.
+
+## 00:01:00,000 — Consent is enforced by the API
+
+The patient controls clinician access. The measured run withdrew consent and confirmed both the doctor and delegated nurse received HTTP 403, then restored access for this walkthrough.
+
+## 00:01:12,000 — Doctor portal | authorized clinical work
+
+The doctor sees the assigned patient, recorded diagnosis and lab notification. Other tools include prescriptions, appointments, imaging and documents; not every secondary workflow is exercised here.
+
+## 00:01:24,000 — Clinical workspace and care relationships
+
+The authorized workspace links diagnoses, prescriptions, consultations, lab requests and assigned nurses. Consent-proof and emergency-access tools are available but are not exercised in this run.
+
+## 00:01:36,000 — Observations and medical history
+
+Nursing observations and the fictional diagnosis are visible in the same doctor workspace. The API enforces patient relationships before releasing these records.
+
+## 00:01:43,000 — From doctor order to completed report
+
+The CBC request is now completed. Its doctor, patient and technician are linked through the same order, rather than separate demonstration screenshots.
+
+## 00:01:50,000 — Nurse portal | assigned care only
+
+The nurse dashboard records one patient, one vitals entry and one nursing note from this run. Medication administration is available, but no medication was given in this fictional example.
+
+## 00:02:00,000 — Care-team access has a boundary
+
+The nurse sees the assigned patient. The API refused access before assignment and again when the patient withdrew the assigning doctor’s access.
+
+## 00:02:07,000 — Laboratory portal | a completed investigation
+
+The lab dashboard shows the test received, report generated and report shared. Finalization creates the PDF, encrypts it, protects its key and signs its digest.
+
+## 00:02:17,000 — Laboratory report history
+
+The same CBC report is visible to its laboratory technician and authorized patient. It is stored in PostgreSQL; no S3 or IPFS copy is configured for this deployment.
+
+## 00:02:24,000 — Audit details | distinguish local from on-chain
+
+The audit view must distinguish a locally simulated anchor from a blockchain transaction. Our evidence verifies the digest and signature, not a live blockchain anchor.
+
+## 00:02:32,000 — Administrator | cryptographic infrastructure
+
+The administrator sees cryptographic identity counts and deployment status. The screen reports no reachable chain, no S3 copy and no configured IPFS node.
+
+## 00:02:44,000 — Security monitoring and AI controls
+
+The security interface exposes risk scoring, alerts, incidents and federation controls. This run verifies core access controls; it does not evaluate a trained classifier or independent hospital federation.
+
+## 00:02:53,000 — Audit trail | evidence of the same run
+
+Audit entries connect the demonstration’s access request, care assignment, laboratory order, report finalization, download and consent withdrawal. No private keys or passwords are recorded in this video.
+
+## 00:03:05,000 — Administrator | verified live totals
+
+The dashboard counters now match the API: patients, clinicians, pending requests and approved users. Personal registration details are intentionally excluded from this crop.
+
+## 00:03:15,000 — Measured outcome | 30 live checks passed
+
+One client, five sequential requests per route. Timings include network and hosting delays; these are not throughput or clinical-performance benchmarks.
+
+## 00:03:31,000 — What this demonstration proves
+
+The core clinical path and refusal checks passed. Blockchain, IPFS, S3, SMTP and independent multi-hospital training are not claimed as live integrations.
+
+## 00:03:45,000 — Reproduce the evidence
+
+Run run_hosted_demo.py with your private administrator password. It creates fictional records and exports check results, timings, versions and the sample report.
