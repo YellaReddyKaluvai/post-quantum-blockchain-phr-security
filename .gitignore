@@ -29,3 +29,7 @@ db_backups/
 
 # Local database scratch script: holds a real connection password.
 backend/test_db.py
+
+# Generated working-demonstration output; publish only reviewed sample evidence.
+demo-runs/
+quantumcare-demo-private/

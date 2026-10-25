@@ -7,6 +7,7 @@
 ## Start here
 
 - [Installation](INSTALL.md): prerequisites, local setup and first login.
+- [Working demonstration](backend/demo/WORKING_DEMO.md): captioned video package, repeatable workflow and measured outputs.
 - [Deployment](DEPLOY.md): Vercel frontend, Render API/PostgreSQL and migration.
 - [Documentation](docs/README.md): architecture, requirements, schema and flows.
 - [Contributing](CONTRIBUTING.md): changes, checks, pull requests and history.
