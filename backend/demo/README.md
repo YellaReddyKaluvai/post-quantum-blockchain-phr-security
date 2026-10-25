@@ -51,3 +51,11 @@ forge create contracts/PHR.sol:PHR_Security \
 
 The address is deterministic for that account's first deployment, so it matches
 `BLOCKCHAIN_CONTRACT_ADDRESS` in `.env` without editing anything.
+
+## Full hosted demonstration
+
+See [WORKING_DEMO.md](WORKING_DEMO.md) for the five-role deployed workflow,
+captioned-video submission requirements and the command to regenerate measured
+results and a sample PDF. `run_hosted_demo.py` uses only Python's standard
+library, requests the administrator password privately, and saves generated
+account credentials outside the public evidence bundle.
