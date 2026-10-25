@@ -3,14 +3,17 @@ import ast
 from pathlib import Path
 import re
 
-ROOT = Path(__file__).resolve().parents[2]
+# The backend lives at <checkout>/backend locally and /app in the image.
+# CI mounts the frontend next to it at /frontend (read-only).
+BACKEND = Path(__file__).resolve().parents[1]
+FRONTEND = BACKEND.parent / 'frontend'
 
 
 def test_admin_dashboard_cards_use_api_response_fields():
-    tree = ast.parse((ROOT / 'backend/app/schemas.py').read_text())
+    tree = ast.parse((BACKEND / 'app/schemas.py').read_text())
     schema = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'DashboardStats')
     fields = {node.target.id for node in schema.body if isinstance(node, ast.AnnAssign)}
-    page = (ROOT / 'frontend/src/app/dashboard/admin/page.tsx').read_text()
+    page = (FRONTEND / 'src/app/dashboard/admin/page.tsx').read_text()
     cards = re.findall(r'\{ key: "([a-z_]+)", label:', page)
     assert cards, 'Expected administrator dashboard metric cards'
     assert set(cards) <= fields, f'Cards absent from API response: {set(cards) - fields}'
