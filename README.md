@@ -815,7 +815,7 @@ only with faucet ETH — never a key that holds real funds.
 
 Sign in to the deployed platform: **[QuantumCare Login](https://post-quantum-blockchain-phr-securit.vercel.app/login)**.
 
-`http://localhost:3000` applies only when running the frontend on your own computer.
+Deployed login URL: **[https://post-quantum-blockchain-phr-securit.vercel.app/login](https://post-quantum-blockchain-phr-securit.vercel.app/login)**.
 
 ---
 
@@ -823,9 +823,9 @@ Sign in to the deployed platform: **[QuantumCare Login](https://post-quantum-blo
 
 **[Open the public login page](https://post-quantum-blockchain-phr-securit.vercel.app/login)**
 
-Sign in with the **User ID**, not an email address. Use the password assigned
-when that particular account was created. The local dataset generator's shared
-password does not work for the hosted accounts below.
+Sign in with the **User ID** and its matching **password** from the table below.
+These public demonstration accounts contain fictional records and are intended
+for exploring the project. Do not enter personal or real patient information.
 
 ### Verified hosted demo accounts
 
@@ -833,16 +833,16 @@ All four accounts below successfully authenticated and returned the expected
 role from `/api/auth/me` on **25 October 2026**. They are the existing fictional
 accounts used for the captioned project demonstration.
 
-| Role | Actual hosted User ID | Demonstration |
-|---|---|---|
-| **Patient** | `PAT-2026-000002` | Clinical record, recorded vitals and completed CBC report |
-| **Doctor** | `DOC-2026-000001` | Patient access subject to consent; clinical review and lab request |
-| **Nurse** | `NUR-2026-000001` | Care-team access subject to assignment and consent; nursing observations |
-| **Lab Technician** | `LAB-2026-000001` | Completed report from the demonstration's CBC request |
+| Role | Actual hosted User ID | Password | Demonstration |
+|---|---|---|---|
+| **Patient** | `PAT-2026-000002` | `GCLO_8iihOqYIos2_xstpbpBpvM` | Clinical record, recorded vitals and completed CBC report |
+| **Doctor** | `DOC-2026-000001` | `IN01-zz3o4PSjGn0qBjI7hxQv0w` | Patient access subject to consent; clinical review and lab request |
+| **Nurse** | `NUR-2026-000001` | `_uz9o7owGcJolXCOdfomS5erujc` | Care-team access subject to assignment and consent; nursing observations |
+| **Lab Technician** | `LAB-2026-000001` | `iKmbCk-D8O68oke3b3ZhvnRvDYY` | Completed report from the demonstration's CBC request |
 
-Passwords are supplied privately by the project owner and are not stored in
-Git. There is no shared hosted demo password. Do not use the older local-dataset
-IDs to sign into this deployment. The administrator account is managed privately
+Each account has its own password shown above. Copy it exactly, including
+capitalization and symbols. The older local-dataset IDs and shared password do
+not apply to this deployment. The administrator account is managed privately
 and is not a public demo login.
 
 The [verification record](docs/demo-results/2026-10-25-account-verification.json)
