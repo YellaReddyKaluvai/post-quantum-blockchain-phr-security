@@ -8,9 +8,9 @@
 | `frontend/Dockerfile` | Node 20, Next.js production build |
 | `docker-compose.yml` | Backend, frontend, PostgreSQL 16 on one network |
 
-```bash
-docker compose up --build
-```
+Follow [INSTALL.md](../INSTALL.md) for configuration and the supported local
+setup: containerized database/API with a host-run frontend. See
+[DEPLOY.md](../DEPLOY.md) for the verified Vercel + Render deployment.
 
 ## CI/CD
 
@@ -19,7 +19,10 @@ test suite, and builds both images.
 
 ## Test suite
 
-**263 tests**, no database or running server required.
+The suite includes unit tests and opt-in live integration tests. Test counts
+change as coverage grows; use `python -m pytest --collect-only` for the current
+collection. Live checks require their configured databases, chain and storage
+services. Missing integrations may be skipped; report skips explicitly.
 
 | File | Covers |
 |---|---|
@@ -47,22 +50,9 @@ respectively.
 
 ## Local development
 
-No Homebrew and no sudo on the development machine. Portable toolchain in
-`~/devtools`: Node, PostgreSQL 16 (port 5433), Python 3.12, CMake, Foundry,
-kubo (IPFS).
-
-```bash
-# database
-pg_ctl -D ~/devtools/pgdata -o "-p 5433" start
-# chain
-anvil
-# ipfs
-IPFS_PATH=~/devtools/ipfs-repo ipfs daemon
-# backend
-cd backend && uvicorn app.main:app --reload
-# frontend
-cd frontend && npm run dev
-```
+Use [INSTALL.md](../INSTALL.md), which covers tool versions, secret generation,
+first administrator, frontend configuration, testing and troubleshooting.
+Machine-specific paths are not prerequisites for another contributor.
 
 ## Demonstration dataset
 
