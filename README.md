@@ -4,9 +4,43 @@
 
 ---
 
+## Start here
+
+- [Installation](INSTALL.md): prerequisites, local setup and first login.
+- [Deployment](DEPLOY.md): Vercel frontend, Render API/PostgreSQL and migration.
+- [Documentation](docs/README.md): architecture, requirements, schema and flows.
+- [Contributing](CONTRIBUTING.md): changes, checks, pull requests and history.
+- [Repository checklist](docs/11_Repository_Checklist.md): evidence for the technical-repository requirements.
+- [MIT license](LICENSE): reuse terms; retain third-party dependency licenses.
+
+**Hosted demonstration:** <https://post-quantum-blockchain-phr-securit.vercel.app>
+The hosted baseline has PostgreSQL and post-quantum libraries enabled;
+blockchain, IPFS publishing, S3 and SMTP are not configured there. Source
+capabilities below do not imply every integration is enabled in the demo.
+
+## Repository layout
+
+```text
+backend/                 FastAPI API, crypto and maintenance scripts
+  app/                   Application services and routes
+  db/init.sql            Database schema
+  tests/                 Unit and integration tests
+  demo/                  Cryptography demonstrations
+frontend/                Next.js application and frontend checks
+  src/app/               Role-specific pages
+  src/lib/               Session, API and cryptographic utilities
+contracts/PHR.sol        Solidity access and integrity contract
+docs/                    Architecture, requirements and operational guides
+.github/workflows/       Automated checks
+INSTALL.md               Local installation and verification
+DEPLOY.md                Hosting, migration and operational limits
+CONTRIBUTING.md          Contribution and maintenance process
+LICENSE                  MIT reuse terms
+```
+
 ## 🌟 Overview
 
-**QuantumCare** is an advanced, commercial-grade healthcare and Personal Health Record (PHR) platform built to defend electronic health records against classical and quantum computing security threats.
+**QuantumCare** is a research and demonstration healthcare and Personal Health Record (PHR) platform built to defend electronic health records against classical and quantum computing security threats.
 
 The architecture combines **ML-KEM-768** key encapsulation, **ML-DSA-65** digital signatures, **AES-256-GCM** document encryption, encrypted **AWS S3** storage and **on-chain integrity anchoring**.
 
@@ -803,78 +837,26 @@ activity on its first run. 15 tests.
 
 ## 🚀 Quick Start Guide
 
-### 1. Clone & Setup Environment
-```bash
-git clone https://github.com/YellaReddyKaluvai/post-quantum-blockchain-phr-security.git
-cd post-quantum-blockchain-phr-security
-```
+Follow [INSTALL.md](INSTALL.md) for prerequisites and complete commands. It
+starts PostgreSQL and the API in Docker, configures the frontend proxy, creates
+the first administrator and verifies patient registration, approval and login.
+The image builds the required native liboqs library.
 
-### 2. Configure Backend Environment (`backend/.env`)
-```env
-DATABASE_URL="postgresql://postgres:postgres@localhost:5432/pqc_hospital"
-SECRET_KEY="your-production-jwt-secret"
-ENCRYPTION_KEY="32-byte-hex-encryption-key"
+For the Vercel frontend with a Render API and database, use [DEPLOY.md](DEPLOY.md).
+Do not copy example passwords or encryption keys into a live deployment.
 
-# Email Configuration
-SMTP_HOST="smtp.gmail.com"
-SMTP_PORT="587"
-SMTP_USER="your-email@gmail.com"
-SMTP_PASSWORD="your-app-password"
-
-# AWS S3 Cloud Storage Credentials
-AWS_ACCESS_KEY_ID="your_aws_access_key"
-AWS_SECRET_ACCESS_KEY="your_aws_secret_key"
-AWS_REGION="eu-north-1"
-AWS_S3_BUCKET="postquantumcryptography"
-
-# Blockchain audit anchoring (defaults target a local dev chain)
-BLOCKCHAIN_ENABLED="true"
-BLOCKCHAIN_RPC_URL="http://127.0.0.1:8545"
-BLOCKCHAIN_CHAIN_ID="31337"
-BLOCKCHAIN_NETWORK_NAME="anvil-local"
-BLOCKCHAIN_CONTRACT_ADDRESS="0x5FbDB2315678afecb367f032d93F642f64180aa3"
-```
-
-### 3. Start the IPFS node (optional)
-
-Publishing is only attempted when `IPFS_API_URL` is set. Leave it blank and the
-system runs normally — reports are still filed, just not pinned.
-
-```bash
-export IPFS_PATH=~/devtools/ipfs-repo
-~/devtools/kubo/ipfs daemon --enable-gc
-```
-
-Then set `IPFS_API_URL=http://127.0.0.1:5001` in `backend/.env`.
-
-### 4. Run Backend API Server
-```bash
-cd backend
-python -m pip install -r requirements.txt  # Or install dependencies
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-### 5. Run Frontend Web Application
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-### 6. Running the Tests
+### Running the Tests
 
 ```bash
 cd backend
 python3 -m pytest
 ```
 
-327 tests. All but the end-to-end flow need no database or running server —
-they exercise pure functions so they fail for exactly one reason. Without
-liboqs the post-quantum pipeline tests skip (they never pass vacuously), as do
-the live-IPFS-node tests without a node and the end-to-end flow without
-`RUN_E2E=1`. CI runs the full suite inside the backend image, where liboqs is
-real, against a Postgres service — so nothing is skipped there except the
-live IPFS node.
+The suite includes unit tests and opt-in live integration tests. Without
+liboqs the post-quantum tests skip; live database, chain, storage and browser
+checks need their configured services and opt-in flags. The
+[CI workflow](.github/workflows/deploy.yml) is the authoritative setup.
+Report skipped tests rather than treating them as passed.
 
 What they cover, and why these specific assertions: every test asserts a
 *refusal* as well as a success, because a happy-path-only suite would pass
@@ -897,7 +879,7 @@ signature verifier that always returned true, an upload that recorded a key it
 never wrote, and a dropped vitals validator — made 7, 1 and 2 tests fail
 respectively.
 
-### 7. Blockchain Audit Trail
+### Blockchain Audit Trail
 
 Document digests are anchored on-chain via `contracts/PHR.sol`. Every developer
 runs their own local chain — no accounts, no funds, no internet required.
@@ -948,20 +930,20 @@ Visit **http://localhost:3000** to log in to the platform!
 
 ---
 
-## 🔑 Demo Login Credentials
+## 🔑 Signing in and demo accounts
 
-Sign in with the **User ID**, not the email address.
+Sign in with the **User ID**, not the email. A fresh installation has no
+pre-created accounts. Run `backend/seed_admin.py` as described in
+[INSTALL.md](INSTALL.md). It uses a private `ADMIN_PASSWORD` or generates a
+random password printed once. There is no universal administrator password,
+and re-running the script does not reset an existing account.
 
-| Role | User ID | Password | Seeded as |
-| --- | --- | --- | --- |
-| **Administrator** | `ADM-2026-000001` | `Admin@1234` | System Administrator |
-| **Doctor** | `DOC-2026-000001` | `Password@123` | Dr Carol |
-| **Patient** | `PAT-2026-000001` | `Password@123` | Bob Patient |
-| **Lab Technician** | `LAB-2026-000001` | `Password@123` | Leo LabTech |
-| **Nurse** | `NUR-2026-000001` | `Password@123` | Nina Nurse |
+Register other roles through `/signup`, then approve as an administrator.
+The assigned User ID and the password chosen at registration are the login
+credentials. Live deployment credentials are not stored in this repository.
 
-Create these with the seed scripts in `backend/` (`seed_admin.py`, then the
-role seeders). The admin password comes from `ADMIN_PASSWORD` in `.env`.
+The dataset generator below uses public demonstration passwords. Run it only
+against a disposable demonstration database, never real patient records.
 
 ### The 500 generated accounts
 
