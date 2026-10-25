@@ -31,13 +31,13 @@ import {
 /* ------------------------------------------------------------------ */
 interface DashStats {
   total_users: number;
-  patients: number;
-  doctors: number;
-  nurses: number;
-  lab_technicians: number;
-  pending_registrations: number;
-  approved_registrations: number;
-  rejected_registrations: number;
+  total_patients: number;
+  total_doctors: number;
+  total_nurses: number;
+  total_lab_technicians: number;
+  pending_requests: number;
+  approved_users: number;
+  rejected_users: number;
   disabled_users: number;
 }
 
@@ -72,13 +72,13 @@ const statCards: {
   iconColor: string;
 }[] = [
   { key: "total_users", label: "Total Users", icon: Users, gradient: "from-blue-50 to-blue-100/50", iconBg: "bg-blue-100", iconColor: "text-blue-600" },
-  { key: "patients", label: "Patients", icon: Heart, gradient: "from-cyan-50 to-cyan-100/50", iconBg: "bg-cyan-100", iconColor: "text-cyan-600" },
-  { key: "doctors", label: "Doctors", icon: Stethoscope, gradient: "from-teal-50 to-teal-100/50", iconBg: "bg-teal-100", iconColor: "text-teal-600" },
-  { key: "nurses", label: "Nurses", icon: Syringe, gradient: "from-emerald-50 to-emerald-100/50", iconBg: "bg-emerald-100", iconColor: "text-emerald-600" },
-  { key: "lab_technicians", label: "Lab Technicians", icon: FlaskConical, gradient: "from-violet-50 to-violet-100/50", iconBg: "bg-violet-100", iconColor: "text-violet-600" },
-  { key: "pending_registrations", label: "Pending Requests", icon: Clock, gradient: "from-amber-50 to-amber-100/50", iconBg: "bg-amber-100", iconColor: "text-amber-600" },
-  { key: "approved_registrations", label: "Approved", icon: CheckCircle2, gradient: "from-green-50 to-green-100/50", iconBg: "bg-green-100", iconColor: "text-green-600" },
-  { key: "rejected_registrations", label: "Rejected", icon: XCircle, gradient: "from-rose-50 to-rose-100/50", iconBg: "bg-rose-100", iconColor: "text-rose-600" },
+  { key: "total_patients", label: "Patients", icon: Heart, gradient: "from-cyan-50 to-cyan-100/50", iconBg: "bg-cyan-100", iconColor: "text-cyan-600" },
+  { key: "total_doctors", label: "Doctors", icon: Stethoscope, gradient: "from-teal-50 to-teal-100/50", iconBg: "bg-teal-100", iconColor: "text-teal-600" },
+  { key: "total_nurses", label: "Nurses", icon: Syringe, gradient: "from-emerald-50 to-emerald-100/50", iconBg: "bg-emerald-100", iconColor: "text-emerald-600" },
+  { key: "total_lab_technicians", label: "Lab Technicians", icon: FlaskConical, gradient: "from-violet-50 to-violet-100/50", iconBg: "bg-violet-100", iconColor: "text-violet-600" },
+  { key: "pending_requests", label: "Pending Requests", icon: Clock, gradient: "from-amber-50 to-amber-100/50", iconBg: "bg-amber-100", iconColor: "text-amber-600" },
+  { key: "approved_users", label: "Approved", icon: CheckCircle2, gradient: "from-green-50 to-green-100/50", iconBg: "bg-green-100", iconColor: "text-green-600" },
+  { key: "rejected_users", label: "Rejected", icon: XCircle, gradient: "from-rose-50 to-rose-100/50", iconBg: "bg-rose-100", iconColor: "text-rose-600" },
   { key: "disabled_users", label: "Disabled", icon: Ban, gradient: "from-gray-50 to-gray-100/50", iconBg: "bg-gray-200", iconColor: "text-gray-600" },
 ];
 
