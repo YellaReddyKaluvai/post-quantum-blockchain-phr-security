@@ -2,7 +2,7 @@
 
 import React from "react";
 import { motion, Variants } from "framer-motion";
-import { Lock, Cpu, Database, Network, PlayCircle, Clock, Captions } from "lucide-react";
+import { Lock, Cpu, Database, Network, PlayCircle, Clock, Captions, Github } from "lucide-react";
 import Navbar from "@/components/Navbar";
 import Link from "next/link";
 
@@ -114,7 +114,7 @@ export default function LandingPage() {
           {/* CTA Buttons */}
           <motion.div
             variants={item}
-            className="flex flex-col sm:flex-row gap-4 justify-center items-center"
+            className="flex flex-col sm:flex-row sm:flex-wrap gap-4 justify-center items-center"
           >
             <a
               href="#project-demo"
@@ -135,6 +135,16 @@ export default function LandingPage() {
             >
               Login
             </Link>
+            <a
+              href="https://github.com/YellaReddyKaluvai/post-quantum-blockchain-phr-security"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="GitHub repository (opens in a new tab)"
+              className="inline-flex items-center justify-center gap-2 px-8 py-4 bg-white border-2 border-slate-200 text-slate-700 font-bold rounded-2xl hover:border-cyan-300 hover:text-cyan-700 hover:bg-cyan-50 transition-colors w-full sm:w-auto shadow-sm focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-cyan-600"
+            >
+              <Github className="h-5 w-5" aria-hidden="true" />
+              GitHub
+            </a>
           </motion.div>
         </motion.div>
 
