@@ -1,0 +1,567 @@
+{
+  "description": "Three deployments; local validation data stays at each node. Synthetic when seeded with federation_lab.py. Not clinical efficacy evidence.",
+  "snapshots": [
+    {
+      "round": 0,
+      "elapsed_seconds": 0,
+      "aggregation": null,
+      "nodes": {
+        "hospital-b": {
+          "candidate": null,
+          "candidate_round": null,
+          "candidate_model_hash": null,
+          "available": true,
+          "examples": 120,
+          "training_examples": 80,
+          "local": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 1.462072,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "in_use": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 1.462072,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "model": "local classifier (80 investigated incidents)",
+          "note": "Separate local validation examples; never sent to the hub."
+        },
+        "hospital-a": {
+          "candidate": null,
+          "candidate_round": null,
+          "candidate_model_hash": null,
+          "available": true,
+          "examples": 120,
+          "training_examples": 80,
+          "local": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 1.814022,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "in_use": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 1.814022,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "model": "local classifier (80 investigated incidents)",
+          "note": "Separate local validation examples; never sent to the hub."
+        },
+        "hospital-c": {
+          "candidate": null,
+          "candidate_round": null,
+          "candidate_model_hash": null,
+          "available": true,
+          "examples": 120,
+          "training_examples": 80,
+          "local": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 2.394959,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "in_use": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 2.394959,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "model": "local classifier (80 investigated incidents)",
+          "note": "Separate local validation examples; never sent to the hub."
+        }
+      }
+    },
+    {
+      "round": 1,
+      "elapsed_seconds": 0.22,
+      "aggregation": {
+        "real_nodes": 3,
+        "classifier_nodes": [
+          "This hospital (local)",
+          "hospital-a",
+          "hospital-c"
+        ],
+        "classifier_excluded": [],
+        "hub_adopted": false
+      },
+      "nodes": {
+        "hospital-b": {
+          "candidate": {
+            "examples": 120,
+            "tp": 8,
+            "fp": 0,
+            "tn": 60,
+            "fn": 52,
+            "f1": 0.235,
+            "log_loss": 0.771521,
+            "accuracy": 0.567,
+            "precision": 1.0,
+            "recall": 0.133
+          },
+          "candidate_round": 1,
+          "candidate_model_hash": "e4a2132418955efcfbb51d0687c166fc14341816ca5aba87339e46dd1c26539c",
+          "available": true,
+          "examples": 120,
+          "training_examples": 80,
+          "local": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 1.462072,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "in_use": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 1.462072,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "model": "local classifier (80 investigated incidents)",
+          "note": "Separate local validation examples; never sent to the hub."
+        },
+        "hospital-a": {
+          "candidate": {
+            "examples": 120,
+            "tp": 9,
+            "fp": 0,
+            "tn": 60,
+            "fn": 51,
+            "f1": 0.261,
+            "log_loss": 0.7803,
+            "accuracy": 0.575,
+            "precision": 1.0,
+            "recall": 0.15
+          },
+          "candidate_round": 1,
+          "candidate_model_hash": "e4a2132418955efcfbb51d0687c166fc14341816ca5aba87339e46dd1c26539c",
+          "available": true,
+          "examples": 120,
+          "training_examples": 80,
+          "local": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 1.814022,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "in_use": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 1.814022,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "model": "local classifier (80 investigated incidents)",
+          "note": "Separate local validation examples; never sent to the hub."
+        },
+        "hospital-c": {
+          "candidate": {
+            "examples": 120,
+            "tp": 11,
+            "fp": 0,
+            "tn": 60,
+            "fn": 49,
+            "f1": 0.31,
+            "log_loss": 0.762992,
+            "accuracy": 0.592,
+            "precision": 1.0,
+            "recall": 0.183
+          },
+          "candidate_round": 1,
+          "candidate_model_hash": "e4a2132418955efcfbb51d0687c166fc14341816ca5aba87339e46dd1c26539c",
+          "available": true,
+          "examples": 120,
+          "training_examples": 80,
+          "local": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 2.394959,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "in_use": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 2.394959,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "model": "local classifier (80 investigated incidents)",
+          "note": "Separate local validation examples; never sent to the hub."
+        }
+      }
+    },
+    {
+      "round": 2,
+      "elapsed_seconds": 0.154,
+      "aggregation": {
+        "real_nodes": 3,
+        "classifier_nodes": [
+          "This hospital (local)",
+          "hospital-a",
+          "hospital-c"
+        ],
+        "classifier_excluded": [],
+        "hub_adopted": true
+      },
+      "nodes": {
+        "hospital-b": {
+          "candidate": {
+            "examples": 120,
+            "tp": 35,
+            "fp": 0,
+            "tn": 60,
+            "fn": 25,
+            "f1": 0.737,
+            "log_loss": 0.625638,
+            "accuracy": 0.792,
+            "precision": 1.0,
+            "recall": 0.583
+          },
+          "candidate_round": 2,
+          "candidate_model_hash": "5e91c4004e4600561558117b6a464e7926e2e3e967b2400f7dadc3f1254e7497",
+          "available": true,
+          "examples": 120,
+          "training_examples": 80,
+          "local": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 1.462072,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "in_use": {
+            "examples": 120,
+            "tp": 35,
+            "fp": 0,
+            "tn": 60,
+            "fn": 25,
+            "f1": 0.737,
+            "log_loss": 0.625638,
+            "accuracy": 0.792,
+            "precision": 1.0,
+            "recall": 0.583
+          },
+          "model": "federated classifier (local round 2, 3 institutions)",
+          "note": "Separate local validation examples; never sent to the hub."
+        },
+        "hospital-a": {
+          "candidate": {
+            "examples": 120,
+            "tp": 36,
+            "fp": 0,
+            "tn": 60,
+            "fn": 24,
+            "f1": 0.75,
+            "log_loss": 0.638336,
+            "accuracy": 0.8,
+            "precision": 1.0,
+            "recall": 0.6
+          },
+          "candidate_round": 2,
+          "candidate_model_hash": "5e91c4004e4600561558117b6a464e7926e2e3e967b2400f7dadc3f1254e7497",
+          "available": true,
+          "examples": 120,
+          "training_examples": 80,
+          "local": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 1.814022,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "in_use": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 1.814022,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "model": "local classifier (80 investigated incidents)",
+          "note": "Separate local validation examples; never sent to the hub."
+        },
+        "hospital-c": {
+          "candidate": {
+            "examples": 120,
+            "tp": 34,
+            "fp": 0,
+            "tn": 60,
+            "fn": 26,
+            "f1": 0.723,
+            "log_loss": 0.622941,
+            "accuracy": 0.783,
+            "precision": 1.0,
+            "recall": 0.567
+          },
+          "candidate_round": 2,
+          "candidate_model_hash": "5e91c4004e4600561558117b6a464e7926e2e3e967b2400f7dadc3f1254e7497",
+          "available": true,
+          "examples": 120,
+          "training_examples": 80,
+          "local": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 2.394959,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "in_use": {
+            "examples": 120,
+            "tp": 34,
+            "fp": 0,
+            "tn": 60,
+            "fn": 26,
+            "f1": 0.723,
+            "log_loss": 0.622941,
+            "accuracy": 0.783,
+            "precision": 1.0,
+            "recall": 0.567
+          },
+          "model": "federated classifier (hub round 2, 3 institutions)",
+          "note": "Separate local validation examples; never sent to the hub."
+        }
+      }
+    },
+    {
+      "round": 3,
+      "elapsed_seconds": 0.18,
+      "aggregation": {
+        "real_nodes": 3,
+        "classifier_nodes": [
+          "This hospital (local)",
+          "hospital-a",
+          "hospital-c"
+        ],
+        "classifier_excluded": [],
+        "hub_adopted": true
+      },
+      "nodes": {
+        "hospital-b": {
+          "candidate": {
+            "examples": 120,
+            "tp": 35,
+            "fp": 0,
+            "tn": 60,
+            "fn": 25,
+            "f1": 0.737,
+            "log_loss": 0.620877,
+            "accuracy": 0.792,
+            "precision": 1.0,
+            "recall": 0.583
+          },
+          "candidate_round": 3,
+          "candidate_model_hash": "2b2b32ea4c33afb7a03c0656a42c46440a8814f0b4df8d344051c0816363389b",
+          "available": true,
+          "examples": 120,
+          "training_examples": 80,
+          "local": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 1.462072,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "in_use": {
+            "examples": 120,
+            "tp": 35,
+            "fp": 0,
+            "tn": 60,
+            "fn": 25,
+            "f1": 0.737,
+            "log_loss": 0.620877,
+            "accuracy": 0.792,
+            "precision": 1.0,
+            "recall": 0.583
+          },
+          "model": "federated classifier (local round 3, 3 institutions)",
+          "note": "Separate local validation examples; never sent to the hub."
+        },
+        "hospital-a": {
+          "candidate": {
+            "examples": 120,
+            "tp": 37,
+            "fp": 0,
+            "tn": 60,
+            "fn": 23,
+            "f1": 0.763,
+            "log_loss": 0.636269,
+            "accuracy": 0.808,
+            "precision": 1.0,
+            "recall": 0.617
+          },
+          "candidate_round": 3,
+          "candidate_model_hash": "2b2b32ea4c33afb7a03c0656a42c46440a8814f0b4df8d344051c0816363389b",
+          "available": true,
+          "examples": 120,
+          "training_examples": 80,
+          "local": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 1.814022,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "in_use": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 1.814022,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "model": "local classifier (80 investigated incidents)",
+          "note": "Separate local validation examples; never sent to the hub."
+        },
+        "hospital-c": {
+          "candidate": {
+            "examples": 120,
+            "tp": 35,
+            "fp": 0,
+            "tn": 60,
+            "fn": 25,
+            "f1": 0.737,
+            "log_loss": 0.61743,
+            "accuracy": 0.792,
+            "precision": 1.0,
+            "recall": 0.583
+          },
+          "candidate_round": 3,
+          "candidate_model_hash": "2b2b32ea4c33afb7a03c0656a42c46440a8814f0b4df8d344051c0816363389b",
+          "available": true,
+          "examples": 120,
+          "training_examples": 80,
+          "local": {
+            "examples": 120,
+            "tp": 20,
+            "fp": 0,
+            "tn": 60,
+            "fn": 40,
+            "f1": 0.5,
+            "log_loss": 2.394959,
+            "accuracy": 0.667,
+            "precision": 1.0,
+            "recall": 0.333
+          },
+          "in_use": {
+            "examples": 120,
+            "tp": 35,
+            "fp": 0,
+            "tn": 60,
+            "fn": 25,
+            "f1": 0.737,
+            "log_loss": 0.61743,
+            "accuracy": 0.792,
+            "precision": 1.0,
+            "recall": 0.583
+          },
+          "model": "federated classifier (hub round 3, 3 institutions)",
+          "note": "Separate local validation examples; never sent to the hub."
+        }
+      }
+    }
+  ]
+}

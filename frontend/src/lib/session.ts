@@ -1344,7 +1344,16 @@ export interface FederatedModelRecord {
   classifier?: { rounds: number; nodes: number; samples: number } | null;
 }
 
+export interface ClassifierMetrics {
+  examples: number; accuracy: number | null; precision: number | null; recall: number | null;
+  f1: number | null; log_loss: number | null;
+}
+
 export interface FederatedClassifierStatus {
+  validation?: { available: boolean; examples?: number; training_examples?: number;
+    local?: ClassifierMetrics | null; in_use?: ClassifierMetrics | null;
+    candidate?: ClassifierMetrics | null; candidate_round?: number | null;
+    model?: string | null; note: string };
   labels: { total: number; threats: number; benign: number };
   trainable: boolean;
   needs: { labels: number; per_class: number };

@@ -5269,7 +5269,8 @@ def _open_round(cur) -> int:
 
 
 def _latest_global_classifier(cur) -> Optional[fed_clf.Classifier]:
-    cur.execute("SELECT parameters FROM FederatedGlobalModel ORDER BY round_number DESC LIMIT 1")
+    cur.execute("SELECT parameters FROM FederatedGlobalModel WHERE simulated_nodes = 0 "
+                "AND real_nodes >= 2 ORDER BY round_number DESC LIMIT 1")
     row = cur.fetchone()
     clf = (row["parameters"] or {}).get("classifier") if row else None
     return fed_clf.Classifier.from_parameters(clf) if fed_clf.sane_classifier(clf) else None
@@ -5295,6 +5296,13 @@ def _federated_round(cur) -> dict:
     it on their own data.
     """
     import json
+    # Serialize aggregation and submissions across workers/processes. A laptop
+    # dropping out must not silently turn a strict three-node round into two.
+    cur.execute("SELECT pg_advisory_xact_lock(734021)")
+    if federation.require_fresh_updates() and not _round_due(cur):
+        raise HTTPException(status_code=409, detail=(
+            f"Waiting for {federation.minimum_peers()} fresh peer updates for round {_open_round(cur)}. "
+            "Connect the participants and submit on both before running the round."))
     windows = aisec.extract_windows(cur, hours=720)
     if not windows:
         raise HTTPException(status_code=400, detail="No activity to learn from yet.")
@@ -5329,6 +5337,10 @@ def _federated_round(cur) -> dict:
             ORDER BY r.node_name, r.created_at DESC""",
         (LOCAL_NODE, rnd, PEER_UPDATE_MAX_AGE_DAYS))
     real_peers = cur.fetchall()
+    if federation.require_fresh_updates():
+        real_peers = [peer for peer in real_peers if peer["round_number"] == rnd]
+        if len(real_peers) < federation.minimum_peers():
+            raise HTTPException(status_code=409, detail="Not enough active, recent updates for this round.")
     for peer in real_peers:
         if peer["round_number"] != rnd:
             cur.execute(
@@ -5432,13 +5444,13 @@ def _federated_round(cur) -> dict:
 
 def _round_due(cur) -> bool:
     """A scheduled round is due when enough real peers have submitted since the last one."""
-    minimum = max(1, int(os.getenv("FEDERATION_MIN_PEERS", "1") or 1))
+    minimum = federation.minimum_peers()
     cur.execute(
         """SELECT COUNT(DISTINCT r.node_name) AS n FROM FederatedRounds r
              JOIN FederatedPeers p ON p.node_name = r.node_name AND p.is_active
             WHERE r.is_simulated = FALSE AND r.node_name <> %s
-              AND r.created_at > COALESCE((SELECT MAX(created_at) FROM FederatedGlobalModel),
-                                          'epoch'::timestamptz)""", (LOCAL_NODE,))
+              AND r.round_number = (SELECT COALESCE(MAX(round_number), 0) + 1
+                                      FROM FederatedGlobalModel)""", (LOCAL_NODE,))
     return cur.fetchone()["n"] >= minimum
 
 
@@ -5627,6 +5639,7 @@ def federated_classifier_status(session: dict = Depends(require_role("Administra
         with conn.cursor(row_factory=dict_row) as cur:
             examples = federation.load_labels(cur)
             spent = federation.privacy_spent(cur)
+            validation = federation.validation_metrics(cur)
             in_use, in_use_label = risk_engine._choose_classifier(
                 cur, *risk_engine.usable_federated_model(cur))
     threats = sum(1 for _, y in examples if y)
@@ -5637,6 +5650,7 @@ def federated_classifier_status(session: dict = Depends(require_role("Administra
         "trainable": fed_clf.trainable(examples),
         "needs": {"labels": fed_clf.MIN_TRAINING_LABELS, "per_class": fed_clf.MIN_PER_CLASS},
         "local_fit": local_fit,
+        "validation": validation,
         "in_use": ({"label": in_use_label, **in_use.to_parameters()} if in_use else None),
         "privacy": {"clip": fed_clf.DEFAULT_CLIP, "dp_epsilon": federation.dp_epsilon(),
                     "spent": spent,
@@ -5720,6 +5734,9 @@ def federated_status(session: dict = Depends(require_permission("security:view")
         "latest_round_evaluation": (latest or {}).get("evaluation"),
         "open_round": open_round,
         "pending_peer_submissions": pending,
+        "required_peer_submissions": federation.minimum_peers(),
+        "require_fresh_updates": federation.require_fresh_updates(),
+        "ready_for_round": pending >= federation.minimum_peers(),
         "participant": {
             "configured": bool(s_["hub_url"] and s_["node_name"] and s_["secret"]),
             "source": s_["source"],
@@ -5749,6 +5766,9 @@ def submit_to_federation_hub(session: dict = Depends(require_role("Administrator
             try:
                 result = federation.submit_local_update(cur)
             except federation.FederationError as exc:
+                # A timed-out HTTP request may already have released its update.
+                # Keep the conservative privacy debit even when the reply is lost.
+                conn.commit()
                 raise HTTPException(status_code=502, detail=str(exc)) from exc
             log_admin_action(conn, session["user_id"], session.get("public_user_id"),
                              "FEDERATED_UPDATE_SUBMITTED",
@@ -6511,8 +6531,13 @@ def set_federated_peer_active(peer_id: UUID, action: str,
     return {"node_name": peer["node_name"], "is_active": states[action]}
 
 
+@app.get("/api/federated/round-state")
+def serve_round_state(request: Request):
+    return serve_global_model(request, round_state=True)
+
+
 @app.get("/api/federated/global-model")
-def serve_global_model(request: Request):
+def serve_global_model(request: Request, round_state: bool = False):
     """Distribute the global model to a registered peer (spec §21).
 
     The "updated local models" step: without it peers could contribute but
@@ -6525,6 +6550,8 @@ def serve_global_model(request: Request):
     sig = request.headers.get("X-Federation-Signature", "")
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
+            # Keep the returned model and open-round number in the same state.
+            cur.execute("SELECT pg_advisory_xact_lock(734021)")
             cur.execute(
                 "SELECT shared_secret_encrypted, is_active FROM FederatedPeers WHERE node_name = %s",
                 (node,))
@@ -6532,7 +6559,7 @@ def serve_global_model(request: Request):
             if not peer or not peer["is_active"]:
                 raise HTTPException(status_code=403, detail="Unknown or inactive peer.")
             secret = decrypt_data(peer["shared_secret_encrypted"])
-            if not federation.verify_request_signature(node, ts, "global-model", secret, sig):
+            if not federation.verify_request_signature(node, ts, "round-state" if round_state else "global-model", secret, sig):
                 aisec.record_security_event(
                     cur, actor_id=None, actor_role=None, event_type="FEDERATED_REQUEST_REJECTED",
                     resource=node[:120], ip_address=_client_ip(request))
@@ -6545,10 +6572,15 @@ def serve_global_model(request: Request):
                     ORDER BY round_number DESC LIMIT 1""")
             model = cur.fetchone()
             open_round = _open_round(cur)
-    if not model:
+    if not model and not round_state:
         raise HTTPException(
             status_code=404,
             detail="No global model built by real institutions yet. Submit and wait for a round.")
+    if not model:
+        body = {"round_number": 0, "parameters": None, "open_round": open_round,
+                "real_nodes": 0, "contributing_nodes": 0, "total_samples": 0}
+        body["signature"] = federation.model_signature(node, int(ts), body, secret)
+        return body
     body = {"round_number": model["round_number"], "parameters": model["parameters"],
             "contributing_nodes": model["contributing_nodes"],
             "total_samples": model["total_samples"], "real_nodes": model["real_nodes"],
@@ -6568,6 +6600,7 @@ def receive_peer_parameters(req: PeerSubmissionRequest, request: Request = None)
     """
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(734021)")
             cur.execute(
                 """SELECT id, shared_secret_encrypted, is_active, last_submission_ts
                      FROM FederatedPeers WHERE node_name = %s FOR UPDATE""",
@@ -6617,6 +6650,14 @@ def receive_peer_parameters(req: PeerSubmissionRequest, request: Request = None)
             if req.round_number > open_round:
                 raise HTTPException(status_code=400, detail=(
                     f"Round {req.round_number} is not open; the open round is {open_round}."))
+
+            if req.round_number < open_round:
+                raise HTTPException(status_code=409, detail=(
+                    f"Round {req.round_number} is closed; the open round is {open_round}."))
+            cur.execute("SELECT 1 FROM FederatedRounds WHERE round_number = %s AND node_name = %s",
+                        (open_round, req.node_name))
+            if cur.fetchone():
+                raise HTTPException(status_code=409, detail="This peer already submitted for the open round.")
 
             cur.execute(
                 """INSERT INTO FederatedRounds (round_number, node_name, is_simulated,

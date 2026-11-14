@@ -923,3 +923,12 @@ DROP TRIGGER IF EXISTS stamp_key_versions ON ImagingReports;
 CREATE TRIGGER stamp_key_versions BEFORE INSERT ON ImagingReports FOR EACH ROW EXECUTE FUNCTION stamp_record_key_versions();
 
 ALTER TABLE ZkpChallenges ADD COLUMN IF NOT EXISTS proof_commitment TEXT;
+
+-- Optional local experiment holdout. No training/submission query reads this table.
+CREATE TABLE IF NOT EXISTS FederatedValidationLabels (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    features JSONB NOT NULL,
+    label SMALLINT NOT NULL CHECK (label IN (0, 1)),
+    source VARCHAR(30) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
