@@ -1,204 +1,246 @@
-# Running the federation on three machines
+# Federated learning: one computer first, then three laptops
 
-Federated learning is implemented and runs on every push to this repository
-(three servers, three databases, two training rounds). The only thing CI cannot
-supply is *independence*: all three of its hospitals are ours. This guide puts
-the same protocol on three real machines, which is as close to a real
-federation as you can get without another institution.
+The system trains a security threat classifier from investigated incidents.
+It does **not** train a diagnosis model on patients' medical documents. Each
+hospital keeps its events, feature examples and labels locally. Only signed
+baseline parameters, classifier weights and sample counts cross the federation
+boundary. The existing post-quantum document pipeline remains separate; the
+federation protocol uses per-peer HMAC-SHA256, not ML-DSA signatures or secure
+aggregation.
 
-**Three machines, not two.** Two is the minimum the protocol accepts
-(`real_nodes >= 2`), but with two nodes a dishonest hospital can only be
-*capped*, never excluded — there is no majority to judge it against. At three,
-the outlier rule in `federated_classifier.aggregate` sets a poisoned update
-aside and names it in the round report. That is the thing worth demonstrating.
+## Architecture
 
-The hub trains on its own data too, so three machines means **hub + two
-participants**, not hub + three.
+| Laptop | Role | Local data |
+|---|---|---|
+| A | Training participant `hospital-a` | Its own database, labels and keys |
+| B | Hub **and** training participant | Its own database, labels and keys |
+| C | Training participant `hospital-c` | Its own database, labels and keys |
 
-```
-   Hospital A  (participant)  ─┐
-                               ├──►  Hospital B  (hub)  ──► global model ──┐
-   Hospital C  (participant)  ─┘                                           │
-          ▲                                                                │
-          └──────────────── pull, evaluate locally, adopt ◄────────────────┘
-```
+There are three trainers in total; a fourth coordinator machine is unnecessary.
+A and C discover B's signed open round and global classifier, train locally,
+and send signed updates. B trains from the same previous classifier and performs
+sample-weighted robust FedAvg. A and C pull and locally evaluate the result.
+The adoption gate decides which model scores activity; the next training round
+always starts from the newest global weights, even if detection retained an
+older model.
 
----
+The prepared lab uses `FEDERATION_LOCAL_EPOCHS=10` to limit local drift when
+institutions have different training distributions. Full local-only reference
+models still fit for 200 epochs. Existing deployments keep 200 local epochs
+unless explicitly configured; the setting accepts 1–1000. All participating
+lab nodes should use the same setting.
 
-## 1. What each machine needs
+The prepared lab sets `FEDERATION_REQUIRE_FRESH_UPDATES=true` and
+`FEDERATION_MIN_PEERS=2`. B refuses to finish until both participants submit to
+the current round. No old updates or simulated peers fill a missing laptop's
+place. Duplicate submissions and submissions to completed rounds are rejected.
+Concurrent aggregation/submission is serialized with a PostgreSQL transaction
+lock. Default deployments retain the older carry-forward aggregation policy
+unless strict mode is enabled; closed rounds are immutable in either mode.
 
-- Docker and Docker Compose
-- This repository
-- All three on the same network, able to reach each other by IP
-- One free port each for 3000 (dashboard) and 8000 (API)
+## Before connecting laptops: test on one computer
 
-Find each machine's address once and write them down:
+Install Git, Python 3.10+ and Docker with Docker Compose v2 (Docker Desktop on
+Windows/macOS). Run these commands from the repository root. On Windows use
+`py` instead of `python` if necessary.
 
-```bash
-hostname -I | awk '{print $1}'        # Linux
-ipconfig getifaddr en0                 # macOS
-```
-
-This guide calls them `A_IP`, `B_IP` (the hub) and `C_IP`.
-
----
-
-## 2. Set up each machine
-
-Do this on **all three**, changing only the names.
-
-### Generate that hospital's own secrets
-
-Each hospital is a separate institution: it must **not** share keys with the
-others. Generate a fresh set on every machine.
-
-```bash
-cd Pqc_implementation
-cp backend/.env.example .env
-python3 -c "import secrets; print('SECRET_KEY=' + secrets.token_urlsafe(48))" >> .env
-python3 -c "import secrets; print('ENCRYPTION_KEY=' + secrets.token_hex(16))" >> .env
-python3 -c "import secrets; print('CONSENT_LEDGER_KEY=' + secrets.token_urlsafe(32))" >> .env
-printf 'ADMIN_EMAIL=admin@hospital-b.example\nDB_PASSWORD=%s\n' "$(python3 -c 'import secrets;print(secrets.token_urlsafe(16))')" >> .env
+```sh
+git clone https://github.com/YellaReddyKaluvai/post-quantum-blockchain-phr-security.git
+cd post-quantum-blockchain-phr-security
+# Until the implementation PR is merged:
+git switch feat/three-laptop-federated-learning
+python scripts/federation_lab.py local --rounds 3
 ```
 
-`ENCRYPTION_KEY` must be exactly 32 characters — `token_hex(16)` gives that.
-Compose refuses to start without `SECRET_KEY` and `ENCRYPTION_KEY`, deliberately:
-unset, the application would fall back to a key published in this repository.
+The first build compiles liboqs and the frontend and can take several minutes.
+This command creates three isolated Compose projects (each with API, frontend,
+PostgreSQL, network and volume), generates independent keys/passwords, seeds
+fictional local data, registers peers, and runs three HTTP training rounds.
+It needs enough memory/disk for three copies of the application. It connects the API containers to a shared Docker network using the hostname
+`hospital-b`; the three databases stay on their separate private networks.
 
-### Start it
+| Node | Dashboard | API |
+|---|---|---|
+| A | http://localhost:3101 | http://localhost:8101 |
+| B | http://localhost:3102 | http://localhost:8102 |
+| C | http://localhost:3103 | http://localhost:8103 |
 
-```bash
-docker compose up --build -d
-docker compose exec backend python seed_admin.py
+Admin IDs are printed during seeding. Passwords are in each
+`lab-data/<node>/.env` (`ADMIN_PASSWORD`). The runner also writes private
+`login.json` files. `lab-data/` is ignored by Git: do not publish its credentials.
+
+Each node gets 80 synthetic training examples concentrating on a different
+threat pattern (record sweeps, unusual hours, or repeated access failures), and
+120 newly generated validation examples covering all three patterns. Validation
+lives in `FederatedValidationLabels`, which training never queries. The seed
+command requires explicit lab mode and refuses populated databases (an unused
+bootstrap administrator is allowed so interrupted setup can resume).
+It never imports real PHRs. Use these deployments only as disposable labs.
+
+A measured three-round run is checked in as
+[JSON](federation-results/three-node-synthetic.json) and
+[CSV](federation-results/three-node-synthetic.csv). It used three Docker APIs and
+three PostgreSQL containers on one machine, 10 local epochs per round, and no DP
+noise. Candidate validation accuracy changed from local-only 66.7% to 79.2%,
+80.8%, and 79.2% at B/A/C respectively. B and C adopted round 3; A's in-sample
+adoption check rejected it, so A continued scoring with its local model.
+The global weight hash agreed across all three sites and changed every round.
+Each database retained exactly 80 training and 120 validation rows after sharing.
+These are reproducible synthetic experiment results, not three physical laptops.
+
+Results are saved after the baseline and every completed round:
+
+- `lab-data/results.json`: per-node accuracy, precision, recall, F1, log loss,
+  confusion counts, candidate global metrics and weight hash, adopted model,
+  round duration and aggregation exclusions.
+- `lab-data/results.csv`: round-by-round comparison for a spreadsheet/chart.
+- Admin → **AI Security → Federated IDS**: fresh-update count, round, contributors,
+  model in use, candidate global model, separate validation comparison, and model rollback controls.
+  Federation state refreshes every ten seconds.
+
+A lower log loss indicates better probability estimates even when accuracy is
+unchanged. Improvements are measured, not guaranteed: heterogeneous data,
+aggregation exclusions and privacy noise can reduce performance. These synthetic
+results demonstrate distributed training, not clinical accuracy or performance
+on independent hospitals. Training-fit accuracy and the existing adoption gate
+are in-sample checks; only the separate validation metrics are holdout results.
+Repeated validation during model selection is not a final blind test set.
+
+To repeat rounds without resetting databases:
+
+```sh
+python scripts/federation_lab.py run --rounds 3
 ```
 
-`seed_admin.py` prints the administrator's User ID and, if you did not set
-`ADMIN_PASSWORD`, a generated password **shown once**. Write both down.
+If setup was interrupted, use `start`, `seed` (only if still empty), `wire` and
+`run` to continue. `prepare` refuses to overwrite keys. If registration succeeded
+but joining failed, the hub UI can rotate the peer secret so you can join through
+the participant UI; the runner never silently rotates an existing peer's key.
+If the local run stopped before writing `experiment.json`, create it using the
+three `login.json` files in the format below; use API ports 8102/8101/8103 and
+`http://hospital-b:8000` as each participant's `hub_url`.
+Run `python scripts/federation_lab.py link-local` after recreating local containers
+so their API network connections are restored.
 
-Open `http://<that machine's IP>:3000` from any machine on the network and sign
-in. The dashboard reaches the API through its own origin, so it works from
-another laptop — you do not need to be sitting at the machine.
+## Prepare the real laptops independently
 
----
+**The laptops do not need to be connected yet.** Clone/check out the same branch
+on all three. On A run:
 
-## 3. Wire the federation
+```sh
+python scripts/federation_lab.py prepare --node a
+python scripts/federation_lab.py start --node a
+python scripts/federation_lab.py seed --node a
+```
 
-### On the hub (Hospital B): register the other two
+On B use `--node b`; on C use `--node c`. Without `--local-ports`, every laptop
+uses API port **8000** and dashboard port **3000**. Each generates its own
+credentials and database. Do not copy another laptop's `.env`, volume or keys.
+The seed step is for a synthetic demonstration only. For existing hospitals,
+use their actual investigated incident labels and the normal administrator
+setup instead; do not enable lab seeding on those databases. All nodes must
+upgrade together because the participant now requires `/api/federated/round-state`.
 
-Admin → **Federation Peers** → *Register a peer*.
+## Connect all three laptops now
 
-Do it twice, with node names `hospital-a` and `hospital-c`. Each registration
-shows a 64-character secret **once**. Copy each one to the machine it belongs
-to, over something you trust — not a group chat.
+**This is the point when the physical laptops must be connected.** Preparation,
+building and local seeding can finish first. Joining peers and running a
+cross-laptop round require simultaneous connectivity.
 
-### On each participant (A and C): join
+1. Connect A, B and C to the same trusted Wi-Fi/Ethernet LAN. Avoid guest Wi-Fi
+   with client isolation. Keep B awake. Synchronize all clocks (signatures allow
+   at most five minutes of skew).
+2. Find B's LAN IPv4 address: `ipconfig` on Windows, `ipconfig getifaddr en0` on
+   macOS, or `hostname -I` on Linux. For example, `192.168.1.20`.
+3. Permit inbound TCP **8000 on B** from A and C on the private network. For
+   dashboard access from another laptop allow **3000** on that laptop. Do not
+   expose PostgreSQL; Compose keeps it internal. No router port forwarding is
+   needed. The optional centralized runner also needs APIs 8000 on A and C.
+4. If an HTTP proxy is configured on your laptops, append B's IP to `FEDERATION_NO_PROXY`
+   in A/C's `lab-data/<node>/.env` and run `start` again before joining.
+   From A and C open `http://B_IP:8000/api/health`. From a browser on each laptop
+   open its own `http://localhost:3000`. Plain HTTP is for the synthetic trusted
+   lab; use HTTPS or a private encrypted tunnel for sensitive deployments.
+5. On B: Admin → **Federation Peers** → register `hospital-a` and `hospital-c`.
+   Each secret is shown once. Give it only to the corresponding participant.
+6. On A/C: Admin → **AI Security → Federated IDS** → join with hub URL
+   `http://B_IP:8000`, matching node name and its issued secret.
+7. On A/C: **Train & submit local update**. On B wait for **2/2 fresh updates**,
+   then **Run Round**. On A/C: **Pull & evaluate global model**.
+8. Repeat steps 7 for at least three rounds. Compare the local-only validation
+   metrics with the currently used model on each dashboard.
 
-Admin → **AI Security** → *Federated IDS* → fill in:
+You have now tested real network communication across three laptops. Three
+machines belonging to one project still do not establish independent institutions.
 
-| Field | Value |
+### Optional automated cross-laptop experiment
+
+Instead of registering peers manually, create `lab-data/experiment.json` on
+one trusted computer with the following shape (replace every placeholder):
+
+```json
+{
+  "hub": {"name": "hospital-b", "url": "http://B_IP:8000", "user_id": "B_ADMIN_ID", "password": "B_ADMIN_PASSWORD"},
+  "a": {"name": "hospital-a", "url": "http://A_IP:8000", "user_id": "A_ADMIN_ID", "password": "A_ADMIN_PASSWORD", "hub_url": "http://B_IP:8000"},
+  "c": {"name": "hospital-c", "url": "http://C_IP:8000", "user_id": "C_ADMIN_ID", "password": "C_ADMIN_PASSWORD", "hub_url": "http://B_IP:8000"}
+}
+```
+
+Keep this file private: it grants administrator access to all three labs. Run:
+
+```sh
+python scripts/federation_lab.py wire --config lab-data/experiment.json
+python scripts/federation_lab.py run --config lab-data/experiment.json --rounds 3
+```
+
+The runner orchestrates admin API calls; raw training/validation data remains on
+each laptop. It collects model metrics only. If a laptop is offline it stops
+with an error and preserves completed results. Retrying `run` reuses an already
+accepted submission for the currently open round.
+
+## Verify dropout handling and privacy boundaries
+
+- Submit from A only, then press Run Round on B: expect HTTP 409 and a message
+  waiting for two fresh peers. Submit from C and retry: the round completes.
+- Re-submit from the same node before aggregation: the duplicate is refused.
+- Stop C after a completed round: B must not count its previous update as fresh.
+- On each lab database, `SecurityLabels` remains 80 rows and
+  `FederatedValidationLabels` remains 120. B also has its **own** labels; a hub
+  with zero labels is not required and would not train a third classifier.
+- The global model should report three classifier contributors; check exclusions
+  separately. Suspending a node is an authorization test, not proof that the
+  statistical outlier rule detected poisoning.
+
+For automatic background rounds, set `FEDERATION_ROUND_INTERVAL_MINUTES=1` on B
+and `FEDERATION_SYNC_INTERVAL_MINUTES=1` on A/C in their lab `.env` files, then
+`start` each affected node. Keep the manual runner off while schedulers run.
+Strict quorum prevents partial rounds. The privacy ledger accounts for classifier
+noise when configured; baseline summaries are **not** differentially private,
+and raw-data locality alone is not a formal privacy guarantee. The synthetic
+experiment leaves DP noise off so the measured learning changes are repeatable.
+
+## Troubleshooting and shutdown
+
+| Symptom | Check |
 |---|---|
-| Hub URL | `http://B_IP:8000` |
-| Node name | `hospital-a` (or `hospital-c`) — exactly as registered |
-| Shared secret | the one the hub issued for that name |
+| Cannot reach hub health endpoint | LAN IP, firewall, Wi-Fi isolation, B asleep, backend health |
+| 401/403 on model exchange | Exact node name, active peer, shared secret, clock skew |
+| 409 waiting for updates | Submit on both A and C for the current round; old updates do not count |
+| 409 duplicate/closed round | Aggregate then start the next round; do not overwrite history |
+| Baselines only | At least 6 training labels and 2 of each verdict are required |
+| No validation dataset | Expected on existing deployments; do not label training fit as holdout accuracy |
+| Dashboard API fails | Rebuild frontend; the Docker build must use `BACKEND_ORIGIN=http://backend:8000` |
+| Global model not adopted | Read the local evaluation reasons; the prior model remains in use |
+| Seed refused | It protects nonempty databases; use a fresh lab project, never clear patient data |
 
-The panel warns if the hub URL is plain `http://`. On a closed lab network that
-is acceptable — every message is signed either way, so nothing can be altered
-unnoticed; what is exposed is the model parameters themselves. For anything
-public, put the hub behind HTTPS.
-
-### Turn on differential privacy
-
-On each participant, in `.env`:
-
+```sh
+python scripts/federation_lab.py status --node b
+python scripts/federation_lab.py stop --node a
+python scripts/federation_lab.py stop --node b
+python scripts/federation_lab.py stop --node c
 ```
-FEDERATION_DP_EPSILON=1.0
-FEDERATION_DP_TOTAL_EPSILON=10.0
-```
 
-Then `docker compose up -d`. Without the first, the panel correctly reports
-that no privacy guarantee holds. The second caps the total spend across all
-rounds, after which the hospital shares baselines only.
-
----
-
-## 4. Give each hospital something to learn from
-
-A hospital trains a classifier from **its own investigated incidents**. The
-threshold is in `federated_classifier.py`:
-
-> at least **6 closed incidents**, with at least **2 of each verdict**
-> (confirmed threat / false positive)
-
-Below that, that hospital contributes behaviour baselines but no classifier
-weights — correct behaviour, not a fault. A classifier fitted to three examples
-would teach the federation noise.
-
-On **each** machine, as an administrator:
-
-1. Admin → AI Security → *Run Analysis*, so risk assessments and alerts exist.
-2. Open each incident, close it, and set a **verdict**.
-3. Aim for ~10 incidents per hospital with a mix of both verdicts.
-
-Give the three hospitals *different* patterns — that is the entire point. One
-with insider-style record sweeps, one with out-of-hours access, one with
-repeated refused attempts. The federated model should end up better than any of
-them alone, and you can show that.
-
----
-
-## 5. Run a round
-
-1. **A and C:** AI Security → *Train & submit local update*. The response says
-   how many labels were used and whether noise was applied.
-2. **B (hub):** AI Security → *Run federated round*. Check the report: it should
-   say **2 real peers, 0 simulated**, and name the contributing nodes.
-3. **A and C:** *Pull & evaluate global model*. Each evaluates it against its
-   own data and adopts it only if detection does not get worse.
-
-Repeat for a second round — each hospital now trains starting from the global
-weights, which is what makes it federated learning rather than one average.
-
-To automate: `FEDERATION_ROUND_INTERVAL_MINUTES=10` on the hub,
-`FEDERATION_SYNC_INTERVAL_MINUTES=10` on the participants.
-
----
-
-## 6. What to show in a viva
-
-| Claim | Where to show it |
-|---|---|
-| Three independent deployments | Three machines, three databases, three key sets |
-| Only parameters cross the boundary | Hub database: `SELECT COUNT(*) FROM SecurityLabels` is **0**; `FederatedRounds.local_parameters` holds medians and weights, no names |
-| Robust aggregation | Round report: `baselines_capped`, `baselines_excluded`, `classifier_excluded` |
-| A poisoned hospital is excluded | Suspend one peer mid-demo, or let a node submit wild values — with 3 nodes it is set aside |
-| Differential privacy | Classifier panel: ε spent so far, composed across rounds, against the budget |
-| A bad model is not adopted | The adoption gate refuses a global model that would make local detection worse |
-| Detection actually uses it | Status: `LIVE_FEDERATION`, and "Detection is scoring against: hub round N" |
-
----
-
-## 7. When it does not work
-
-| Symptom | Cause |
-|---|---|
-| Compose exits with "set SECRET_KEY in .env" | Working as intended — generate the keys in step 2 |
-| Participant: 502 on submit | The hub is unreachable. `curl http://B_IP:8000/api/health` from that machine; check the firewall on port 8000 |
-| Participant: 401 | Node name or secret does not match what the hub registered. Rotate the secret on the hub and re-join |
-| Participant: 403 | That peer is suspended on the hub |
-| Participant: 409 on submit | A submission for that round was already accepted — replay protection. Wait for the next round |
-| Hub: "0 real peers, 3 simulated" | Nobody has submitted yet. Simulated peers only pad a round before the first real one, and never score anyone |
-| Submit says "baselines only" | Fewer than 6 investigated incidents, or fewer than 2 of one verdict |
-| Dashboard loads, every call fails | You pointed `NEXT_PUBLIC_BACKEND_URL` at `localhost`. Leave it unset so the browser calls `/api` on the host that served the page |
-
----
-
-## Honest limits
-
-- Three machines you own is **not** a federation of independent institutions.
-  It proves the protocol and the privacy boundary; it does not prove other
-  institutions will join. Say that in the report.
-- To make it literally true, one node has to be run by someone else — another
-  project group or department is enough, and the setup above is all they need.
-- The `docker-compose.yml` fixes behind this guide were derived from the code
-  but have not been run here (no Docker on the authoring machine). The
-  federation protocol itself is exercised on every CI run.
+Stop retains volumes and keys. Do not run `down -v` unless you intentionally
+want to delete that disposable lab's database. For automated regression tests,
+see `backend/tests/test_federation_experiment.py`, `test_federation_hub.py`, and
+the existing opt-in three-hospital `test_federation_live.py`.

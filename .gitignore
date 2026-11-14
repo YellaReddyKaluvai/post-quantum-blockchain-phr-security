@@ -31,5 +31,6 @@ db_backups/
 backend/test_db.py
 
 # Generated working-demonstration output; publish only reviewed sample evidence.
+lab-data/
 demo-runs/
 quantumcare-demo-private/
