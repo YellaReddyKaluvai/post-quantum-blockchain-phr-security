@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake ninja-build git ca-certificates libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Only the two standardized mechanisms used by crypto_service.py are needed.
+# Avoid compiling every experimental algorithm on each demonstration laptop.
 ARG LIBOQS_VERSION=0.16.0
 RUN git clone --branch ${LIBOQS_VERSION} --depth 1 \
         https://github.com/open-quantum-safe/liboqs.git /tmp/liboqs \
@@ -16,6 +18,7 @@ RUN git clone --branch ${LIBOQS_VERSION} --depth 1 \
         -DBUILD_SHARED_LIBS=ON \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DOQS_BUILD_ONLY_LIB=ON \
+        '-DOQS_MINIMAL_BUILD=KEM_ml_kem_768;SIG_ml_dsa_65' \
  && cmake --build /tmp/liboqs/build --parallel \
  && cmake --install /tmp/liboqs/build \
  && rm -rf /tmp/liboqs

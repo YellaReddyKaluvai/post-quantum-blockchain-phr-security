@@ -6,6 +6,7 @@
 
 ## Start here
 
+- [Three-laptop federated learning](docs/10_Federation_Deployment.md): local experiment, laptop setup, connection checkpoint and measured results.
 - [Installation](INSTALL.md): prerequisites, local setup and first login.
 - [Working demonstration](backend/demo/WORKING_DEMO.md): captioned video package, repeatable workflow and measured outputs.
 - [Deployment](DEPLOY.md): Vercel frontend, Render API/PostgreSQL and migration.
