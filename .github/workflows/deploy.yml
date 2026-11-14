@@ -276,10 +276,11 @@ jobs:
         cp -r public .next/standalone/public
         PORT=3000 HOSTNAME=localhost nohup node .next/standalone/server.js > /tmp/frontend.log 2>&1 &
         for i in $(seq 1 60); do curl -fs http://localhost:3000/login >/dev/null && break; sleep 1; done
-        mkdir -p /tmp/ui && cp e2e/ui-smoke.mjs /tmp/ui/ && cd /tmp/ui
+        mkdir -p /tmp/ui && cp e2e/ui-smoke.mjs e2e/completion-smoke.mjs /tmp/ui/ && cd /tmp/ui
         npm init -y >/dev/null && npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
         npx playwright install --with-deps chromium
         node ui-smoke.mjs
+        node completion-smoke.mjs
     - name: Browser test artifacts
       if: failure()
       uses: actions/upload-artifact@v4

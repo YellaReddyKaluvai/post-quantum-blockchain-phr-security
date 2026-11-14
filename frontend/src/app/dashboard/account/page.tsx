@@ -1,6 +1,7 @@
 "use client";
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import { accountRequest, clearAuthCookies } from "@/lib/session";
 
 interface KeyVersion { version: number; current: boolean; revoked_at: string | null; created_at: string }
@@ -13,6 +14,8 @@ export default function AccountSecurity() {
   const [otp, setOtp] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [qr, setQr] = useState("");
+  const [remaining, setRemaining] = useState(0);
   const [secret, setSecret] = useState("");
   const [code, setCode] = useState("");
   const [codes, setCodes] = useState<string[]>([]);
@@ -22,7 +25,7 @@ export default function AccountSecurity() {
   const [error, setError] = useState("");
   const refresh = async () => {
     const [state, versions] = await Promise.all([accountRequest("security"), accountRequest("keys")]);
-    setEnabled(state.mfa_enabled); setKeys(versions);
+    setEnabled(state.mfa_enabled); setRemaining(state.recovery_codes_remaining); setKeys(versions);
   };
   useEffect(() => { refresh().catch(e => setError(e instanceof Error ? e.message : "Unable to load security settings")); }, []);
   const act = async (path: string, extra: object = {}) => {
@@ -32,7 +35,7 @@ export default function AccountSecurity() {
       const result = await accountRequest(path, {password, otp: otp || undefined, ...extra});
       setMessage(result.message || "Completed.");
       if (path === "mfa/disable") {setCodes([]); setSecret("");}
-      if (result.secret) setSecret(result.secret);
+      if (result.secret) {setSecret(result.secret); setQr(result.qr_data_url || "");}
       if (result.recovery_codes) { setCodes(result.recovery_codes); setSecret(""); }
       if (path === "password/change") {
         clearAuthCookies(); window.location.assign("/login"); return;
@@ -63,18 +66,20 @@ export default function AccountSecurity() {
       {!enabled && !secret && <button disabled={busy || !password} onClick={() => act("mfa/setup")} className={button}>Set up authenticator</button>}
       {secret && <div className="space-y-4">
         <p>In your authenticator app, add a time-based account named QuantumCare and enter this setup key. Setup expires after 10 minutes.</p>
+        {qr && <Image unoptimized src={qr} width={220} height={220} alt="Authenticator setup QR code" />}
         <code className="block break-all bg-slate-100 p-3">{secret}</code>
         <label className="block">Six-digit code<input inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code} onChange={e => setCode(e.target.value)} className={input} /></label>
         <button disabled={busy || code.length !== 6} onClick={() => act("mfa/confirm", {code})} className={button}>Enable MFA</button>
       </div>}
       {enabled && <button disabled={busy || !password || !otp} onClick={() => {if (window.confirm("Disable MFA for this account?")) void act("mfa/disable");}} className={button}>Disable MFA</button>}
+      {enabled && <div><p>{remaining} recovery codes remaining.</p><button disabled={busy || !password || !otp} onClick={() => {if (window.confirm("Replace all recovery codes? Existing codes will stop working.")) void act("mfa/recovery-codes");}} className={button}>Generate new recovery codes</button></div>}
       {codes.length > 0 && <div><h3 className="font-bold">Save your recovery codes now</h3><p>Each code works once. They will not be displayed again. Keep them outside this browser.</p><pre className="bg-slate-100 p-4 mt-2">{codes.join("\n")}</pre><button onClick={() => setCodes([])} className="underline mt-2">I have saved these codes</button></div>}
     </section>
     <section className="bg-white border rounded-2xl p-6 space-y-4">
       <h2 className="text-xl font-semibold">Post-quantum keys</h2>
       <p>Rotation uses fresh keys for new records while preserving historical records. Revocation withholds records encrypted or signed using that version; use it only for suspected compromise.</p>
       <button disabled={busy || !password} onClick={() => act("keys/rotate")} className={button}>Rotate keys</button>
-      <ul className="space-y-2">{keys.map(key => <li key={key.version} className="border rounded-xl p-3 flex justify-between gap-3"><span>Version {key.version} · {key.revoked_at ? "Revoked" : key.current ? "Current" : "Historical"}</span>{!key.current && !key.revoked_at && <button disabled={busy || !password} className="text-rose-700 underline" onClick={() => {if (window.confirm(`Revoke version ${key.version}? Affected records will no longer be released.`)) void act("keys/revoke", {version: key.version});}}>Revoke</button>}</li>)}</ul>
+      <ul className="space-y-2">{keys.map(key => <li key={key.version} className="border rounded-xl p-3 flex justify-between gap-3">{!key.current && !key.revoked_at && <button disabled={busy || !password} className="text-cyan-700 underline" onClick={() => {if(window.confirm("Re-encrypt up to 20 records under your current key? Old cloud ciphertext copies are not erased.")) void act("keys/migrate-records", {version:key.version});}}>Migrate records</button>}<span>Version {key.version} · {key.revoked_at ? "Revoked" : key.current ? "Current" : "Historical"}</span>{!key.current && !key.revoked_at && <button disabled={busy || !password} className="text-rose-700 underline" onClick={() => {if (window.confirm(`Revoke version ${key.version}? Affected records will no longer be released.`)) void act("keys/revoke", {version: key.version});}}>Revoke</button>}</li>)}</ul>
     </section>
   </main>;
 }

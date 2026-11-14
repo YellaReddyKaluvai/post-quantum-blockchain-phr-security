@@ -227,8 +227,13 @@ def setup_mfa(body: Credentials, session=Depends(get_current_session)):
         cur.execute("UPDATE Users SET mfa_pending_encrypted = %s, mfa_pending_until = NOW() + INTERVAL '10 minutes' WHERE id = %s",
                     (encrypt_data(secret), user["id"]))
         conn.commit()
-    return {"secret": secret, "uri": "otpauth://totp/" + quote("QuantumCare:" + session.get("public_user_id", session["user_id"]))
-            + "?secret=" + secret + "&issuer=QuantumCare&algorithm=SHA1&digits=6&period=30"}
+    uri = ("otpauth://totp/" + quote("QuantumCare:" + session.get("public_user_id", session["user_id"]))
+            + "?secret=" + secret + "&issuer=QuantumCare&algorithm=SHA1&digits=6&period=30")
+    import io
+    import qrcode
+    output = io.BytesIO()
+    qrcode.make(uri).save(output, format="PNG")
+    return {"secret": secret, "uri": uri, "qr_data_url": "data:image/png;base64," + base64.b64encode(output.getvalue()).decode()}
 
 
 @router.post("/mfa/confirm")

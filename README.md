@@ -850,3 +850,12 @@ credentials from `backend/dataset_credentials.csv` in that installation.
 See [completion and rollout guide](docs/12_Completion_and_Rollout.md) for document authoring,
 account recovery/MFA, appointment scheduling, key lifecycle, column migration and optional
 proof-enforced consent. These changes require schema migration before serving requests.
+
+
+### Remaining workflow completion
+
+Doctor-specific schedules and leave, PDF/DOCX attachments, rotating refresh sessions,
+email ownership verification, QR MFA enrollment/recovery-code renewal, dual-administrator
+identity recovery, recipient-key record migration and backup/restore tooling are described
+in [the rollout guide](docs/12_Completion_and_Rollout.md#remaining-workflow-completion-14-november-2026).
+Live-service configuration and physical-laptop measurements remain deployment tasks.

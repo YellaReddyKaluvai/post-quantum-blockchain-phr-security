@@ -19,21 +19,17 @@
 
 ## Current state
 
-| Metric | Value |
-|---|---|
-| REST endpoints | 127 |
-| Frontend pages | 51 |
-| Database tables | 30 |
-| Backend / frontend LOC | 9,162 / 15,133 |
-| Automated tests | 263 |
-| Demonstration data | 515 users · 804 signed reports · 40 chain anchors |
+The implementation includes versioned PQC keys, authenticated column migration,
+account MFA/recovery, appointments, attachments, verified email and refresh sessions.
+See [the completion guide](12_Completion_and_Rollout.md) for exact policy and rollout requirements.
+Source counts and test totals change with each commit; use that commit's CI run rather
+than the older static counts in this document.
 
-## Remaining
+## Remaining operational validation
 
-| Item | Nature |
-|---|---|
-| Live multi-hospital federation | Needs a second institution to register as a peer — the mechanism is built and tested |
-| Public IPFS availability | Replication is built; it needs a second node or a pinning-service account configured, and has not yet been exercised against either |
-| Production deployment | Runs locally under Docker; a hosted deployment needs infrastructure and a managed database |
+- Provision and verify production SMTP, object storage, blockchain RPC/contract and IPFS replication.
+- Run an encrypted backup/restore drill with the matching application keys.
+- Run and record the three-physical-laptop experiment; checked-in federation metrics are synthetic containers.
+- Apply migrations and verify the intended policy flags in the deployed environment.
 
-Each is an infrastructure dependency rather than missing code.
+These are deployment/evidence tasks. They are not claims that a live infrastructure service was provisioned by source changes.

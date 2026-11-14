@@ -3,6 +3,8 @@ import path from "path";
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  // A 10 MiB attachment expands to ~14 MiB in its encrypted-upload JSON envelope.
+  experimental: { proxyClientMaxBodySize: "16mb" },
   turbopack: {
     root: path.resolve(__dirname),
   },
