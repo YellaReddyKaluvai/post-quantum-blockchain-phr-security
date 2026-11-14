@@ -852,3 +852,74 @@ CREATE TABLE IF NOT EXISTS FederatedPrivacyLedger (
 -- when it was re-anchored: it proves the digest existed by that block, not earlier.
 ALTER TABLE DocumentAnchors ADD COLUMN IF NOT EXISTS original_tx_hash VARCHAR(66);
 ALTER TABLE DocumentAnchors ADD COLUMN IF NOT EXISTS reanchored_at TIMESTAMPTZ;
+
+-- Account security. No raw recovery tokens or recovery codes are persisted.
+ALTER TABLE Users ADD COLUMN IF NOT EXISTS mfa_secret_encrypted TEXT;
+ALTER TABLE Users ADD COLUMN IF NOT EXISTS mfa_pending_encrypted TEXT;
+ALTER TABLE Users ADD COLUMN IF NOT EXISTS mfa_pending_until TIMESTAMPTZ;
+ALTER TABLE Users ADD COLUMN IF NOT EXISTS mfa_last_counter BIGINT;
+CREATE TABLE IF NOT EXISTS AuthRateLimits (
+    bucket TEXT PRIMARY KEY, attempts INTEGER NOT NULL, expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS PasswordResetTokens (
+    token_hash TEXT PRIMARY KEY, user_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS MfaRecoveryCodes (
+    user_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE, code_hash TEXT NOT NULL,
+    PRIMARY KEY(user_id, code_hash)
+);
+
+-- Every encrypted record retains the exact KEM and signature versions it used.
+ALTER TABLE Users ADD COLUMN IF NOT EXISTS pqc_key_version INTEGER NOT NULL DEFAULT 1;
+CREATE TABLE IF NOT EXISTS PqcKeyVersions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    mlkem_public_key TEXT NOT NULL, mlkem_private_key_encrypted TEXT NOT NULL,
+    mldsa_public_key TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), revoked_at TIMESTAMPTZ,
+    UNIQUE(user_id, version)
+);
+INSERT INTO PqcKeyVersions (user_id, version, mlkem_public_key, mlkem_private_key_encrypted, mldsa_public_key)
+SELECT id, pqc_key_version, mlkem_public_key, mlkem_private_key_encrypted, mldsa_public_key FROM Users
+WHERE mlkem_public_key IS NOT NULL AND mlkem_private_key_encrypted IS NOT NULL AND mldsa_public_key IS NOT NULL
+ON CONFLICT (user_id, version) DO NOTHING;
+CREATE OR REPLACE FUNCTION snapshot_pqc_key_version() RETURNS trigger AS $$
+BEGIN
+    IF NEW.mlkem_public_key IS NOT NULL AND NEW.mlkem_private_key_encrypted IS NOT NULL AND NEW.mldsa_public_key IS NOT NULL THEN
+        INSERT INTO PqcKeyVersions (user_id, version, mlkem_public_key, mlkem_private_key_encrypted, mldsa_public_key)
+        VALUES (NEW.id, NEW.pqc_key_version, NEW.mlkem_public_key, NEW.mlkem_private_key_encrypted, NEW.mldsa_public_key)
+        ON CONFLICT (user_id, version) DO NOTHING;
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS snapshot_pqc_keys ON Users;
+CREATE TRIGGER snapshot_pqc_keys AFTER INSERT OR UPDATE OF mlkem_public_key, mldsa_public_key, pqc_key_version
+ON Users FOR EACH ROW EXECUTE FUNCTION snapshot_pqc_key_version();
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS recipient_key_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS signer_key_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS recipient_key_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS signer_key_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS recipient_key_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS signer_key_version INTEGER NOT NULL DEFAULT 1;
+CREATE OR REPLACE FUNCTION stamp_record_key_versions() RETURNS trigger AS $$
+DECLARE signer UUID;
+BEGIN
+    SELECT pqc_key_version INTO NEW.recipient_key_version FROM Users WHERE id = NEW.patient_id;
+    IF TG_TABLE_NAME = 'medicaldocuments' THEN signer := NEW.doctor_id;
+    ELSIF TG_TABLE_NAME = 'labreports' THEN signer := COALESCE(NEW.lab_tech_id, NEW.uploaded_by);
+    ELSE signer := NEW.lab_tech_id;
+    END IF;
+    SELECT pqc_key_version INTO NEW.signer_key_version FROM Users WHERE id = signer;
+    NEW.signer_key_version := COALESCE(NEW.signer_key_version, 1);
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS stamp_key_versions ON MedicalDocuments;
+CREATE TRIGGER stamp_key_versions BEFORE INSERT ON MedicalDocuments FOR EACH ROW EXECUTE FUNCTION stamp_record_key_versions();
+DROP TRIGGER IF EXISTS stamp_key_versions ON LabReports;
+CREATE TRIGGER stamp_key_versions BEFORE INSERT ON LabReports FOR EACH ROW EXECUTE FUNCTION stamp_record_key_versions();
+DROP TRIGGER IF EXISTS stamp_key_versions ON ImagingReports;
+CREATE TRIGGER stamp_key_versions BEFORE INSERT ON ImagingReports FOR EACH ROW EXECUTE FUNCTION stamp_record_key_versions();
+
+ALTER TABLE ZkpChallenges ADD COLUMN IF NOT EXISTS proof_commitment TEXT;

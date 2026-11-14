@@ -2,11 +2,8 @@ import os
 import base64
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
-# try:
-#     import oqs  # from liboqs-python
-# except BaseException as e:
-#     print(f"Failed to import oqs: {e}")
-oqs = None
+import oqs
+
 
 
 class CryptoManager:
@@ -14,7 +11,7 @@ class CryptoManager:
     Manages Post-Quantum Cryptography (CRYSTALS-Kyber) and classical AES-256 for secure 
     health record encryption.
     """
-    def __init__(self, kem_alg="Kyber768"):
+    def __init__(self, kem_alg="ML-KEM-768"):
         """Initialize the Key Encapsulation Mechanism (KEM)."""
         self.kem_alg = kem_alg
         # Initialize a KEM object in pyoqs
@@ -90,24 +87,5 @@ class CryptoManager:
         if self.kem:
             self.kem.free()
 
-# Instantiate a global instance or a mock version if environment issues persist in CI/CD.
-try:
-    crypto_manager = CryptoManager("Kyber768")
-except Exception:
-    # Fallback to simple simulated AES wrap if liboqs C-bindings fail on Windows (for Dev only)
-    print("WARNING: Falling back to mocked PQC environment!")
-    class MockCryptoManager:
-        def generate_keypair(self):
-            return b"mock_pub", b"mock_priv"
-        def encapsulate_key(self, pub):
-            aes_key = get_random_bytes(32)
-            return b"mock_kyber_ciphertext", aes_key
-        def decapsulate_key(self, cipher, priv):
-            return b"mocked_but_we_need_real_aes_in_db" # Real implementation requires state persistence
-        def encrypt_payload_aes(self, key, data):
-            # Simplistic mock
-            return {"ciphertext": base64.b64encode(data).decode('utf-8'), "nonce":"", "tag":""}
-        def decrypt_payload_aes(self, key, d):
-            return base64.b64decode(d["ciphertext"])
-        def free(self): pass
-    crypto_manager = MockCryptoManager()
+# Legacy callers must fail closed too; never replace encryption with base64.
+crypto_manager = CryptoManager("ML-KEM-768")

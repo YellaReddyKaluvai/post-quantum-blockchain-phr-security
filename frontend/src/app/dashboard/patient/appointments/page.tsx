@@ -3,12 +3,13 @@
 import React, { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Calendar, Clock, User, CalendarCheck, CalendarX2, Plus, X, Loader2 } from "lucide-react";
-import { getPatientAppointments, getAvailableDoctors, createPatientAppointment } from "@/lib/session";
+import { getPatientAppointments, getAvailableDoctors, createPatientAppointment, patientAppointmentAction, getAppointmentSlots } from "@/lib/session";
 
 // Mirrors the backend AppointmentRecord exactly.
 interface AppointmentItem {
   id: string;
   doctor_name?: string | null;
+  doctor_id?: string | null;
   department?: string | null;
   appointment_date?: string | null;
   appointment_time?: string | null;
@@ -22,12 +23,14 @@ interface DoctorOption {
   specialization?: string | null;
 }
 
-function BookAppointmentModal({ onClose, onBooked }: { onClose: () => void; onBooked: () => void }) {
+function BookAppointmentModal({ onClose, onBooked, existing }: { onClose: () => void; onBooked: () => void; existing?: AppointmentItem | null }) {
   const [doctors, setDoctors] = useState<DoctorOption[]>([]);
-  const [doctorId, setDoctorId] = useState("");
-  const [department, setDepartment] = useState("");
+  const [doctorId, setDoctorId] = useState(existing?.doctor_id || "");
+  const [department, setDepartment] = useState(existing?.department || "");
   const [appointmentDate, setAppointmentDate] = useState("");
   const [appointmentTime, setAppointmentTime] = useState("");
+  const [slotData, setSlotData] = useState<{slots: string[]; timezone: string} | null>(null);
+  const [slotError, setSlotError] = useState("");
   const [notes, setNotes] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -48,6 +51,15 @@ function BookAppointmentModal({ onClose, onBooked }: { onClose: () => void; onBo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doctorId]);
 
+  useEffect(() => {
+    let live = true;
+    setAppointmentTime(""); setSlotData(null); setSlotError("");
+    if (doctorId && appointmentDate) getAppointmentSlots(doctorId, appointmentDate)
+      .then(data => {if (live) setSlotData(data);})
+      .catch(e => {if (live) setSlotError(e instanceof Error ? e.message : "Unable to load slots");});
+    return () => {live = false;};
+  }, [doctorId, appointmentDate]);
+
   const todayStr = new Date().toISOString().split("T")[0];
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -59,7 +71,8 @@ function BookAppointmentModal({ onClose, onBooked }: { onClose: () => void; onBo
     }
     try {
       setSubmitting(true);
-      await createPatientAppointment({
+      if (existing) await patientAppointmentAction(existing.id, "reschedule", {appointment_date: appointmentDate, appointment_time: appointmentTime});
+      else await createPatientAppointment({
         doctor_id: doctorId,
         department,
         appointment_date: appointmentDate,
@@ -100,7 +113,7 @@ function BookAppointmentModal({ onClose, onBooked }: { onClose: () => void; onBo
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className={labelClass}>Doctor</label>
-            <select value={doctorId} onChange={(e) => setDoctorId(e.target.value)} className={inputClass} disabled={loadingDoctors} required>
+            <select disabled={Boolean(existing) || loadingDoctors} value={doctorId} onChange={(e) => setDoctorId(e.target.value)} className={inputClass} required>
               <option value="">{loadingDoctors ? "Loading doctors..." : "Select a doctor"}</option>
               {doctors.map((d) => (
                 <option key={d.id} value={d.id}>
@@ -125,7 +138,13 @@ function BookAppointmentModal({ onClose, onBooked }: { onClose: () => void; onBo
             </div>
             <div>
               <label className={labelClass}>Time</label>
-              <input type="time" value={appointmentTime} onChange={(e) => setAppointmentTime(e.target.value)} className={inputClass} required />
+              <select aria-label="Available appointment time" value={appointmentTime} onChange={e => setAppointmentTime(e.target.value)} className={inputClass} required>
+                <option value="">Choose an available slot</option>
+                {slotData?.slots.map(slot => <option key={slot} value={slot}>{slot}</option>)}
+              </select>
+              <p className="text-xs mt-1">{slotData ? `${slotData.timezone} · 30-minute appointments` : "Choose a doctor and date"}</p>
+              {slotData?.slots.length === 0 && <p>No slots available for this date.</p>}
+              {slotError && <p role="alert" className="text-rose-700">{slotError}</p>}
             </div>
           </div>
 
@@ -151,6 +170,16 @@ export default function AppointmentsPage() {
   const [loading, setLoading] = useState(true);
   const [appointments, setAppointments] = useState<AppointmentItem[]>([]);
   const [showBookModal, setShowBookModal] = useState(false);
+  const [rescheduling, setRescheduling] = useState<AppointmentItem | null>(null);
+  const [actionError, setActionError] = useState("");
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const cancelAppointment = async (id: string) => {
+    if (!window.confirm("Cancel this appointment?")) return;
+    setBusyId(id); setActionError("");
+    try {await patientAppointmentAction(id, "cancel"); await loadData();}
+    catch (e) {setActionError(e instanceof Error ? e.message : "Cancellation failed");}
+    finally {setBusyId(null);}
+  };
 
   async function loadData() {
     try {
@@ -235,6 +264,10 @@ export default function AppointmentsPage() {
           <User className="w-5 h-5 text-slate-400" /> Dr. {appointment.doctor_name}
         </h3>
         
+        {isUpcoming && <div className="flex gap-3 mb-4">
+          <button disabled={busyId === appointment.id} onClick={() => {setRescheduling(appointment); setShowBookModal(true);}} className="text-cyan-700 underline">Reschedule</button>
+          <button disabled={busyId === appointment.id} onClick={() => cancelAppointment(appointment.id)} className="text-rose-700 underline">Cancel</button>
+        </div>}
         <div className="grid grid-cols-2 gap-3 bg-slate-50 p-3 rounded-xl border border-slate-100">
           <div className="flex flex-col">
             <span className="text-[10px] uppercase font-bold text-slate-400 mb-1 flex items-center gap-1"><Calendar className="w-3 h-3" /> Date</span>
@@ -253,13 +286,14 @@ export default function AppointmentsPage() {
 
   return (
     <div className="max-w-7xl mx-auto space-y-8">
+      {actionError && <p role="alert" className="text-rose-700">{actionError}</p>}
       <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="flex items-center justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-xl md:text-2xl font-bold text-slate-800">Appointments</h1>
           <p className="text-slate-500 mt-1">Manage your upcoming and past medical appointments.</p>
         </div>
         <button
-          onClick={() => setShowBookModal(true)}
+          onClick={() => {setRescheduling(null); setShowBookModal(true);}}
           className="flex items-center gap-2 bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-400 hover:to-cyan-400 text-white px-5 py-2.5 rounded-xl font-bold text-sm shadow-md shadow-blue-100 transition-all"
         >
           <Plus className="w-4 h-4" /> Book Appointment
@@ -268,7 +302,7 @@ export default function AppointmentsPage() {
 
       <AnimatePresence>
         {showBookModal && (
-          <BookAppointmentModal onClose={() => setShowBookModal(false)} onBooked={loadData} />
+          <BookAppointmentModal existing={rescheduling} onClose={() => setShowBookModal(false)} onBooked={loadData} />
         )}
       </AnimatePresence>
 

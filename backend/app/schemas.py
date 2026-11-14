@@ -44,8 +44,9 @@ class RegistrationRequest(BaseModel):
         return self
 
 class LoginRequest(BaseModel):
-    user_id: str
-    password: str
+    user_id: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=1, max_length=1024)
+    otp: str | None = Field(default=None, max_length=100)
 
 class RegistrationResponse(BaseModel):
     message: str
@@ -265,6 +266,7 @@ class ConsultationRecord(BaseModel):
 
 class AppointmentRecord(BaseModel):
     id: str
+    doctor_id: Optional[str] = None
     doctor_name: Optional[str] = None
     department: Optional[str] = None
     appointment_date: Optional[date] = None
@@ -287,7 +289,9 @@ class CreateAppointmentRequest(BaseModel):
     @field_validator("appointment_date")
     @classmethod
     def date_not_in_past(cls, v: date) -> date:
-        if v < date.today():
+        from datetime import datetime
+        from app.appointments import clinic_zone
+        if v < datetime.now(clinic_zone()).date():
             raise ValueError("Appointment date cannot be in the past.")
         return v
 
@@ -367,9 +371,9 @@ class MedicalDocumentItem(BaseModel):
 
 class CreateDocumentRequest(BaseModel):
     patient_id: str
-    document_name: str
-    document_type: str
-    content: Optional[str] = None
+    document_name: str = Field(min_length=1, max_length=255)
+    document_type: Literal["Diagnosis Report", "Consultation Report", "Treatment Summary", "Medical Certificate", "Referral Letter", "Discharge Summary", "Other"]
+    content: str = Field(min_length=1, max_length=100000)
     status: str = "Final"
 
 class DoctorAppointmentItem(BaseModel):

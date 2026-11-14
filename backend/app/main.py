@@ -161,6 +161,7 @@ def step_up_verification(req: StepUpRequest, request: Request,
     cannot do that; the person at the keyboard can, in a few seconds.
     """
     user_uuid = session["user_id"]
+    account_security.throttle("step-up", user_uuid)
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("SELECT password_hash FROM Users WHERE id = %s", (user_uuid,))
@@ -220,10 +221,12 @@ def register(request: RegistrationRequest):
     return {"message": "Registration submitted successfully. Pending admin approval."}
 
 @app.post("/api/login", response_model=LoginResponse)
-def login(request: LoginRequest, response: Response):
+def login(request: LoginRequest, response: Response, http_request: Request):
+    account_security.ip_throttle(http_request, "login")
+    account_security.throttle("login", request.user_id)
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("SELECT * FROM Users WHERE user_id = %s", (request.user_id,))
+            cur.execute("SELECT * FROM Users WHERE user_id = %s FOR UPDATE", (request.user_id,))
             user = cur.fetchone()
 
             if not user:
@@ -250,6 +253,10 @@ def login(request: LoginRequest, response: Response):
                 conn.commit()
                 raise HTTPException(status_code=401, detail="Invalid User ID or Password.")
             
+            if not account_security.verify_mfa(cur, user, request.otp):
+                conn.commit()
+                raise HTTPException(status_code=401, detail="Authenticator or recovery code required or incorrect.")
+
             # Create session token
             token_payload = {
                 "user_id": str(user["id"]),
@@ -1252,7 +1259,7 @@ def get_patient_appointments(session: dict = Depends(require_role("Patient"))):
             """, (user_uuid,))
             rows = cur.fetchall()
     return [AppointmentRecord(
-        id=str(r["id"]), doctor_name=r["doctor_name"], department=r["department"],
+        id=str(r["id"]), doctor_id=str(r["doctor_id"]) if r["doctor_id"] else None, doctor_name=r["doctor_name"], department=r["department"],
         appointment_date=r["appointment_date"],
         appointment_time=str(r["appointment_time"]) if r["appointment_time"] else None,
         status=r["status"], notes=r["notes"]
@@ -1288,7 +1295,7 @@ def get_patient_documents(session: dict = Depends(require_role("Patient"))):
         doctor_specialization=r["specialization"],
         status=r["status"],
         created_at=r["created_at"],
-        has_content=bool(r.get("encrypted_content") or r.get("content")),
+        has_content=bool(r.get("encrypted_content") or r.get("content") or r.get("s3_key")),
         document_hash=r.get("document_hash"),
         kem_algorithm=r.get("kem_algorithm"),
         signature_algorithm=r.get("signature_algorithm"),
@@ -1312,8 +1319,11 @@ def get_patient_document_content(
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
-                SELECT m.*, u.mlkem_private_key_encrypted,
-                       a.mldsa_public_key AS signer_mldsa_public_key
+                SELECT m.*,
+        (SELECT k.mlkem_private_key_encrypted FROM PqcKeyVersions k
+         WHERE k.user_id = u.id AND k.version = m.recipient_key_version AND k.revoked_at IS NULL) AS mlkem_private_key_encrypted,
+                       (SELECT k.mldsa_public_key FROM PqcKeyVersions k
+         WHERE k.user_id = a.id AND k.version = m.signer_key_version AND k.revoked_at IS NULL) AS signer_mldsa_public_key
                 FROM MedicalDocuments m
                 JOIN Users u ON m.patient_id = u.id
                 LEFT JOIN Users a ON a.id = m.doctor_id
@@ -1546,6 +1556,8 @@ def create_patient_appointment(req: CreateAppointmentRequest, session: dict = De
             doctor = cur.fetchone()
             if not doctor:
                 raise HTTPException(status_code=404, detail="Selected doctor is not available.")
+
+            appointments.reserve_slot(cur, req.doctor_id, user_uuid, req.appointment_date, req.appointment_time)
 
             cur.execute("""
                 INSERT INTO Appointments (patient_id, doctor_id, department, appointment_date, appointment_time, status, notes)
@@ -2002,6 +2014,7 @@ def create_medical_document(
 
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
+            pqc_keys.lock_keys(cur)
             cur.execute(
                 "SELECT id, user_id, mlkem_public_key FROM Users WHERE id = %s AND role = 'Patient'",
                 (req.patient_id,),
@@ -2095,17 +2108,22 @@ def _decrypt_medical_document(row: dict) -> dict:
     is returned.
     """
     # Rows predating encryption kept their plaintext body in `content`.
-    if not row.get("encrypted_content"):
+    if not row.get("encrypted_content") and not row.get("s3_key"):
         if row.get("content"):
             return {"content": row["content"], "encrypted": False}
         raise HTTPException(status_code=404, detail="No content stored for this document.")
 
-    ciphertext = row["encrypted_content"]
+    if not row.get("mlkem_private_key_encrypted"):
+        raise HTTPException(409, "Recipient key version is unavailable or revoked.")
+    ciphertext = row.get("encrypted_content")
     if not ciphertext and row.get("s3_key"):
         try:
             ciphertext = download_file_from_s3(row["s3_key"]).decode("utf-8")
         except StorageError as exc:
             logger.error("S3 recovery failed for document %s: %s", row.get("id"), exc)
+
+    if not ciphertext:
+        raise HTTPException(status_code=503, detail="Document ciphertext is unavailable from database and cloud storage.")
 
     try:
         shared_secret = decapsulate_aes_key(row["encrypted_aes_key"], row["mlkem_private_key_encrypted"])
@@ -2135,8 +2153,11 @@ def get_medical_document_content(document_id: str, session: dict = Depends(requi
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
-                SELECT m.*, u.mlkem_private_key_encrypted,
-                       a.mldsa_public_key AS signer_mldsa_public_key
+                SELECT m.*,
+        (SELECT k.mlkem_private_key_encrypted FROM PqcKeyVersions k
+         WHERE k.user_id = u.id AND k.version = m.recipient_key_version AND k.revoked_at IS NULL) AS mlkem_private_key_encrypted,
+                       (SELECT k.mldsa_public_key FROM PqcKeyVersions k
+         WHERE k.user_id = a.id AND k.version = m.signer_key_version AND k.revoked_at IS NULL) AS signer_mldsa_public_key
                 FROM MedicalDocuments m
                 JOIN Users u ON m.patient_id = u.id
                 LEFT JOIN Users a ON a.id = m.doctor_id
@@ -2184,16 +2205,17 @@ def update_appointment_status(appointment_id: str, action: str, session: dict = 
     if action not in status_map:
         raise HTTPException(status_code=400, detail="Invalid action")
     
+    allowed_from = {"accept": ("Pending", "Scheduled"), "complete": ("Confirmed", "Scheduled"), "cancel": ("Pending", "Scheduled", "Confirmed")}[action]
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """UPDATE Appointments SET status = %s
-                    WHERE id = %s AND doctor_id = %s
+                    WHERE id = %s AND doctor_id = %s AND status::text = ANY(%s)
                 RETURNING patient_id, appointment_date, appointment_time, department""",
-                (status_map[action], appointment_id, user_uuid))
+                (status_map[action], appointment_id, user_uuid, list(allowed_from)))
             row = cur.fetchone()
             if not row:
-                raise HTTPException(status_code=404, detail="Appointment not found")
+                raise HTTPException(status_code=409, detail="Appointment unavailable or invalid status transition")
 
             # The patient was told when they requested and then never again — so
             # a cancelled appointment was one they turned up for. Every outcome
@@ -2557,6 +2579,8 @@ def _release_verified(conn, session: dict, release, row: dict, *, resource: str,
             secresp.commit_before_refusal(cur)
         raise
 
+    if row.get("digital_signature") and not row.get("signer_mldsa_public_key"):
+        raise HTTPException(409, "Signing key version is unavailable or revoked.")
     if row.get("digital_signature"):
         verdict = _signature_verdict(row.get("document_hash"), row.get("digital_signature"),
                                      row.get("signer_mldsa_public_key"))
@@ -2622,6 +2646,16 @@ def _doctor_patient_authorization(cur, doctor_uuid: str, patient_uuid: str) -> t
     if r["treating"]:
         return True, "treating relationship"
     if r["consented"]:
+        if os.getenv("REQUIRE_CONSENT_PROOF", "false").lower() == "true":
+            cur.execute("""SELECT EXISTS (
+                SELECT 1 FROM ZkpChallenges z JOIN Consent c
+                  ON c.patient_id = z.patient_id AND c.subject_user_id = z.subject_user_id
+                WHERE z.patient_id = %s AND z.subject_user_id = %s AND z.verified = TRUE
+                  AND z.consumed_at > NOW() - INTERVAL '5 minutes'
+                  AND z.proof_commitment = c.zkp_commitment AND c.status = 'Authorized'
+            ) AS proven""", (patient_uuid, doctor_uuid))
+            if not cur.fetchone()["proven"]:
+                return False, "a fresh consent proof is required; verify it in the consent panel"
         # A contradicting chain was refused above; what is left is whether the
         # chain positively confirms the grant or simply cannot say.
         if onchain == consent_ledger.GRANTED:
@@ -3315,6 +3349,7 @@ def create_structured_lab_report(
 
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
+            pqc_keys.lock_keys(cur)
             subject = _load_report_subject(cur, req, tech_uuid)
 
             # Spec §11: a report must answer the request it claims to — the
@@ -3684,8 +3719,11 @@ def _verify_and_record(conn, session: dict, report: dict) -> ReportVerification:
 
 
 _REPORT_SELECT = """
-    SELECT lr.*, u.mlkem_private_key_encrypted,
-           tech.mldsa_public_key AS signer_mldsa_public_key,
+    SELECT lr.*,
+        (SELECT k.mlkem_private_key_encrypted FROM PqcKeyVersions k
+         WHERE k.user_id = u.id AND k.version = lr.recipient_key_version AND k.revoked_at IS NULL) AS mlkem_private_key_encrypted,
+           (SELECT k.mldsa_public_key FROM PqcKeyVersions k
+         WHERE k.user_id = tech.id AND k.version = lr.signer_key_version AND k.revoked_at IS NULL) AS signer_mldsa_public_key,
            tech.full_name AS signer_name,
            (SELECT anchored_on FROM DocumentAnchors
              WHERE document_id = lr.id ORDER BY created_at DESC LIMIT 1) AS anchored_on
@@ -3816,6 +3854,7 @@ def upload_imaging_report(
 
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
+            pqc_keys.lock_keys(cur)
             cur.execute(
                 "SELECT id, user_id, full_name, mlkem_public_key FROM Users WHERE id = %s AND role = 'Patient'",
                 (req.patient_id,),
@@ -3919,7 +3958,7 @@ def get_imaging_reports(session: dict = Depends(require_role("Lab Technician")))
         id=str(r["id"]), patient_name=r["patient_name"], patient_user_id=r["patient_user_id"],
         scan_region=r["scan_region"], exam_type=r["exam_type"], clinical_history=r["clinical_history"],
         findings=r["findings"], impression=r["impression"], recommendations=r["recommendations"],
-        has_image=bool(r.get("encrypted_image") or r.get("image_data")),
+        has_image=bool(r.get("encrypted_image") or r.get("image_data") or r.get("s3_key") or r.get("ipfs_cid")),
         document_hash=r.get("document_hash"),
         kem_algorithm=r.get("kem_algorithm"),
         signature_algorithm=r.get("signature_algorithm"),
@@ -3942,8 +3981,11 @@ def get_imaging_image(imaging_id: str, session: dict = Depends(require_role("Lab
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""
-                SELECT ir.*, u.mlkem_private_key_encrypted,
-                       t.mldsa_public_key AS signer_mldsa_public_key
+                SELECT ir.*,
+        (SELECT k.mlkem_private_key_encrypted FROM PqcKeyVersions k
+         WHERE k.user_id = u.id AND k.version = ir.recipient_key_version AND k.revoked_at IS NULL) AS mlkem_private_key_encrypted,
+                       (SELECT k.mldsa_public_key FROM PqcKeyVersions k
+         WHERE k.user_id = t.id AND k.version = ir.signer_key_version AND k.revoked_at IS NULL) AS signer_mldsa_public_key
                 FROM ImagingReports ir
                 JOIN Users u ON ir.patient_id = u.id
                 LEFT JOIN Users t ON t.id = ir.lab_tech_id
@@ -5786,7 +5828,7 @@ def _imaging_summary(r: dict) -> dict:
         "findings": r.get("findings"),
         "impression": r.get("impression"),
         "recommendations": r.get("recommendations"),
-        "has_image": bool(r.get("encrypted_image") or r.get("image_data")),
+        "has_image": bool(r.get("encrypted_image") or r.get("image_data") or r.get("s3_key") or r.get("ipfs_cid")),
         "document_hash": r.get("document_hash"),
         "kem_algorithm": r.get("kem_algorithm"),
         "signature_algorithm": r.get("signature_algorithm"),
@@ -5801,12 +5843,14 @@ def _release_imaging_payload(r: dict, imaging_id: str) -> dict:
     One implementation for patient, doctor and technician so a study cannot be
     released to one role under weaker checks than another.
     """
-    if not r.get("encrypted_image"):
+    if not r.get("encrypted_image") and not r.get("s3_key") and not r.get("ipfs_cid"):
         if r.get("image_data"):
             return {"image_data": r["image_data"], "encrypted": False}
         raise HTTPException(status_code=404, detail="No image stored for this study.")
 
-    ciphertext = r["encrypted_image"]
+    if not r.get("mlkem_private_key_encrypted"):
+        raise HTTPException(409, "Recipient key version is unavailable or revoked.")
+    ciphertext = r.get("encrypted_image")
     if not ciphertext and r.get("s3_key"):
         try:
             ciphertext = download_file_from_s3(r["s3_key"]).decode("utf-8")
@@ -5820,6 +5864,9 @@ def _release_imaging_payload(r: dict, imaging_id: str) -> dict:
             logger.info("Recovered imaging %s from IPFS", imaging_id)
         except IPFSError as exc:
             logger.error("IPFS recovery failed for imaging %s: %s", imaging_id, exc)
+
+    if not ciphertext:
+        raise HTTPException(503, "Image ciphertext is unavailable from all storage providers.")
 
     try:
         shared_secret = decapsulate_aes_key(r["encrypted_aes_key"], r["mlkem_private_key_encrypted"])
@@ -5856,8 +5903,11 @@ def get_patient_imaging_image(imaging_id: str, session: dict = Depends(require_r
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                """SELECT ir.*, u.mlkem_private_key_encrypted,
-                          t.mldsa_public_key AS signer_mldsa_public_key
+                """SELECT ir.*,
+        (SELECT k.mlkem_private_key_encrypted FROM PqcKeyVersions k
+         WHERE k.user_id = u.id AND k.version = ir.recipient_key_version AND k.revoked_at IS NULL) AS mlkem_private_key_encrypted,
+                          (SELECT k.mldsa_public_key FROM PqcKeyVersions k
+         WHERE k.user_id = t.id AND k.version = ir.signer_key_version AND k.revoked_at IS NULL) AS signer_mldsa_public_key
                      FROM ImagingReports ir JOIN Users u ON u.id = ir.patient_id
                      LEFT JOIN Users t ON t.id = ir.lab_tech_id
                     WHERE ir.id = %s AND ir.patient_id = %s""",
@@ -5928,8 +5978,11 @@ def get_doctor_imaging_image(imaging_id: str, session: dict = Depends(require_ro
     with get_db() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                """SELECT ir.*, u.mlkem_private_key_encrypted,
-                          t.mldsa_public_key AS signer_mldsa_public_key
+                """SELECT ir.*,
+        (SELECT k.mlkem_private_key_encrypted FROM PqcKeyVersions k
+         WHERE k.user_id = u.id AND k.version = ir.recipient_key_version AND k.revoked_at IS NULL) AS mlkem_private_key_encrypted,
+                          (SELECT k.mldsa_public_key FROM PqcKeyVersions k
+         WHERE k.user_id = t.id AND k.version = ir.signer_key_version AND k.revoked_at IS NULL) AS signer_mldsa_public_key
                      FROM ImagingReports ir JOIN Users u ON u.id = ir.patient_id
                      LEFT JOIN Users t ON t.id = ir.lab_tech_id
                     WHERE ir.id = %s""", (imaging_id,))
@@ -6084,7 +6137,7 @@ def collect_consent_token(patient_id: str, session: dict = Depends(require_role(
                 """SELECT consent_id, status::text AS status, zkp_commitment,
                           zkp_token_encrypted, zkp_token_collected_at
                      FROM Consent
-                    WHERE patient_id = %s AND subject_user_id = %s AND subject_role = 'Doctor'""",
+                    WHERE patient_id = %s AND subject_user_id = %s AND subject_role = 'Doctor' FOR UPDATE""",
                 (patient_id, doctor_uuid))
             row = cur.fetchone()
             if not row or row["status"] != "Authorized":
@@ -6162,7 +6215,7 @@ def verify_zkp_proof(body: ZkpProofRequest, session: dict = Depends(require_role
             cur.execute(
                 """SELECT id, patient_id, consumed_at, expires_at
                      FROM ZkpChallenges
-                    WHERE challenge = %s AND subject_user_id = %s""",
+                    WHERE challenge = %s AND subject_user_id = %s FOR UPDATE""",
                 (body.challenge, doctor_uuid))
             ch = cur.fetchone()
             if not ch:
@@ -6191,8 +6244,8 @@ def verify_zkp_proof(body: ZkpProofRequest, session: dict = Depends(require_role
             # Consumed either way. A challenge that survives a failed attempt
             # lets an attacker grind against one nonce.
             cur.execute(
-                "UPDATE ZkpChallenges SET consumed_at = CURRENT_TIMESTAMP, verified = %s WHERE id = %s",
-                (ok, ch["id"]))
+                "UPDATE ZkpChallenges SET consumed_at = CURRENT_TIMESTAMP, verified = %s, proof_commitment = %s WHERE id = %s",
+                (ok, commitment, ch["id"]))
             log_admin_action(conn, doctor_uuid, session.get("public_user_id"),
                              "ZKP_PROOF_VERIFIED" if ok else "ZKP_PROOF_FAILED",
                              str(ch["patient_id"]), None)
@@ -6585,3 +6638,21 @@ def receive_peer_parameters(req: PeerSubmissionRequest, request: Request = None)
 
     return {"accepted": True, "round": req.round_number, "node": req.node_name,
             "note": "Parameters only. No records were transmitted or expected."}
+
+
+from app import account_security
+app.include_router(account_security.router)
+
+from app import pqc_keys
+app.include_router(pqc_keys.router)
+
+from app import appointments
+app.include_router(appointments.router)
+
+
+from app.security import ColumnIntegrityError
+
+@app.exception_handler(ColumnIntegrityError)
+def column_integrity_error(request: Request, exc: ColumnIntegrityError):
+    logger.error("Encrypted column integrity failure in %s", request.url.path)
+    return JSONResponse(status_code=409, content={"detail": "Stored encrypted data failed integrity checks. Access was withheld."})

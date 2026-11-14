@@ -39,58 +39,63 @@ def get_encryption_key(key_text: str | None = None) -> bytes:
         key = key[:32]
     return key
 
+class ColumnIntegrityError(ValueError):
+    """An encrypted column could not be authenticated/decrypted."""
+
+
 def encrypt_data(data: str, key_text: str | None = None) -> str:
     if not data:
         return data
-    key = get_encryption_key(key_text)
-    cipher = AES.new(key, AES.MODE_CBC)
-    ct_bytes = cipher.encrypt(pad(data.encode('utf-8'), AES.block_size))
-    iv = base64.b64encode(cipher.iv).decode('utf-8')
-    ct = base64.b64encode(ct_bytes).decode('utf-8')
-    return f"{iv}:{ct}"
+    cipher = AES.new(get_encryption_key(key_text), AES.MODE_GCM, nonce=secrets.token_bytes(12))
+    cipher.update(b"QuantumCare:column:v2")
+    ciphertext, tag = cipher.encrypt_and_digest(data.encode("utf-8"))
+    return "gcm2:" + ":".join(base64.b64encode(x).decode("ascii") for x in (cipher.nonce, ciphertext, tag))
 
-def decrypt_data(data: str) -> str:
-    if not data or ':' not in data:
-        return data
-    try:
-        key = get_encryption_key()
-        iv, ct = data.split(':', 1)
-        iv = base64.b64decode(iv)
-        ct = base64.b64decode(ct)
-        cipher = AES.new(key, AES.MODE_CBC, iv)
-        pt_bytes = unpad(cipher.decrypt(ct), AES.block_size)
-        return pt_bytes.decode('utf-8')
-    except Exception:
-        return data
 
 def looks_encrypted(data: str | None) -> bool:
-    """True when ``data`` has the shape encrypt_data produces: base64(16-byte IV):base64(blocks)."""
-    if not data or data.count(':') != 1:
+    if not data:
         return False
-    iv, ct = data.split(':', 1)
+    if data.startswith("gcm2:"):
+        return True  # malformed versioned ciphertext must fail, never become plaintext
+    if data.count(":") != 1:
+        return False
     try:
-        iv_bytes = base64.b64decode(iv, validate=True)
-        ct_bytes = base64.b64decode(ct, validate=True)
+        iv, ct = (base64.b64decode(x, validate=True) for x in data.split(":"))
+        return len(iv) == 16 and bool(ct) and len(ct) % 16 == 0
     except Exception:
         return False
-    return len(iv_bytes) == 16 and len(ct_bytes) > 0 and len(ct_bytes) % 16 == 0
 
 
-def decrypt_data_strict(data: str, key_text: str) -> str:
-    """Decrypt with exactly this key, raising ValueError on any failure.
+def decrypt_data_strict(data: str, key_text: str | None = None) -> str:
+    """Read authenticated v2 or legacy CBC; new writes always use v2.
 
-    ``decrypt_data`` returns its input when it cannot decrypt, which keeps old
-    plaintext rows readable but cannot tell "not encrypted" from "encrypted
-    under another key". Key rotation must tell them apart, so it uses this.
+    CBC compatibility is only for migration. It cannot authenticate old rows.
     """
     if not looks_encrypted(data):
-        raise ValueError("not an encrypt_data value")
-    iv, ct = data.split(':', 1)
-    cipher = AES.new(get_encryption_key(key_text), AES.MODE_CBC, base64.b64decode(iv))
+        raise ColumnIntegrityError("Not a recognized encrypted column")
     try:
-        return unpad(cipher.decrypt(base64.b64decode(ct)), AES.block_size).decode('utf-8')
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise ValueError("does not decrypt under this key") from exc
+        key = get_encryption_key(key_text)
+        if data.startswith("gcm2:"):
+            _, nonce, ct, tag = data.split(":")
+            cipher = AES.new(key, AES.MODE_GCM, nonce=base64.b64decode(nonce, validate=True))
+            cipher.update(b"QuantumCare:column:v2")
+            return cipher.decrypt_and_verify(base64.b64decode(ct, validate=True),
+                                             base64.b64decode(tag, validate=True)).decode("utf-8")
+        iv, ct = (base64.b64decode(x, validate=True) for x in data.split(":"))
+        return unpad(AES.new(key, AES.MODE_CBC, iv).decrypt(ct), AES.block_size).decode("utf-8")
+    except Exception as exc:
+        raise ColumnIntegrityError("Encrypted column failed integrity/decryption checks") from exc
+
+
+def decrypt_data(data: str) -> str:
+    # Old clinical rows may be plaintext; recognized ciphertext never falls back.
+    if not data:
+        return data
+    if os.getenv("REQUIRE_AUTHENTICATED_COLUMNS", "false").lower() == "true" and not data.startswith("gcm2:"):
+        raise ColumnIntegrityError("Legacy/plaintext column refused; complete the GCM migration")
+    if not looks_encrypted(data):
+        return data
+    return decrypt_data_strict(data)
 
 
 def create_session_token(payload: dict[str, Any], minutes: int | None = None) -> tuple[str, datetime]:
