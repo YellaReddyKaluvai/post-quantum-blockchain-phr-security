@@ -1,4 +1,5 @@
 from datetime import datetime, date
+from app.attachments import Attachment, envelope
 from typing import Any, Literal, Optional
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
@@ -373,8 +374,22 @@ class CreateDocumentRequest(BaseModel):
     patient_id: str
     document_name: str = Field(min_length=1, max_length=255)
     document_type: Literal["Diagnosis Report", "Consultation Report", "Treatment Summary", "Medical Certificate", "Referral Letter", "Discharge Summary", "Other"]
-    content: str = Field(min_length=1, max_length=100000)
+    content: str = Field(default="", max_length=100000)
+    attachment: Attachment | None = None
     status: str = "Final"
+
+    @model_validator(mode="after")
+    def document_body(self):
+        if self.attachment and self.content:
+            raise ValueError("Provide text or an attachment, not both")
+        if self.attachment:
+            try:
+                self.content = envelope(self.attachment)
+            except Exception as exc:
+                raise ValueError("Invalid attachment: use a PDF or DOCX up to 10 MiB") from exc
+        elif not self.content.strip():
+            raise ValueError("Document content is required")
+        return self
 
 class DoctorAppointmentItem(BaseModel):
     id: str

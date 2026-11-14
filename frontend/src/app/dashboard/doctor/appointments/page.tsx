@@ -1,4 +1,5 @@
 "use client";
+import DoctorSchedule from "@/components/DoctorSchedule";
 
 import React, { useEffect, useState } from "react";
 import { motion } from "framer-motion";
@@ -60,6 +61,7 @@ export default function Appointments() {
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
+      <DoctorSchedule />
       {actionError && <p role="alert" className="text-rose-700">{actionError}</p>}
       <div className="flex items-center gap-3 mb-6">
         <Calendar className="w-6 h-6 text-indigo-600" />

@@ -133,6 +133,7 @@ function LoginForm() {
                 <label className="block text-sm font-semibold mt-4">Authenticator or recovery code (if enabled)
                   <input autoComplete="one-time-code" value={otp} onChange={e => setOtp(e.target.value)} className="w-full border rounded-xl p-3 mt-1" />
                 </label>
+                <Link href="/verify-email" className="text-cyan-700 mr-4">Verify email</Link>
                 <Link href="/forgot-password" className="block text-sm text-cyan-700 mt-3">Forgot password?</Link>
                 <button type="submit" disabled={loading}
                   className="w-full mt-6 bg-gradient-to-r from-cyan-500 to-teal-500 hover:from-cyan-400 hover:to-teal-400 disabled:opacity-50 text-white py-4 rounded-2xl font-extrabold transition-all flex items-center justify-center gap-2 shadow-[0_8px_16px_-4px_rgba(8,145,178,0.4)] hover:shadow-[0_12px_20px_-4px_rgba(8,145,178,0.5)] hover:-translate-y-1">

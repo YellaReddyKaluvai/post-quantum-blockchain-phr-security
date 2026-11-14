@@ -11,6 +11,7 @@ import { useAuth } from "@/context/AuthContext";
 const navItems = [
   { label: "Dashboard", icon: LayoutDashboard, href: "/dashboard/admin" },
   { label: "Registrations", icon: UserPlus, href: "/dashboard/admin/registrations" },
+  { label: "Account Recovery", icon: Shield, href: "/dashboard/admin/account-recovery" },
   { label: "User Management", icon: Users, href: "/dashboard/admin/users" },
   { label: "Care Teams", icon: HeartHandshake, href: "/dashboard/admin/care-teams" },
   { label: "Security", icon: Shield, href: "/dashboard/admin/security" },

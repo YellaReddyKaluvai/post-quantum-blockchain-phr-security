@@ -932,3 +932,25 @@ CREATE TABLE IF NOT EXISTS FederatedValidationLabels (
     source VARCHAR(30) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Completion workflows: repeatable additions, existing users remain compatible.
+ALTER TABLE Users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ;
+ALTER TABLE Users ADD COLUMN IF NOT EXISTS email_verification_required BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE Users ADD COLUMN IF NOT EXISTS appointment_schedule JSONB;
+ALTER TABLE Appointments ADD COLUMN IF NOT EXISTS duration_minutes INTEGER NOT NULL DEFAULT 30 CHECK (duration_minutes BETWEEN 5 AND 240);
+CREATE TABLE IF NOT EXISTS EmailVerificationTokens (
+ token_hash TEXT PRIMARY KEY, user_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+ expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS RefreshTokens (
+ token_hash TEXT PRIMARY KEY, user_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+ session_jti TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL, consumed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS refresh_session_idx ON RefreshTokens(session_jti);
+CREATE TABLE IF NOT EXISTS MfaRecoveryRequests (
+ id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), user_id UUID NOT NULL REFERENCES Users(id),
+ requested_by UUID NOT NULL REFERENCES Users(id), approved_by UUID REFERENCES Users(id),
+ evidence_reference TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '24 hours',
+ token_hash TEXT UNIQUE, token_expires_at TIMESTAMPTZ, consumed_at TIMESTAMPTZ
+);

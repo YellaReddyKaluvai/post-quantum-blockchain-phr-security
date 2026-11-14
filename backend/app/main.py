@@ -209,8 +209,12 @@ def register(request: RegistrationRequest):
                 dob_enc, blood_group_enc, request.specialization
             ))
             new_id = cur.fetchone()[0]
+            cur.execute("UPDATE Users SET email_verification_required=%s WHERE id=%s",
+                        (os.getenv("REQUIRE_EMAIL_VERIFICATION", "false").lower() == "true", new_id))
             conn.commit()
             
+    if os.getenv("REQUIRE_EMAIL_VERIFICATION", "false").lower() == "true":
+        account_completion.request_email_verification(str(request.email))
     # Notify admin
     send_admin_notification({
         "full_name": request.full_name,
@@ -218,7 +222,8 @@ def register(request: RegistrationRequest):
         "role": request.role
     })
             
-    return {"message": "Registration submitted successfully. Pending admin approval."}
+    return {"message": "Registration submitted successfully. Pending admin approval." +
+            (" Verify your email using the link sent to your inbox before signing in." if os.getenv("REQUIRE_EMAIL_VERIFICATION", "false").lower() == "true" else "")}
 
 @app.post("/api/login", response_model=LoginResponse)
 def login(request: LoginRequest, response: Response, http_request: Request):
@@ -257,6 +262,8 @@ def login(request: LoginRequest, response: Response, http_request: Request):
                 conn.commit()
                 raise HTTPException(status_code=401, detail="Authenticator or recovery code required or incorrect.")
 
+            if user.get("email_verification_required") and not user.get("email_verified_at"):
+                raise HTTPException(403, "Verify your email before signing in. Request a new link from the login page.")
             # Create session token
             token_payload = {
                 "user_id": str(user["id"]),
@@ -274,6 +281,7 @@ def login(request: LoginRequest, response: Response, http_request: Request):
             """, (user["id"], hashlib.sha256(token.encode()).hexdigest(), user["role"], expires_at,
                   verify_session_token(token)["jti"]))
 
+            account_completion.issue_refresh(cur, user["id"], verify_session_token(token)["jti"], response)
             # Log successful login
             cur.execute("INSERT INTO AuthLogs (user_id, public_user_id, action) VALUES (%s, %s, %s)",
                         (user["id"], user["user_id"], "LOGIN_SUCCESS"))
@@ -314,6 +322,7 @@ def logout(response: Response, session: dict = Depends(get_current_session)):
             conn.commit()
 
     response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    response.delete_cookie(account_completion.REFRESH_COOKIE, path="/")
     return {"status": "success"}
 
 @app.get("/api/auth/me")
@@ -1557,13 +1566,13 @@ def create_patient_appointment(req: CreateAppointmentRequest, session: dict = De
             if not doctor:
                 raise HTTPException(status_code=404, detail="Selected doctor is not available.")
 
-            appointments.reserve_slot(cur, req.doctor_id, user_uuid, req.appointment_date, req.appointment_time)
+            duration = appointments.reserve_slot(cur, req.doctor_id, user_uuid, req.appointment_date, req.appointment_time)
 
             cur.execute("""
-                INSERT INTO Appointments (patient_id, doctor_id, department, appointment_date, appointment_time, status, notes)
-                VALUES (%s, %s, %s, %s, %s, 'Pending', %s)
+                INSERT INTO Appointments (patient_id, doctor_id, department, appointment_date, appointment_time, status, notes, duration_minutes)
+                VALUES (%s, %s, %s, %s, %s, 'Pending', %s, %s)
                 RETURNING id
-            """, (user_uuid, req.doctor_id, req.department, req.appointment_date, req.appointment_time, req.notes))
+            """, (user_uuid, req.doctor_id, req.department, req.appointment_date, req.appointment_time, req.notes, duration))
             appointment_id = cur.fetchone()["id"]
 
             cur.execute("""
@@ -6697,3 +6706,8 @@ from app.security import ColumnIntegrityError
 def column_integrity_error(request: Request, exc: ColumnIntegrityError):
     logger.error("Encrypted column integrity failure in %s", request.url.path)
     return JSONResponse(status_code=409, content={"detail": "Stored encrypted data failed integrity checks. Access was withheld."})
+
+from app import account_completion
+app.include_router(account_completion.router)
+
+app.include_router(appointments.doctor_router)
