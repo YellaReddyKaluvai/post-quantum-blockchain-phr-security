@@ -1,0 +1,13 @@
+round,node,model,accuracy,recall,f1,log_loss,local_accuracy,candidate_accuracy,candidate_log_loss
+0,hospital-b,local classifier (80 investigated incidents),0.667,0.333,0.5,1.462072,0.667,,
+0,hospital-a,local classifier (80 investigated incidents),0.667,0.333,0.5,1.814022,0.667,,
+0,hospital-c,local classifier (80 investigated incidents),0.667,0.333,0.5,2.394959,0.667,,
+1,hospital-b,local classifier (80 investigated incidents),0.667,0.333,0.5,1.462072,0.667,0.567,0.771521
+1,hospital-a,local classifier (80 investigated incidents),0.667,0.333,0.5,1.814022,0.667,0.575,0.7803
+1,hospital-c,local classifier (80 investigated incidents),0.667,0.333,0.5,2.394959,0.667,0.592,0.762992
+2,hospital-b,"federated classifier (local round 2, 3 institutions)",0.792,0.583,0.737,0.625638,0.667,0.792,0.625638
+2,hospital-a,local classifier (80 investigated incidents),0.667,0.333,0.5,1.814022,0.667,0.8,0.638336
+2,hospital-c,"federated classifier (hub round 2, 3 institutions)",0.783,0.567,0.723,0.622941,0.667,0.783,0.622941
+3,hospital-b,"federated classifier (local round 3, 3 institutions)",0.792,0.583,0.737,0.620877,0.667,0.792,0.620877
+3,hospital-a,local classifier (80 investigated incidents),0.667,0.333,0.5,1.814022,0.667,0.808,0.636269
+3,hospital-c,"federated classifier (hub round 3, 3 institutions)",0.792,0.583,0.737,0.61743,0.667,0.792,0.61743

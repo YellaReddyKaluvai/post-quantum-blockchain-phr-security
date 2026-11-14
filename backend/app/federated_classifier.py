@@ -167,8 +167,11 @@ def train(examples: list[tuple[dict, int]], init: Optional[Classifier] = None, *
 def evaluate(clf: Classifier, examples: list[tuple[dict, int]]) -> dict[str, Any]:
     """Accuracy, precision and recall at p ≥ 0.5 on labelled examples."""
     tp = fp = tn = fn = 0
+    loss = 0.0
     for features, y in examples:
-        hit = predict(clf, features) >= 0.5
+        p = min(1 - 1e-12, max(1e-12, predict(clf, features)))
+        loss -= y * math.log(p) + (1 - y) * math.log(1 - p)
+        hit = p >= 0.5
         if hit and y:
             tp += 1
         elif hit:
@@ -178,7 +181,9 @@ def evaluate(clf: Classifier, examples: list[tuple[dict, int]]) -> dict[str, Any
         else:
             tn += 1
     n = tp + fp + tn + fn
-    return {"examples": n,
+    return {"examples": n, "tp": tp, "fp": fp, "tn": tn, "fn": fn,
+            "f1": round(2 * tp / (2 * tp + fp + fn), 3) if 2 * tp + fp + fn else None,
+            "log_loss": round(loss / n, 6) if n else None,
             "accuracy": round((tp + tn) / n, 3) if n else None,
             "precision": round(tp / (tp + fp), 3) if tp + fp else None,
             "recall": round(tp / (tp + fn), 3) if tp + fn else None}
