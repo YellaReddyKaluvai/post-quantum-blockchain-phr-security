@@ -1,4 +1,5 @@
 "use client";
+import { downloadAttachment } from "@/lib/documentAttachment";
 
 import React, { useEffect, useState } from "react";
 import { motion } from "framer-motion";
@@ -52,6 +53,7 @@ export default function PatientDocumentsPage() {
     setOpening(doc.id);
     try {
       const { content } = await getPatientDocumentContent(doc.id);
+      if (downloadAttachment(content)) return;
       setViewing({ doc, content });
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Could not open that document.");

@@ -1,4 +1,5 @@
 "use client";
+import { downloadAttachment, attachmentFromFile } from "@/lib/documentAttachment";
 
 import React, { useEffect, useState } from "react";
 import { motion } from "framer-motion";
@@ -39,7 +40,7 @@ export default function ReportsAndDocuments() {
   const [loading, setLoading] = useState(true);
 
   const [uploadModal, setUploadModal] = useState(false);
-  const emptyDoc = { patient_id: "", document_name: "", document_type: "Other", content: "" };
+  const emptyDoc = { patient_id: "", document_name: "", document_type: "Other", content: "", attachment: undefined as {filename: string; data_base64: string} | undefined };
   const [docData, setDocData] = useState(emptyDoc);
   const [selectedPatient, setSelectedPatient] = useState<{ id: string; user_id: string; full_name: string; email: string; gender: string } | null>(null);
   const [documentError, setDocumentError] = useState("");
@@ -50,6 +51,7 @@ export default function ReportsAndDocuments() {
     setBusyId(doc.id);
     try {
       const result = await getDoctorDocumentContent(doc.id);
+      if (downloadAttachment(result.content)) return;
       setOpenedDocument({ title: doc.document_name || "Document", content: result.content });
     } catch (error) { setDocumentError(error instanceof Error ? error.message : "Unable to open document"); }
     finally { setBusyId(null); }
@@ -270,7 +272,8 @@ export default function ReportsAndDocuments() {
                 <label className="block">Type<select className="w-full border rounded-xl p-3" value={docData.document_type} onChange={e => setDocData({...docData, document_type: e.target.value})}>
                   {["Diagnosis Report", "Consultation Report", "Treatment Summary", "Medical Certificate", "Referral Letter", "Discharge Summary", "Other"].map(type => <option key={type}>{type}</option>)}
                 </select></label>
-                <label className="block">Document content<textarea required rows={7} maxLength={100000} className="w-full border rounded-xl p-3" value={docData.content} onChange={e => setDocData({...docData, content: e.target.value})} /></label>
+                <label className="block">PDF or DOCX attachment (up to 10 MiB)<input type="file" accept=".pdf,.docx" onChange={async e => {const file=e.target.files?.[0]; if (!file) {setDocData({...docData, attachment:undefined}); return;} try {const attachment=await attachmentFromFile(file); setDocData({...docData,content:"",attachment});} catch(error) {setDocumentError(error instanceof Error ? error.message : "Unable to read file");}}} /></label>
+                <label className="block">Document content<textarea required={!docData.attachment} disabled={!!docData.attachment} rows={7} maxLength={100000} className="w-full border rounded-xl p-3" value={docData.content} onChange={e => setDocData({...docData, content: e.target.value})} /></label>
                 {documentError && <p role="alert" className="text-rose-700">{documentError}</p>}
               </div>
               <button type="submit" disabled={uploading || !selectedPatient} className="w-full bg-indigo-600 text-white rounded-xl py-2 font-bold hover:bg-indigo-700">{uploading ? "Securing document…" : "Issue document"}</button>
