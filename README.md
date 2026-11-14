@@ -224,7 +224,7 @@ the party presenting it is the one the patient approved.
 Patient books (past dates and unknown doctors refused at the schema)
       → status Pending → APPOINTMENT_REQUEST notification to doctor
       → Doctor accepts / completes / cancels
-      → ✗ patient is not notified of the outcome (see below)
+      → Patient receives confirmation, completion, or cancellation notifications
 ```
 
 ### 7. Consent and break-glass
@@ -631,7 +631,7 @@ The federated IDS has two models, both learned locally and federated:
 |---|---|
 | Local training: baselines from this hospital's activity; the classifier from its investigated incidents, starting each round from the global weights | **Real** |
 | Robust FedAvg, for both models: each node weighted by its samples but capped at 5× the lower-median node, and with 3+ nodes an outlying update set aside (baselines per role, compared in log space). Who was capped or set aside is reported at the hub and never sent to peers | **Real** |
-| Privacy: no record, event, label or identifier is sent; classifier updates are clipped, and `FEDERATION_DP_EPSILON` adds Gaussian noise (the Gaussian mechanism per round — no accounting across rounds is claimed) | **Real** |
+| Privacy: no record, event, label or identifier is sent; classifier updates are clipped, and `FEDERATION_DP_EPSILON` adds Gaussian noise (the Gaussian mechanism per round — cumulative zCDP accounting and an optional total privacy budget are enforced) | **Real** |
 | Signed, replay-protected exchange: every submission carries a signed timestamp and the hub takes only a fresh one newer than the last from that peer; the hub signs the model it returns for the requesting peer and request, and a participant refuses one altered or replayed in transit | **Real** |
 | Peer control: registration, suspension (a suspended peer's earlier updates are left out of new rounds), secret rotation; submissions only to the open round; per-role counts bounded and consistent with the total; an update older than 7 days is not carried into a round | **Real** |
 | The hub's own adoption gate: each round is evaluated on the hub's data exactly as a participant evaluates a pulled one, and detection at the hub uses it only if it passes | **Real** |
@@ -701,7 +701,7 @@ activity on its first run. 15 tests.
 | Layer | Protocol / Algorithm | Purpose |
 | --- | --- | --- |
 | **Password Hashing** | **Argon2id** | Memory-hard, GPU-resistant credential protection |
-| **PII Encryption** | **AES-256-CBC** | Encrypts sensitive demographics (DOB, blood group) and the clinical text of diagnoses and prescriptions. Defends the database at rest, not a compromised application server — the app holds the key |
+| **PII Encryption** | **AES-256-GCM** | Versioned authenticated column encryption for sensitive demographics (DOB, blood group) and the clinical text of diagnoses and prescriptions. Defends the database at rest, not a compromised application server — the app holds the key |
 | **Key Encapsulation** | **ML-KEM (Kyber-768)** | Post-Quantum Key Encapsulation (FIPS 203) for payload AES keys |
 | **Digital Signatures** | **ML-DSA (Dilithium-3)** | Post-Quantum Digital Signature (FIPS 204) for document authenticity |
 | **Cloud Storage** | **AWS S3** | Resilient cloud storage bucket (`postquantumcryptography`) |
@@ -823,27 +823,9 @@ Deployed login URL: **[https://post-quantum-blockchain-phr-securit.vercel.app/lo
 
 **[Open the public login page](https://post-quantum-blockchain-phr-securit.vercel.app/login)**
 
-Sign in with the **User ID** and its matching **password** from the table below.
-These public demonstration accounts contain fictional records and are intended
-for exploring the project. Do not enter personal or real patient information.
-
-### Verified hosted demo accounts
-
-All four accounts below successfully authenticated and returned the expected
-role from `/api/auth/me` on **25 October 2026**. They are the existing fictional
-accounts used for the captioned project demonstration.
-
-| Role | Actual hosted User ID | Password | Demonstration |
-|---|---|---|---|
-| **Patient** | `PAT-2026-000002` | `GCLO_8iihOqYIos2_xstpbpBpvM` | Clinical record, recorded vitals and completed CBC report |
-| **Doctor** | `DOC-2026-000001` | `IN01-zz3o4PSjGn0qBjI7hxQv0w` | Patient access subject to consent; clinical review and lab request |
-| **Nurse** | `NUR-2026-000001` | `_uz9o7owGcJolXCOdfomS5erujc` | Care-team access subject to assignment and consent; nursing observations |
-| **Lab Technician** | `LAB-2026-000001` | `iKmbCk-D8O68oke3b3ZhvnRvDYY` | Completed report from the demonstration's CBC request |
-
-Each account has its own password shown above. Copy it exactly, including
-capitalization and symbols. The older local-dataset IDs and shared password do
-not apply to this deployment. The administrator account is managed privately
-and is not a public demo login.
+Request demonstration access from the project administrator. Hosted account passwords
+are not distributed in this repository. Demo records are fictional; do not enter
+personal or real patient information.
 
 The [verification record](docs/demo-results/2026-10-25-account-verification.json)
 contains the tested IDs and results without passwords, session tokens or keys.
@@ -860,3 +842,10 @@ administrator, and use the assigned User ID with the registration password.
 
 For accounts created by the optional local dataset generator, read the actual
 credentials from `backend/dataset_credentials.csv` in that installation.
+
+
+### Workflow and security completion
+
+See [completion and rollout guide](docs/12_Completion_and_Rollout.md) for document authoring,
+account recovery/MFA, appointment scheduling, key lifecycle, column migration and optional
+proof-enforced consent. These changes require schema migration before serving requests.

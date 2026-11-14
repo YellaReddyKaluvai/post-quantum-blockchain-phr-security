@@ -71,6 +71,8 @@ def main() -> int:
 
         print("\nRe-issuing keypairs...")
         with conn.cursor() as cur:
+            from app.pqc_keys import lock_keys
+            lock_keys(cur)
             for row in affected:
                 uid, public_id, name, role, kem_pub, dsa_pub = row
                 kem_public, kem_private = generate_mlkem_keypair()
@@ -78,7 +80,8 @@ def main() -> int:
                 cur.execute(
                     """
                     UPDATE Users
-                    SET mlkem_public_key = %s,
+                    SET pqc_key_version = pqc_key_version + 1,
+                        mlkem_public_key = %s,
                         mlkem_private_key_encrypted = %s,
                         mldsa_public_key = %s,
                         mldsa_private_key_encrypted = %s,

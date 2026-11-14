@@ -332,7 +332,11 @@ export default function PatientDetails() {
   }
 
   if (!patient) {
-    return <div className="text-center p-6 text-slate-500">Patient not found.</div>;
+    return <div className="max-w-3xl mx-auto space-y-4 p-6">
+      <p>Patient record unavailable. If this deployment requires a consent proof, verify it below and retry. Otherwise check your access request.</p>
+      <ConsentProofPanel patientId={params.id as string} />
+      <button className="px-4 py-2 bg-cyan-700 text-white rounded-xl" onClick={() => window.location.reload()}>Retry opening record</button>
+    </div>;
   }
 
   return (

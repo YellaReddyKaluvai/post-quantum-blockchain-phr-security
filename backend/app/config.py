@@ -28,6 +28,7 @@ class Settings(BaseModel):
     # STARTTLS before login. Leave on for any real mail server; only a local
     # test server (e.g. Mailpit in CI) that offers no TLS needs it off.
     SMTP_STARTTLS: bool = os.getenv("SMTP_STARTTLS", "true").lower() != "false"
+    PUBLIC_APP_URL: str = os.getenv("PUBLIC_APP_URL", "http://localhost:3000")
     ADMIN_EMAIL: str = os.getenv("ADMIN_EMAIL", "admin@hospital.com")
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")
     

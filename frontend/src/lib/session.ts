@@ -177,11 +177,11 @@ export async function register(data: Record<string, unknown>) {
   return response.json();
 }
 
-export async function login(user_id: string, password: string) {
+export async function login(user_id: string, password: string, otp?: string) {
   const response = await fetch(`${backendBaseUrl}/api/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json", [CSRF_HEADER]: CSRF_HEADER_VALUE },
-    body: JSON.stringify({ user_id, password }),
+    body: JSON.stringify({ user_id, password, otp: otp || undefined }),
     credentials: "include",            // so the browser keeps the HttpOnly session cookie
   });
   if (!response.ok) {
@@ -663,11 +663,11 @@ export async function getDoctorDocuments() {
   return response.json();
 }
 
-export async function createMedicalDocument(data: Record<string, unknown>) {
+export async function createMedicalDocument(data: { patient_id: string; document_name: string; document_type: string; content: string }) {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/documents`, {
     method: "POST", body: JSON.stringify(data)
   });
-  if (!response.ok) throw new Error("Failed to upload document");
+  if (!response.ok) throw new Error(extractErrorDetail(await response.json().catch(() => null), "Failed to issue document"));
   return response.json();
 }
 
@@ -1391,4 +1391,42 @@ export async function switchToLocalModels() {
 export async function getFederatedClassifierStatus(): Promise<FederatedClassifierStatus> {
   return jsonOrThrow(await fetchWithAuth(`${backendBaseUrl}/api/admin/federated/classifier`),
     "Failed to load the classifier status");
+}
+
+
+export async function accountRequest(path: string, body?: unknown, method?: string) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/auth/${path}`, {
+    method: method || (body === undefined ? "GET" : "POST"),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  if (!response.ok) throw new Error(extractErrorDetail(await response.json().catch(() => null), "Account action failed"));
+  return response.json();
+}
+
+export async function recoveryRequest(path: "forgot" | "reset", body: unknown) {
+  const response = await fetch(`${backendBaseUrl}/api/auth/password/${path}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error(extractErrorDetail(await response.json().catch(() => null), "Recovery failed"));
+  return response.json();
+}
+
+export async function getDoctorDocumentContent(id: string): Promise<{content: string; encrypted: boolean}> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/doctor/documents/${id}/content`);
+  if (!response.ok) throw new Error(extractErrorDetail(await response.json().catch(() => null), "Unable to open document"));
+  return response.json();
+}
+
+export async function patientAppointmentAction(id: string, action: "cancel" | "reschedule", body?: unknown) {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/appointments/${id}/${action}`, {
+    method: "POST", ...(body ? {body: JSON.stringify(body)} : {}),
+  });
+  if (!response.ok) throw new Error(extractErrorDetail(await response.json().catch(() => null), "Appointment action failed"));
+  return response.json();
+}
+
+export async function getAppointmentSlots(doctorId: string, day: string): Promise<{slots: string[]; timezone: string; duration_minutes: number}> {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/doctors/${doctorId}/slots?day=${encodeURIComponent(day)}`);
+  if (!response.ok) throw new Error("Unable to load appointment slots");
+  return response.json();
 }
