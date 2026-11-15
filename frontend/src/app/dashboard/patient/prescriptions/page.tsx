@@ -5,16 +5,16 @@ import { motion } from "framer-motion";
 import { Pill, User, Calendar, Clock, AlertCircle, Activity } from "lucide-react";
 import { getPatientPrescriptions } from "@/lib/session";
 
+// Mirrors the backend PrescriptionRecord exactly.
 interface PrescriptionItem {
   id: string;
   medicine_name?: string;
-  prescribing_doctor?: string;
   dosage?: string;
   frequency?: string;
   duration?: string;
   instructions?: string;
-  date?: string;
-  [key: string]: unknown;
+  prescribed_date?: string | null;
+  doctor_name?: string | null;
 }
 
 export default function PrescriptionsPage() {
@@ -91,7 +91,7 @@ export default function PrescriptionsPage() {
                 </div>
                 <div className="text-right sm:text-center">
                   <span className="block text-xs font-bold text-slate-400 uppercase tracking-wide">Prescribed on</span>
-                  <span className="text-sm font-semibold text-slate-700">{new Date(prescription.date || Date.now()).toLocaleDateString()}</span>
+                  <span className="text-sm font-semibold text-slate-700">{prescription.prescribed_date ? new Date(prescription.prescribed_date).toLocaleDateString() : "—"}</span>
                 </div>
               </div>
 
@@ -99,7 +99,7 @@ export default function PrescriptionsPage() {
                 <div>
                   <h3 className="text-xl font-bold text-slate-800">{prescription.medicine_name}</h3>
                   <div className="flex items-center gap-2 mt-1 text-sm text-slate-500 font-medium">
-                    <User className="w-4 h-4" /> Dr. {prescription.prescribing_doctor}
+                    <User className="w-4 h-4" /> Dr. {prescription.doctor_name || "—"}
                   </div>
                 </div>
 

@@ -4,22 +4,7 @@ import React, { useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
-import {
-  LayoutDashboard,
-  User,
-  FileHeart,
-  TestTubes,
-  Pill,
-  Stethoscope,
-  Calendar,
-  Bell,
-  ShieldCheck,
-  LogOut,
-  Menu,
-  X,
-  ChevronLeft,
-  Heart
-} from "lucide-react";
+import { Activity, Bell, Calendar, ChevronLeft, ClipboardCheck, FileHeart, FileText, Film, Heart, LayoutDashboard, LogOut, Menu, Pill, ShieldCheck, ShieldOff, ShieldQuestion, Stethoscope, TestTubes, User, X } from "lucide-react";
 import { logout } from "@/lib/session";
 import { useAuth } from "@/context/AuthContext";
 
@@ -28,10 +13,16 @@ const navItems = [
   { label: "My Profile", icon: User, href: "/dashboard/patient/profile" },
   { label: "Medical Records", icon: FileHeart, href: "/dashboard/patient/medical-records" },
   { label: "Lab Reports", icon: TestTubes, href: "/dashboard/patient/lab-reports" },
+  { label: "My Documents", icon: FileText, href: "/dashboard/patient/documents" },
+  { label: "My Vitals", icon: Activity, href: "/dashboard/patient/vitals" },
   { label: "Prescriptions", icon: Pill, href: "/dashboard/patient/prescriptions" },
+  { label: "Medication History", icon: ClipboardCheck, href: "/dashboard/patient/medication-history" },
+  { label: "My Scans", icon: Film, href: "/dashboard/patient/scans" },
   { label: "Consultations", icon: Stethoscope, href: "/dashboard/patient/consultations" },
   { label: "Appointments", icon: Calendar, href: "/dashboard/patient/appointments" },
   { label: "Notifications", icon: Bell, href: "/dashboard/patient/notifications" },
+  { label: "Access Requests", icon: ShieldQuestion, href: "/dashboard/patient/access-requests" },
+  { label: "Record Access", icon: ShieldOff, href: "/dashboard/patient/consent" },
   { label: "Security Center", icon: ShieldCheck, href: "/dashboard/patient/security" },
 ];
 
@@ -57,7 +48,8 @@ export default function PatientLayout({ children }: { children: React.ReactNode 
     <div className="flex flex-col h-full">
       {/* Logo */}
       <div className="px-5 py-6 border-b border-slate-700/50">
-        <Link href="/dashboard/patient" className="flex items-center gap-3">
+        <Link href="/dashboard/account" className="block px-4 py-2 text-sm font-semibold text-cyan-300">Account security</Link>
+              <Link href="/dashboard/patient" className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-400 to-teal-500 flex items-center justify-center shadow-lg shadow-cyan-900/30 flex-shrink-0">
             <Heart className="w-5 h-5 text-white" />
           </div>

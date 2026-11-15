@@ -1,4 +1,4 @@
-FROM public.ecr.aws/docker/library/node:20-alpine AS base
+FROM node:20-alpine AS base
 
 # Install dependencies only when needed
 FROM base AS deps
@@ -18,6 +18,16 @@ COPY . .
 
 # Next.js telemetry is disabled
 ENV NEXT_TELEMETRY_DISABLED=1
+
+# NEXT_PUBLIC_* is compiled into the browser bundle, so it has to be set here
+# rather than at run time. Empty is the right default: the browser then calls
+# /api on whatever host served the page, and next.config.ts proxies that to
+# BACKEND_ORIGIN. An absolute URL baked in here would point every visitor at
+# one machine — "localhost" would send them to their own.
+ARG NEXT_PUBLIC_BACKEND_URL=""
+ENV NEXT_PUBLIC_BACKEND_URL=$NEXT_PUBLIC_BACKEND_URL
+ARG BACKEND_ORIGIN=http://backend:8000
+ENV BACKEND_ORIGIN=$BACKEND_ORIGIN
 
 RUN npm run build
 

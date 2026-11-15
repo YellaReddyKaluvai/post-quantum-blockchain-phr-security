@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Bell, Check, Trash2, Info, AlertTriangle, CheckCircle, Clock } from "lucide-react";
+import { Bell, Check, Trash2, Info, AlertTriangle, CheckCircle, Clock, ShieldAlert } from "lucide-react";
 import { getPatientNotifications, markNotificationRead, clearNotifications } from "@/lib/session";
 
 interface PatientNotifItem {
@@ -11,12 +11,8 @@ interface PatientNotifItem {
   type?: string;
   title?: string;
   body?: string;
-  message?: string;
-  is_read?: boolean;
-  read?: boolean;
   read_at?: string;
   created_at?: string;
-  [key: string]: unknown;
 }
 
 export default function NotificationsPage() {
@@ -41,7 +37,7 @@ export default function NotificationsPage() {
   const handleMarkRead = async (id: string) => {
     try {
       await markNotificationRead(id);
-      setNotifications(notifications.map(n => n.id === id ? { ...n, is_read: true } : n));
+      setNotifications(notifications.map(n => n.id === id ? { ...n, read_at: new Date().toISOString() } : n));
     } catch (error) {
       console.error("Failed to mark notification read:", error);
     }
@@ -56,13 +52,17 @@ export default function NotificationsPage() {
     }
   };
 
+  // The backend sends specific types (REPORT_READY, EMERGENCY_ACCESS, SECURITY_…);
+  // security events about the patient's own record must not look like routine news.
   const getIcon = (type: string) => {
-    switch (type?.toLowerCase()) {
-      case "alert": return <AlertTriangle className="w-5 h-5 text-amber-500" />;
-      case "success": return <CheckCircle className="w-5 h-5 text-emerald-500" />;
-      case "reminder": return <Clock className="w-5 h-5 text-blue-500" />;
-      default: return <Info className="w-5 h-5 text-cyan-500" />;
+    const t = (type || "").toUpperCase();
+    if (t.startsWith("SECURITY_")) return <ShieldAlert className="w-5 h-5 text-rose-500" />;
+    if (t === "EMERGENCY_ACCESS" || t === "ALERT") return <AlertTriangle className="w-5 h-5 text-amber-500" />;
+    if (["REPORT_READY", "REPORT_REVIEWED", "ACCESS_GRANTED", "SUCCESS"].includes(t)) {
+      return <CheckCircle className="w-5 h-5 text-emerald-500" />;
     }
+    if (t.startsWith("APPOINTMENT") || t === "REMINDER") return <Clock className="w-5 h-5 text-blue-500" />;
+    return <Info className="w-5 h-5 text-cyan-500" />;
   };
 
   if (loading) {
@@ -115,9 +115,9 @@ export default function NotificationsPage() {
                 exit={{ opacity: 0, scale: 0.95 }}
                 transition={{ delay: index * 0.05 }}
                 key={notification.id}
-                className={`bg-white rounded-2xl shadow-sm border relative overflow-hidden transition-colors ${!notification.is_read ? "border-cyan-100 bg-cyan-50/10" : "border-slate-100"}`}
+                className={`bg-white rounded-2xl shadow-sm border relative overflow-hidden transition-colors ${!notification.read_at ? "border-cyan-100 bg-cyan-50/10" : "border-slate-100"}`}
               >
-                {!notification.is_read && (
+                {!notification.read_at && (
                   <div className="absolute top-0 left-0 w-1 h-full bg-cyan-400"></div>
                 )}
                 <div className="p-4 sm:p-5 flex gap-4">
@@ -129,19 +129,19 @@ export default function NotificationsPage() {
                   </div>
                   <div className="flex-1">
                     <div className="flex justify-between items-start gap-4">
-                      <h3 className={`text-base font-bold ${!notification.is_read ? "text-slate-900" : "text-slate-700"}`}>
+                      <h3 className={`text-base font-bold ${!notification.read_at ? "text-slate-900" : "text-slate-700"}`}>
                         {notification.title}
                       </h3>
                       <span className="text-xs font-medium text-slate-400 whitespace-nowrap">
-                        {new Date((notification.created_at || notification.timestamp || Date.now()) as string | number | Date).toLocaleDateString()}
+                        {notification.created_at ? new Date(notification.created_at).toLocaleDateString() : ""}
 
                       </span>
                     </div>
-                    <p className={`text-sm mt-1 mb-3 ${!notification.is_read ? "text-slate-700 font-medium" : "text-slate-500"}`}>
+                    <p className={`text-sm mt-1 mb-3 ${!notification.read_at ? "text-slate-700 font-medium" : "text-slate-500"}`}>
                       {notification.body}
                     </p>
                     
-                    {!notification.is_read && (
+                    {!notification.read_at && (
                       <button
                         onClick={() => handleMarkRead(notification.id)}
                         className="flex items-center gap-1.5 text-xs font-bold text-cyan-600 hover:text-cyan-700 transition-colors"

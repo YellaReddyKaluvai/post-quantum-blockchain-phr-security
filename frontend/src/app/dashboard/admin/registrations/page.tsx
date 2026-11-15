@@ -155,8 +155,9 @@ export default function RegistrationsPage() {
         const data = await getAllRegistrations();
         setRegistrations(Array.isArray(data) ? data : data.items || []);
       }
-    } catch {
+    } catch (err: unknown) {
       setRegistrations([]);
+      setToast({ message: err instanceof Error ? `Could not load registrations: ${err.message}` : "Could not load registrations.", type: "error" });
     } finally {
       setLoading(false);
     }
@@ -183,7 +184,7 @@ export default function RegistrationsPage() {
 
   /* ---- Actions ---- */
   const confirmApprove = async () => {
-    if (!approveTarget) return;
+    if (!approveTarget || actionLoading) return;
     try {
       setActionLoading(approveTarget.id);
       const res = await approveRegistration(approveTarget.id);
@@ -201,7 +202,7 @@ export default function RegistrationsPage() {
   };
 
   const confirmReject = async () => {
-    if (!rejectTarget) return;
+    if (!rejectTarget || actionLoading) return;
     try {
       setActionLoading(rejectTarget.id);
       const res = await rejectRegistration(rejectTarget.id, rejectReason || undefined);

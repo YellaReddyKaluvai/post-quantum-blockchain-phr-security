@@ -2,29 +2,72 @@
 
 import React, { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { TestTubes, Calendar, User, Eye, X, Activity } from "lucide-react";
-import { getPatientLabReports } from "@/lib/session";
+import { TestTubes, Calendar, User, Eye, X, Activity, Download, Lock, ShieldCheck, ShieldAlert } from "lucide-react";
+import { getPatientLabReports, downloadPatientLabReport, verifyPatientLabReport } from "@/lib/session";
+import { saveBlobAsFile, openBlobInNewTab } from "@/lib/utils";
 
+// Mirrors the backend LabReportItem exactly. No index signature: it was
+// letting fields the API never returns (`name`, `uploaded_by`) typecheck,
+// which is how the report title rendered blank without anyone noticing.
 interface LabReportItem {
   id: string;
-  name?: string;
   report_name?: string;
-  type?: string;
   report_type?: string;
+  report_id_public?: string;
   status?: string;
-  date?: string;
   upload_date?: string;
-  uploaded_by?: string;
   uploaded_by_name?: string;
   findings?: string;
   normal_range?: string;
-  [key: string]: unknown;
 }
 
 export default function LabReportsPage() {
   const [loading, setLoading] = useState(true);
   const [reports, setReports] = useState<LabReportItem[]>([]);
   const [selectedReport, setSelectedReport] = useState<LabReportItem | null>(null);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<{ valid: boolean; detail: string } | null>(null);
+
+  const reportFilename = (report: LabReportItem | null) =>
+    `${(report?.report_id_public as string) || "lab-report"}.pdf`;
+
+  const handleView = async (reportId: string, filename: string) => {
+    try {
+      setIsDownloading(true);
+      openBlobInNewTab(await downloadPatientLabReport(reportId), filename);
+    } catch (error) {
+      console.error("View failed:", error);
+      alert(error instanceof Error ? error.message : "Failed to securely decrypt the report.");
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
+  const handleDownload = async (reportId: string, filename: string) => {
+    try {
+      setIsDownloading(true);
+      saveBlobAsFile(await downloadPatientLabReport(reportId), filename);
+    } catch (error) {
+      console.error("Download failed:", error);
+      alert(error instanceof Error ? error.message : "Failed to securely download and decrypt the report.");
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
+  const handleVerify = async (reportId: string) => {
+    try {
+      setIsVerifying(true);
+      const res = await verifyPatientLabReport(reportId);
+      setVerifyResult({ valid: res.hash_matches && res.signature_valid, detail: res.detail });
+    } catch (error) {
+      console.error("Verify failed:", error);
+      setVerifyResult({ valid: false, detail: "Verification request failed." });
+    } finally {
+      setIsVerifying(false);
+    }
+  };
 
 
   useEffect(() => {
@@ -108,16 +151,20 @@ export default function LabReportsPage() {
             >
               <div className="p-5 border-b border-slate-100 flex-1">
                 <div className="flex justify-between items-start mb-4">
-                  <span className={`px-2.5 py-1 rounded-md text-xs font-bold ${getTypeColor(report.report_type || report.type || "Other")}`}>
-                    {report.report_type || report.type || "Other"}
+                  <span className={`px-2.5 py-1 rounded-md text-xs font-bold ${getTypeColor(report.report_type || "Other")}`}>
+                    {report.report_type || "Other"}
                   </span>
                   <span className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${getStatusColor(report.status || "Pending")}`}>
 
                     {report.status}
                   </span>
                 </div>
-                <h3 className="text-lg font-bold text-slate-800 line-clamp-2 mb-2">{report.name}</h3>
+                <h3 className="text-lg font-bold text-slate-800 line-clamp-2 mb-2">{report.report_name || "Untitled report"}</h3>
                 
+                {report.report_id_public && (
+                  <p className="text-[11px] font-mono text-slate-400 -mt-1 mb-2">{report.report_id_public}</p>
+                )}
+
                 <div className="space-y-2 mt-4 text-sm text-slate-500">
                   <div className="flex items-center gap-2">
                     <Calendar className="w-4 h-4 text-slate-400" />
@@ -126,13 +173,13 @@ export default function LabReportsPage() {
                   </div>
                   <div className="flex items-center gap-2">
                     <User className="w-4 h-4 text-slate-400" />
-                    <span>Uploaded by: {report.uploaded_by}</span>
+                    <span>Reported by: {report.uploaded_by_name || "—"}</span>
                   </div>
                 </div>
               </div>
               <div className="bg-slate-50 p-4">
                 <button
-                  onClick={() => setSelectedReport(report)}
+                  onClick={() => { setSelectedReport(report); setVerifyResult(null); }}
                   className="w-full flex items-center justify-center gap-2 py-2 bg-white border border-slate-200 rounded-xl text-sm font-semibold text-slate-700 hover:bg-slate-100 hover:text-slate-900 transition-colors shadow-sm"
                 >
                   <Eye className="w-4 h-4" /> View Details
@@ -166,8 +213,8 @@ export default function LabReportsPage() {
                     <Activity className="w-6 h-6" />
                   </div>
                   <div>
-                    <h2 className="text-xl font-bold text-slate-800">{selectedReport.name}</h2>
-                    <p className="text-sm text-slate-500">{new Date(selectedReport.upload_date || Date.now()).toLocaleDateString()} • {selectedReport.report_type || selectedReport.type}</p>
+                    <h2 className="text-xl font-bold text-slate-800">{selectedReport.report_name || "Untitled report"}</h2>
+                    <p className="text-sm text-slate-500">{new Date(selectedReport.upload_date || Date.now()).toLocaleDateString()} • {selectedReport.report_type || "Other"}</p>
 
                   </div>
                 </div>
@@ -204,6 +251,52 @@ export default function LabReportsPage() {
                     <p className="text-slate-500">Detailed findings are not available for this report.</p>
                   </div>
                 )}
+                
+                {/* Secure Download & Verification */}
+                <div className="mt-8 space-y-3">
+                  {verifyResult && (
+                    <div className={`flex items-start gap-2 p-3 rounded-xl text-sm ${verifyResult.valid ? "bg-emerald-50 text-emerald-700 border border-emerald-100" : "bg-rose-50 text-rose-700 border border-rose-100"}`}>
+                      {verifyResult.valid ? <ShieldCheck className="w-4 h-4 flex-shrink-0 mt-0.5" /> : <ShieldAlert className="w-4 h-4 flex-shrink-0 mt-0.5" />}
+                      {verifyResult.detail}
+                    </div>
+                  )}
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => handleView(selectedReport.id, reportFilename(selectedReport))}
+                      disabled={isDownloading}
+                      className="flex-1 flex items-center justify-center gap-2 py-4 bg-slate-900 text-white rounded-2xl font-bold hover:bg-slate-800 transition-colors disabled:bg-slate-300 disabled:cursor-not-allowed"
+                    >
+                      {isDownloading ? (
+                        <>
+                          <Lock className="w-5 h-5 animate-pulse text-emerald-400" />
+                          Decrypting...
+                        </>
+                      ) : (
+                        <>
+                          <Eye className="w-5 h-5" />
+                          View Report
+                        </>
+                      )}
+                    </button>
+                    <button
+                      onClick={() => handleDownload(selectedReport.id, reportFilename(selectedReport))}
+                      disabled={isDownloading}
+                      className="flex items-center justify-center gap-2 px-5 py-4 bg-emerald-50 text-emerald-700 rounded-2xl font-bold hover:bg-emerald-100 transition-colors disabled:opacity-50"
+                    >
+                      <Download className="w-5 h-5" /> Download PDF
+                    </button>
+                    <button
+                      onClick={() => handleVerify(selectedReport.id)}
+                      disabled={isVerifying}
+                      className="flex items-center justify-center gap-2 px-5 py-4 bg-indigo-50 text-indigo-700 rounded-2xl font-bold hover:bg-indigo-100 transition-colors disabled:opacity-50"
+                    >
+                      <ShieldCheck className="w-5 h-5" /> Verify
+                    </button>
+                  </div>
+                  <p className="text-center text-xs text-slate-500 flex items-center justify-center gap-1">
+                    <Lock className="w-3 h-3" /> AES-256-GCM encrypted, ML-KEM key protection, ML-DSA signed
+                  </p>
+                </div>
               </div>
             </motion.div>
           </>

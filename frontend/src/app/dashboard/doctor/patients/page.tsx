@@ -6,16 +6,15 @@ import { Users, User, ArrowRight } from "lucide-react";
 import Link from "next/link";
 import { getDoctorPatients } from "@/lib/session";
 
+// Mirrors the backend DoctorPatientListItem exactly.
 interface PatientListItem {
   id: string;
-  full_name?: string;
-  name?: string;
-  email?: string;
   user_id?: string;
+  full_name?: string;
   gender?: string;
-  blood_group?: string;
-  last_visit?: string;
-  [key: string]: unknown;
+  blood_group?: string | null;
+  last_visit_date?: string | null;
+  status?: string;
 }
 
 
@@ -75,8 +74,8 @@ export default function MyPatients() {
                   <User className="w-6 h-6 text-cyan-600" />
                 </div>
                 <div>
-                  <h3 className="font-bold text-slate-800">{patient.name || "Unknown Patient"}</h3>
-                  <p className="text-xs text-slate-500">{patient.email || "No email"}</p>
+                  <h3 className="font-bold text-slate-800">{patient.full_name || "Unknown Patient"}</h3>
+                  <p className="text-xs text-slate-500">{patient.user_id || "—"}</p>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-4 mb-6">
@@ -91,7 +90,7 @@ export default function MyPatients() {
                 <div className="col-span-2">
                   <p className="text-xs text-slate-400">Last Visit</p>
                   <p className="text-sm font-medium text-slate-700">
-                    {patient.last_visit ? new Date(patient.last_visit).toLocaleDateString() : "Never"}
+                    {patient.last_visit_date ? new Date(patient.last_visit_date).toLocaleDateString() : "Never"}
                   </p>
                 </div>
               </div>

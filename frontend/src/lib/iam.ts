@@ -21,12 +21,20 @@ export const roleModules: Record<AppRole, string[]> = {
   Administrator: ["User Management", "Role Assignment", "Registration Approvals", "Audit Logs"],
 };
 
+// These MUST mirror backend/app/rbac.py — the backend is the authoritative
+// enforcer, and divergent strings here would gate the UI on permissions the
+// server has never heard of. Used only as a fallback when a session is
+// restored from a cookie; a fresh login uses the permissions the API returns.
 export const rolePermissions: Record<AppRole, string[]> = {
-  Patient: ["records:view:own", "records:upload:own", "consent:grant", "consent:revoke", "history:view:own", "emergency:view:own", "notifications:receive"],
-  Doctor: ["patients:search", "records:view:approved", "records:create:diagnosis", "records:upload:reports", "access:request", "access:emergency", "history:view:own", "notifications:receive"],
-  Nurse: ["patients:search", "records:view:approved", "records:upload:vitals", "notifications:receive"],
-  "Lab Technician": ["patients:search:assigned", "records:upload:lab", "reports:view:own", "reports:update:status", "notifications:receive"],
-  Administrator: ["users:create", "users:delete", "roles:assign", "hospitals:manage", "settings:configure", "audit:view", "registrations:manage", "users:suspend"],
+  Patient: ["records:read:own", "records:upload:own", "consent:grant", "consent:revoke", "session:logout"],
+  Doctor: ["records:read:approved", "records:upload:diagnosis", "consent:request", "emergency:request", "session:logout"],
+  Nurse: ["patients:view:assigned", "records:upload:vitals", "session:logout"],
+  "Lab Technician": ["records:upload:lab", "records:read:assigned", "session:logout"],
+  Administrator: [
+    "users:manage", "roles:assign", "permissions:manage", "audit:read",
+    "system:configure", "keys:rotate", "registrations:manage", "security:view",
+    "users:disable", "users:enable", "session:logout",
+  ],
 };
 
 export function normalizeRole(role: string | null | undefined): AppRole | null {
