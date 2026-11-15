@@ -328,6 +328,10 @@ See [Deployment](DEPLOY.md) for the hosted configuration.
 | Federated learning between hospitals | ✅ | Per-role baselines **and a threat classifier trained on investigated incidents**, federated with robust FedAvg, clipped updates and optional differential privacy; each global model evaluated locally before adoption, with rollback. **Verified live in CI across three hospitals** (separate servers and databases), over two training rounds |
 
 Every row above is ✅: nothing in this table is still waiting to be tried on a running system.
+These checks establish the implemented application and its test environments;
+they do not establish that optional S3, IPFS, blockchain, and three-laptop
+federation are configured on the current Render/Vercel deployment. Verify the
+live Admin → Security status cards and hosted federation rounds separately.
 
 ---
 
@@ -457,6 +461,13 @@ previous generator-owned accounts and should be used only when that reset is int
 Content is genuinely published to a running IPFS node — not addressed and left
 on disk, which is what this module used to do while a gateway link in the UI
 implied otherwise.
+
+For a hosted backend without a Kubo daemon, `IPFS_PINATA_JWT` plus
+`IPFS_PINATA_GATEWAY_URL` uploads the same ciphertext directly to Pinata's
+public IPFS network. The provider returns the CID and the gateway provides the
+recovery path. Upload names are derived from the ciphertext hash, so report
+titles and patient identifiers are not sent as provider metadata. This mode
+still requires a real Pinata account and live verification on the deployment.
 
 ```
 ciphertext ──► ipfs add --pin ──► node computes CID ──► CID recorded

@@ -131,15 +131,38 @@ empty or regenerate keys for a populated database.
 | Post-quantum libraries and PostgreSQL | Enabled |
 | Real blockchain anchoring | Disabled; local-simulated anchors are not on-chain proof |
 | IPFS publishing | Not configured; a CID alone is not a pinned copy |
-| S3 secondary copies | Not configured; database copy remains authoritative |
+| S3 secondary copies | Check the live Admin → Security → Cloud Storage card; bucket contents alone do not prove this API is connected. The database copy remains authoritative |
 | SMTP delivery | Not configured; do not rely on approval emails |
 
 Real blockchain operation needs a reachable EVM RPC, chain ID, deployed
 `PHR_Security` contract and funded private signer. The backend-only image does
-not include `contracts/out/PHR.sol/PHR_Security.json`; supply the artifact and
-contract configuration before enabling the integration. Never use the public
-Anvil development key on a real network. See the blockchain section of the
+include a source-checked `PHR_Security` ABI and bytecode bundle, so a contract
+can be deployed from the image or from a trusted workstation without changing
+the Docker build context. Before enabling hosted anchoring, provision a
+dedicated Sepolia signer, fund it with testnet ETH, deploy the contract using
+`backend/deploy_contract.py`, and set the stable RPC URL, chain ID, contract
+address and signer key privately on the Render API. Check Admin → Security →
+Blockchain Anchoring after redeployment, then use its late-anchoring action for
+older local anchors. Never use the public Anvil development key on a real
+network. See the blockchain section of the
 [README](README.md) and the [architecture guide](docs/1_Architecture_Proof.md).
+
+For hosted IPFS, create a Pinata account and an API key with file-upload
+permission, then set `IPFS_PINATA_JWT` and the account's HTTPS
+`IPFS_PINATA_GATEWAY_URL` privately on the Render API. Leave `IPFS_API_URL`
+empty in this mode. New reports upload ciphertext directly to public IPFS;
+the gateway is used to recover ciphertext if the database and S3 copies are
+unavailable. Verify Admin → Security → IPFS shows Pinata connected and retrieve
+a newly created report through the gateway. A CID generated before a provider
+was connected is only a local fingerprint; it is not an already-pinned object.
+The local Kubo mode remains available with `IPFS_API_URL`; do not expose Kubo's
+unauthenticated API directly to the public internet.
+
+The existing Vercel/Render deployment does not inherit changes made to the
+separate `render.yaml` Blueprint automatically. Set hosted integration values
+on the existing `quantumcare-api` service, then verify them through the live
+administrator status cards. Hosted federation peers and rounds live in Render
+PostgreSQL; rounds run on laptop B's Docker database do not appear there.
 
 Free Render services can sleep when idle, delaying the next request. The
 current free PostgreSQL instance expires **23 November 2026**; arrange an

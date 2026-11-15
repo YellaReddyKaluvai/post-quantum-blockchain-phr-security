@@ -47,6 +47,7 @@ interface ReplicaTarget {
 interface IpfsStatus {
   configured: boolean;
   connected: boolean;
+  provider?: "kubo" | "pinata" | null;
   peer_id?: string | null;
   pinned_objects?: number | null;
   error?: string | null;
@@ -394,7 +395,8 @@ function IpfsCard({ ipfs, onRefresh }: { ipfs: IpfsStatus | null; onRefresh: () 
           ipfs?.connected ? "bg-emerald-50 text-emerald-700"
             : ipfs?.configured ? "bg-rose-50 text-rose-700" : "bg-slate-100 text-slate-600"
         }`}>
-          {ipfs?.connected ? "NODE CONNECTED" : ipfs?.configured ? "NODE UNREACHABLE" : "NOT CONFIGURED"}
+          {ipfs?.connected ? (ipfs.provider === "pinata" ? "PINATA CONNECTED" : "NODE CONNECTED")
+            : ipfs?.configured ? "IPFS UNREACHABLE" : "NOT CONFIGURED"}
         </span>
       </div>
 
@@ -403,7 +405,7 @@ function IpfsCard({ ipfs, onRefresh }: { ipfs: IpfsStatus | null; onRefresh: () 
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 text-sm">
           <div className="space-y-2.5">
-            <p className="flex justify-between"><span className="text-slate-500">Objects pinned on this node</span>
+            <p className="flex justify-between"><span className="text-slate-500">{ipfs.provider === "pinata" ? "Provider pin count" : "Objects pinned on this node"}</span>
               <span className="font-semibold text-slate-800 tabular-nums">{ipfs.pinned_objects ?? "—"}</span></p>
             <p className="flex justify-between"><span className="text-slate-500">Lab reports with a CID</span>
               <span className="font-semibold text-slate-800 tabular-nums">{ipfs.reports_with_cid}/{ipfs.reports_total}</span></p>
@@ -417,10 +419,14 @@ function IpfsCard({ ipfs, onRefresh }: { ipfs: IpfsStatus | null; onRefresh: () 
           <div>
             {!rep ? (
               <p className="text-xs text-slate-500 bg-slate-50 border border-slate-100 rounded-xl p-3">
-                No replication targets are configured, so each document exists on this node only. Set
-                {" "}<span className="font-mono">IPFS_REPLICA_NODES</span> (other IPFS nodes) or
-                {" "}<span className="font-mono">IPFS_PINNING_SERVICES</span> (pinning services) in the backend
-                environment to keep copies elsewhere.
+                {ipfs.provider === "pinata" ? (
+                  "New encrypted documents are pinned by Pinata. Earlier CIDs need publication before they can be recovered from IPFS."
+                ) : (
+                  <>No replication targets are configured, so each document exists on this node only. Set{" "}
+                    <span className="font-mono">IPFS_REPLICA_NODES</span> (other IPFS nodes) or{" "}
+                    <span className="font-mono">IPFS_PINNING_SERVICES</span> (pinning services) in the backend
+                    environment to keep copies elsewhere.</>
+                )}
               </p>
             ) : (
               <div className="space-y-3">

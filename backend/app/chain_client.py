@@ -26,6 +26,10 @@ _ARTIFACT_PATH = (
     Path(__file__).resolve().parent.parent.parent
     / "contracts" / "out" / "PHR.sol" / "PHR_Security.json"
 )
+# The Render backend image uses ./backend as its Docker build context, so it
+# cannot contain contracts/out from the repository root. Keep a compiled,
+# source-checked copy in the backend image for hosted chain connections.
+_BUNDLED_ARTIFACT_PATH = Path(__file__).resolve().parent / "phr_contract_artifact.json"
 
 _lock = threading.Lock()
 _client: Optional["ChainClient"] = None
@@ -34,12 +38,14 @@ _init_attempted = False
 
 def load_contract_artifact() -> dict[str, Any]:
     """Read the compiled ABI + bytecode. Raises if the contract isn't built."""
-    if not _ARTIFACT_PATH.exists():
+    path = _ARTIFACT_PATH if _ARTIFACT_PATH.exists() else _BUNDLED_ARTIFACT_PATH
+    if not path.exists():
         raise FileNotFoundError(
-            f"Contract artifact not found at {_ARTIFACT_PATH}. "
-            "Run `forge build` from the repository root first."
+            f"Contract artifact not found at {_ARTIFACT_PATH} or "
+            f"{_BUNDLED_ARTIFACT_PATH}. Run `forge build` from the repository "
+            "root or restore the bundled artifact."
         )
-    with open(_ARTIFACT_PATH) as fh:
+    with open(path) as fh:
         return json.load(fh)
 
 
