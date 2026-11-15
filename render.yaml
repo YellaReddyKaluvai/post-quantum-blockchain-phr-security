@@ -49,6 +49,10 @@ services:
         value: "false"
       - key: IPFS_API_URL
         value: ""
+      - key: IPFS_PINATA_JWT
+        sync: false
+      - key: IPFS_PINATA_GATEWAY_URL
+        sync: false
       - key: AWS_ACCESS_KEY_ID
         sync: false          # set in the dashboard if S3 is wanted
       - key: AWS_SECRET_ACCESS_KEY

@@ -9,6 +9,8 @@ Every test runs whether or not a node is reachable — the suite must not depend
 on a daemon being up.
 """
 
+import io
+import json
 import os
 import pytest
 
@@ -46,6 +48,7 @@ def test_cid_needs_no_node():
 def test_pin_returns_none_when_no_node_is_configured(monkeypatch):
     """A hospital that does not run IPFS must still be able to file reports."""
     monkeypatch.delenv("IPFS_API_URL", raising=False)
+    monkeypatch.delenv("IPFS_PINATA_JWT", raising=False)
     assert pin_to_ipfs(b"ciphertext", "x.enc") is None
 
 
@@ -53,12 +56,14 @@ def test_fetch_raises_when_no_node_is_configured(monkeypatch):
     """Retrieval is different: asking for content that cannot be had is an
     error, not a quiet None that the caller would treat as empty data."""
     monkeypatch.delenv("IPFS_API_URL", raising=False)
+    monkeypatch.delenv("IPFS_PINATA_JWT", raising=False)
     with pytest.raises(IPFSError):
         fetch_from_ipfs("QmWhatever")
 
 
 def test_status_distinguishes_unconfigured_from_unreachable(monkeypatch):
     monkeypatch.delenv("IPFS_API_URL", raising=False)
+    monkeypatch.delenv("IPFS_PINATA_JWT", raising=False)
     s = ipfs_status()
     assert s["configured"] is False and s["connected"] is False
     assert "No IPFS node configured" in s["error"]
@@ -75,6 +80,56 @@ def test_unreachable_node_raises_rather_than_pretending(monkeypatch):
     monkeypatch.setenv("IPFS_API_URL", "http://127.0.0.1:1")
     with pytest.raises(IPFSError):
         pin_to_ipfs(b"ciphertext", "x.enc")
+
+
+def test_pinata_publishes_only_ciphertext_and_recovers_it(monkeypatch):
+    """A provider upload is a real pin, and its gateway returns the same bytes."""
+    from app import storage_service
+
+    monkeypatch.delenv("IPFS_API_URL", raising=False)
+    monkeypatch.setenv("IPFS_PINATA_JWT", "private-test-token")
+    monkeypatch.setenv("IPFS_PINATA_GATEWAY_URL", "https://example.mypinata.cloud")
+    uploaded = b"encrypted-payload-only"
+    cid = "bafybeigdyrztpinataexample"
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        if request.full_url == "https://uploads.pinata.cloud/v3/files":
+            assert request.get_header("Authorization") == "Bearer private-test-token"
+            assert uploaded in request.data
+            assert b"report.enc" not in request.data
+            assert b'name="network"' in request.data
+            assert b"public" in request.data
+            return io.BytesIO(json.dumps({"data": {"cid": cid}}).encode())
+        if request.full_url == f"https://example.mypinata.cloud/ipfs/{cid}":
+            return io.BytesIO(uploaded)
+        raise AssertionError(request.full_url)
+
+    monkeypatch.setattr(storage_service.urllib.request, "urlopen", fake_urlopen)
+    assert is_ipfs_configured()
+    assert pin_to_ipfs(uploaded, "report.enc") == cid
+    assert fetch_from_ipfs(cid) == uploaded
+    assert len(requests) == 2
+
+
+def test_pinata_status_checks_authentication_without_exposing_token(monkeypatch):
+    from app import storage_service
+
+    monkeypatch.delenv("IPFS_API_URL", raising=False)
+    monkeypatch.setenv("IPFS_PINATA_JWT", "private-test-token")
+    monkeypatch.setenv("IPFS_PINATA_GATEWAY_URL", "https://example.mypinata.cloud")
+
+    def fake_urlopen(request, timeout):
+        assert request.full_url == "https://api.pinata.cloud/data/testAuthentication"
+        assert request.get_header("Authorization") == "Bearer private-test-token"
+        return io.BytesIO(b'{"message":"Congratulations!"}')
+
+    monkeypatch.setattr(storage_service.urllib.request, "urlopen", fake_urlopen)
+    status = ipfs_status()
+    assert status["configured"] and status["connected"]
+    assert status["provider"] == "pinata"
+    assert "private-test-token" not in json.dumps(status)
 
 
 # ─── Against a live node ─────────────────────────────────────────────────────

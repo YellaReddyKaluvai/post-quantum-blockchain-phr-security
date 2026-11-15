@@ -38,6 +38,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# A hosted chain must have the same contract ABI as the one we deploy. The
+# backend-only build context cannot see contracts/out from the repository root.
+RUN python -c "from app.chain_client import load_contract_artifact; a = load_contract_artifact(); assert a['abi'] and a['bytecode']['object'].startswith('0x')"
+
 # Fail fast if the post-quantum mechanisms are unavailable. A container that
 # starts without them would silently lose every signature guarantee, which is
 # the exact failure this project was built to eliminate.

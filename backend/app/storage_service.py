@@ -232,8 +232,16 @@ def ipfs_api_url() -> Optional[str]:
     return os.getenv("IPFS_API_URL") or None
 
 
+def _pinata_jwt() -> Optional[str]:
+    return os.getenv("IPFS_PINATA_JWT", "").strip() or None
+
+
+def _pinata_gateway_url() -> Optional[str]:
+    return os.getenv("IPFS_PINATA_GATEWAY_URL", "").strip().rstrip("/") or None
+
+
 def is_ipfs_configured() -> bool:
-    return bool(ipfs_api_url())
+    return bool(ipfs_api_url() or _pinata_jwt())
 
 
 def pin_to_ipfs(encrypted_bytes: bytes, file_name: str) -> Optional[str]:
@@ -248,21 +256,33 @@ def pin_to_ipfs(encrypted_bytes: bytes, file_name: str) -> Optional[str]:
     would be a disclosure, not a storage decision.
     """
     api = ipfs_api_url()
-    if not api:
+    jwt = _pinata_jwt() if not api else None
+    if not api and not jwt:
         return None
 
-    boundary = "----QuantumCareIPFS" + hashlib.sha256(file_name.encode()).hexdigest()[:16]
+    # Pinata stores the upload name as provider metadata. Do not send a
+    # clinician-supplied report title or patient identifier with the ciphertext.
+    safe_name = (hashlib.sha256(encrypted_bytes).hexdigest() + ".enc" if jwt else
+                 os.path.basename(file_name).replace('"', "_").replace("\r", "_").replace("\n", "_"))
+    boundary = "----QuantumCareIPFS" + hashlib.sha256(safe_name.encode()).hexdigest()[:16]
     body = b"".join([
         f"--{boundary}\r\n".encode(),
-        f'Content-Disposition: form-data; name="file"; filename="{file_name}"\r\n'.encode(),
+        f'Content-Disposition: form-data; name="file"; filename="{safe_name}"\r\n'.encode(),
         b"Content-Type: application/octet-stream\r\n\r\n",
         encrypted_bytes,
-        f"\r\n--{boundary}--\r\n".encode(),
+        f"\r\n--{boundary}\r\n".encode() if jwt else f"\r\n--{boundary}--\r\n".encode(),
     ])
+    if jwt:
+        body += (
+            f'Content-Disposition: form-data; name="network"\r\n\r\npublic\r\n'
+            f'--{boundary}--\r\n'
+        ).encode()
     request = urllib.request.Request(
-        f"{api.rstrip('/')}/api/v0/add?cid-version=0&pin=true",
+        (f"{api.rstrip('/')}/api/v0/add?cid-version=0&pin=true" if api
+         else "https://uploads.pinata.cloud/v3/files"),
         data=body, method="POST",
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                 **({"Authorization": f"Bearer {jwt}"} if jwt else {})},
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
@@ -270,7 +290,7 @@ def pin_to_ipfs(encrypted_bytes: bytes, file_name: str) -> Optional[str]:
     except Exception as exc:  # noqa: BLE001 - any transport failure is the same to callers
         raise IPFSError(f"IPFS add failed for {file_name}: {exc}") from exc
 
-    cid = payload.get("Hash")
+    cid = payload.get("Hash") if api else (payload.get("data") or {}).get("cid")
     if not cid:
         raise IPFSError(f"IPFS returned no CID for {file_name}: {payload}")
     logger.info("Pinned %d bytes to IPFS as %s", len(encrypted_bytes), cid)
@@ -280,10 +300,17 @@ def pin_to_ipfs(encrypted_bytes: bytes, file_name: str) -> Optional[str]:
 def fetch_from_ipfs(cid: str) -> bytes:
     """Retrieve pinned content by CID. Raises if it cannot be had."""
     api = ipfs_api_url()
-    if not api:
-        raise IPFSError("No IPFS node is configured.")
-    request = urllib.request.Request(
-        f"{api.rstrip('/')}/api/v0/cat?arg={urllib.parse.quote(cid)}", method="POST")
+    if api:
+        request = urllib.request.Request(
+            f"{api.rstrip('/')}/api/v0/cat?arg={urllib.parse.quote(cid, safe='')}", method="POST")
+    elif _pinata_jwt() and _pinata_gateway_url():
+        gateway = _pinata_gateway_url()
+        if urllib.parse.urlparse(gateway).scheme != "https":
+            raise IPFSError("IPFS_PINATA_GATEWAY_URL must use HTTPS.")
+        request = urllib.request.Request(
+            f"{gateway}/ipfs/{urllib.parse.quote(cid, safe='')}", method="GET")
+    else:
+        raise IPFSError("No IPFS node or Pinata gateway is configured.")
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return response.read()
@@ -298,9 +325,29 @@ def ipfs_status() -> dict:
     because those call for different actions from whoever is on call.
     """
     api = ipfs_api_url()
-    status = {"configured": bool(api), "api_url": api, "connected": False,
+    jwt = _pinata_jwt() if not api else None
+    status = {"configured": bool(api or jwt), "api_url": api or ("https://api.pinata.cloud" if jwt else None),
+              "provider": "kubo" if api else ("pinata" if jwt else None), "connected": False,
               "peer_id": None, "pinned_objects": None, "error": None,
               "scope": None}
+    if jwt:
+        request = urllib.request.Request(
+            "https://api.pinata.cloud/data/testAuthentication", method="GET",
+            headers={"Authorization": f"Bearer {jwt}"})
+        try:
+            with urllib.request.urlopen(request, timeout=10):
+                status["connected"] = True
+        except Exception as exc:  # noqa: BLE001
+            status["error"] = f"Pinata authentication failed: {exc}"
+            return status
+        if not _pinata_gateway_url():
+            status["error"] = "Set IPFS_PINATA_GATEWAY_URL for encrypted-document recovery."
+        status["scope"] = (
+            "New encrypted documents are uploaded to public IPFS and pinned by Pinata. "
+            "Only ciphertext is published; a provider account is one copy, and older "
+            "computed CIDs are not proof of publication."
+        )
+        return status
     if not api:
         status["error"] = "No IPFS node configured (set IPFS_API_URL to enable publishing)."
         return status
@@ -376,7 +423,8 @@ def store_encrypted_document(
             content_cid = node_cid
             # Copies beyond this node, in the background (see ipfs_replication).
             from app import ipfs_replication  # deferred: it imports this module
-            ipfs_replication.schedule(node_cid, file_name)
+            if ipfs_api_url():
+                ipfs_replication.schedule(node_cid, file_name)
     except IPFSError as exc:
         logger.error("IPFS publish failed for %s: %s", document_name, exc)
 
