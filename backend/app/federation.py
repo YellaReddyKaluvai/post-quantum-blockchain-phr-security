@@ -309,7 +309,14 @@ def train_for_submission(cur, base: Optional[fl.Classifier],
                               f"ε={after:.2f} (budget {budget}); baselines only.")
             report["privacy_spent"] = spent
             return None, report
-    local = fl.train(examples, init=base)
+    try:
+        epochs = int(os.getenv("FEDERATION_LOCAL_EPOCHS", "200"))
+        if not 1 <= epochs <= 1000:
+            raise ValueError
+    except ValueError:
+        raise FederationError("FEDERATION_LOCAL_EPOCHS must be between 1 and 1000.") from None
+    local = fl.train(examples, init=base, epochs=epochs)
+    report["local_epochs"] = epochs
     sent, privacy = fl.privatize(local, base, clip=fl.DEFAULT_CLIP, epsilon=epsilon,
                                  delta=ACCOUNTING_DELTA)
     # Counted when prepared, even if the submission then fails: over-counting is the safe side.
@@ -322,33 +329,36 @@ def train_for_submission(cur, base: Optional[fl.Classifier],
 
 # ─── Participant operations ──────────────────────────────────────────────────
 
-def fit_local_update(cur) -> tuple[dict[str, Any], int, dict]:
+def fit_local_update(cur, base=None) -> tuple[dict[str, Any], int, dict]:
     """This hospital's update: per-role baselines plus, when it has enough
     investigated incidents, its locally trained classifier. Parameters only."""
     windows = aisec.extract_windows(cur, hours=LOCAL_WINDOW_HOURS)
     if not windows:
         raise FederationError("No local activity to learn from yet.")
-    classifier, report = train_for_submission(cur, active_global_classifier(cur))
+    classifier, report = train_for_submission(cur, base)
     params = aisec.role_parameters(aisec.fit_role_baselines(windows), classifier)
     return params, len(windows), report
 
 
-def pull_global_model(cur=None) -> dict[str, Any]:
+def pull_global_model(cur=None, *, round_state: bool = False) -> dict[str, Any]:
     """Fetch the hub's newest real-institution global model."""
     s = settings(cur)
     if not (s["hub_url"] and s["node_name"] and s["secret"]):
         raise FederationError("Federation hub is not configured.")
     ts = int(time.time())
-    status, payload = _http("GET", f"{s['hub_url']}/api/federated/global-model", headers={
+    purpose = "round-state" if round_state else "global-model"
+    status, payload = _http("GET", f"{s['hub_url']}/api/federated/{purpose}", headers={
         "X-Federation-Node": s["node_name"],
         "X-Federation-Timestamp": str(ts),
-        "X-Federation-Signature": request_signature(s["node_name"], ts, "global-model", s["secret"]),
+        "X-Federation-Signature": request_signature(s["node_name"], ts, purpose, s["secret"]),
         "Accept": "application/json",
     })
     model = _json_or_raise(status, payload, "Pulling the global model")
     if not verify_model_signature(s["node_name"], ts, model, s["secret"]):
         raise FederationError("The global model was not signed by the hub for this request "
                               "(altered or replayed in transit); not used.")
+    if round_state and model.get("parameters") is None and model.get("round_number") == 0:
+        return model
     if not aisec.sane_parameters(model.get("parameters") or {}):
         raise FederationError("The hub's global model failed the plausibility check; not used.")
     return model
@@ -359,14 +369,18 @@ def submit_local_update(cur, round_number: Optional[int] = None) -> dict[str, An
     s = settings(cur)
     if not (s["hub_url"] and s["node_name"] and s["secret"]):
         raise FederationError("Federation hub is not configured.")
-    params, samples, training = fit_local_update(cur)
-    if round_number is None:
-        # The hub says which round is open; an older hub only its latest + 1.
-        try:
-            model = pull_global_model(cur)
-            round_number = int(model.get("open_round") or 0) or int(model.get("round_number") or 0) + 1
-        except FederationError:
-            round_number = 1
+    # Discover the signed open round even before the first global model exists.
+    # Network/authentication failures must not masquerade as "start round 1".
+    model = pull_global_model(cur, round_state=True)
+    open_round = int(model["open_round"])
+    if round_number is not None and round_number != open_round:
+        raise FederationError(f"Round {round_number} is not open; open round is {open_round}.")
+    round_number = open_round
+    classifier = (model.get("parameters") or {}).get("classifier")
+    base = fl.Classifier.from_parameters(classifier) if fl.sane_classifier(classifier) else None
+    # Training follows the latest global model even when detection kept an older
+    # model after local evaluation. Inference adoption and training are separate.
+    params, samples, training = fit_local_update(cur, base)
     global _last_submission_ts
     ts = _last_submission_ts = max(int(time.time()), _last_submission_ts + 1)
     signature = aisec.parameters_signature(s["node_name"], round_number, samples, params,
@@ -495,3 +509,46 @@ def sync(cur) -> dict[str, Any]:
     cur.execute("UPDATE FederationParticipation SET last_sync_at = CURRENT_TIMESTAMP, "
                 "last_sync_result = %s WHERE id = 1", (json.dumps(result),))
     return result
+
+
+def require_fresh_updates() -> bool:
+    return os.getenv("FEDERATION_REQUIRE_FRESH_UPDATES", "false").lower() == "true"
+
+
+def minimum_peers() -> int:
+    return max(1, int(os.getenv("FEDERATION_MIN_PEERS", "1") or 1))
+
+
+def validation_metrics(cur) -> dict:
+    """Evaluate on a separate local dataset that training never reads.
+
+    This is an optional experiment dataset, not the training-fit accuracy.
+    Real deployments must supply independently collected, labelled examples.
+    """
+    cur.execute("SELECT features, label FROM FederatedValidationLabels ORDER BY id")
+    examples = [(r["features"], int(r["label"])) for r in cur.fetchall()]
+    if not examples:
+        return {"available": False, "note": "No separate validation dataset on this hospital."}
+    training = load_labels(cur)
+    local = fl.train(training) if fl.trainable(training) else None
+    from app import risk_engine
+    model, label = risk_engine._choose_classifier(cur, *risk_engine.usable_federated_model(cur))
+    cur.execute("""SELECT parameters, round_number FROM (
+        SELECT parameters, round_number, created_at AS at FROM FederatedGlobalModel
+         WHERE real_nodes >= 2 AND simulated_nodes = 0
+        UNION ALL
+        SELECT parameters, hub_round AS round_number, pulled_at AS at FROM FederatedHubModels
+         WHERE real_nodes >= 2
+        ) candidates ORDER BY at DESC LIMIT 1""")
+    row = cur.fetchone()
+    params = (row["parameters"] or {}).get("classifier") if row else None
+    candidate = fl.Classifier.from_parameters(params) if fl.sane_classifier(params) else None
+    digest = (hashlib.sha256(json.dumps({"weights": candidate.weights, "bias": candidate.bias},
+                                       sort_keys=True).encode()).hexdigest() if candidate else None)
+    return {"candidate": fl.evaluate(candidate, examples) if candidate else None,
+            "candidate_round": row["round_number"] if candidate else None,
+            "candidate_model_hash": digest,
+            "available": True, "examples": len(examples), "training_examples": len(training),
+            "local": fl.evaluate(local, examples) if local else None,
+            "in_use": fl.evaluate(model, examples) if model else None,
+            "model": label, "note": "Separate local validation examples; never sent to the hub."}

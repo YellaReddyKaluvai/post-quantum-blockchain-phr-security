@@ -21,6 +21,8 @@ export default function Appointments() {
   const [appointments, setAppointments] = useState<DoctorAppointment[]>([]);
 
   const [loading, setLoading] = useState(true);
+  const [actionError, setActionError] = useState("");
+  const [busyId, setBusyId] = useState<string | null>(null);
 
   useEffect(() => {
     async function fetchAppts() {
@@ -37,17 +39,19 @@ export default function Appointments() {
   }, []);
 
   const handleAction = async (id: string, action: string) => {
+    if (busyId) return;
+    setBusyId(id); setActionError("");
     try {
       await updateAppointmentStatus(id, action);
-      // Update local state mockingly
-      setAppointments(appointments.map(a => 
+      // Reflect the state only after the server accepts the transition.
+      setAppointments(current => current.map(a =>
         a.id === id 
           ? { ...a, status: action === "accept" ? "Confirmed" : action === "cancel" ? "Cancelled" : "Completed" } 
           : a
       ));
     } catch (error) {
-      console.error(error);
-    }
+      setActionError(error instanceof Error ? error.message : "Appointment update failed");
+    } finally { setBusyId(null); }
   };
 
   if (loading) {
@@ -56,6 +60,7 @@ export default function Appointments() {
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
+      {actionError && <p role="alert" className="text-rose-700">{actionError}</p>}
       <div className="flex items-center gap-3 mb-6">
         <Calendar className="w-6 h-6 text-indigo-600" />
         <h1 className="text-2xl font-bold text-slate-800">Appointments</h1>
@@ -97,16 +102,16 @@ export default function Appointments() {
               <div className="flex gap-2">
                 {(appt.status === "Pending" || appt.status === "Scheduled") && (
                   <>
-                    <button onClick={() => handleAction(appt.id, "accept")} className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-xl text-sm font-semibold transition-colors flex items-center gap-1">
+                    <button disabled={busyId !== null} onClick={() => handleAction(appt.id, "accept")} className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-xl text-sm font-semibold transition-colors flex items-center gap-1">
                       <Check className="w-4 h-4" /> Accept
                     </button>
-                    <button onClick={() => handleAction(appt.id, "cancel")} className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-xl text-sm font-semibold transition-colors flex items-center gap-1">
+                    <button disabled={busyId !== null} onClick={() => handleAction(appt.id, "cancel")} className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-xl text-sm font-semibold transition-colors flex items-center gap-1">
                       <X className="w-4 h-4" /> Cancel
                     </button>
                   </>
                 )}
                 {appt.status === "Confirmed" && (
-                  <button onClick={() => handleAction(appt.id, "complete")} className="px-3 py-1.5 bg-cyan-50 hover:bg-cyan-100 text-cyan-700 rounded-xl text-sm font-semibold transition-colors flex items-center gap-1">
+                  <button disabled={busyId !== null} onClick={() => handleAction(appt.id, "complete")} className="px-3 py-1.5 bg-cyan-50 hover:bg-cyan-100 text-cyan-700 rounded-xl text-sm font-semibold transition-colors flex items-center gap-1">
                     <Check className="w-4 h-4" /> Complete
                   </button>
                 )}
