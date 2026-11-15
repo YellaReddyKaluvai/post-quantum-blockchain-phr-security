@@ -6,7 +6,7 @@ FROM python:3.12-slim AS liboqs-build
 # configure step fails ("Could NOT find OpenSSL") without the headers. The
 # runtime image needs no extra package — python:3.12-slim already ships libssl3.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake ninja-build git ca-certificates libssl-dev \
+        build-essential cmake ninja-build git ca-certificates libssl-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 # Only the two standardized mechanisms used by crypto_service.py are needed.
@@ -17,6 +17,7 @@ RUN git clone --branch ${LIBOQS_VERSION} --depth 1 \
  && cmake -GNinja -S /tmp/liboqs -B /tmp/liboqs/build \
         -DBUILD_SHARED_LIBS=ON \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DOPENSSL_ROOT_DIR=/usr \
         -DOQS_BUILD_ONLY_LIB=ON \
         '-DOQS_MINIMAL_BUILD=KEM_ml_kem_768;SIG_ml_dsa_65' \
  && cmake --build /tmp/liboqs/build --parallel \
