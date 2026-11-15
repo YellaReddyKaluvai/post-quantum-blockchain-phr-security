@@ -28,7 +28,7 @@ export const TOKEN_COOKIE = "quantumcare_token";
 export const ROLE_COOKIE = "quantumcare_role";
 export const USER_ID_COOKIE = "quantumcare_user_id";
 export const SESSION_MARKER_COOKIE = "quantumcare_session";
-const SESSION_MINUTES = 30;
+const SESSION_MINUTES = 7 * 24 * 60; // Navigation hint only; API validates real expiry.
 
 // Sent on every request: the backend refuses a cookie-authenticated change
 // without it, and another site's page cannot add it (cross-site request forgery).
@@ -66,6 +66,19 @@ export function clearAuthCookies() {
 // so the app looked broken rather than logged out. Redirect once, with a note
 // explaining why, and preserve where they were so they land back there.
 let redirectingToLogin = false;
+let pendingRefresh: Promise<boolean> | null = null;
+async function refreshSession(): Promise<boolean> {
+  const run = async () => {
+    const response = await fetch(`${backendBaseUrl}/api/auth/refresh`, {method: "POST", credentials: "include", headers: {[CSRF_HEADER]: CSRF_HEADER_VALUE}});
+    return response.ok;
+  };
+  const locked = async (): Promise<boolean> => {
+    if (typeof navigator !== "undefined" && navigator.locks) return await navigator.locks.request("quantumcare-refresh", async () => await run());
+    return await run();
+  };
+  if (!pendingRefresh) pendingRefresh = locked().catch(() => false).finally(() => {pendingRefresh = null;});
+  return pendingRefresh!;
+}
 
 function handleSessionExpired() {
   if (typeof window === "undefined" || redirectingToLogin) return;
@@ -123,7 +136,7 @@ function requestStepUp(info: { message?: string; risk_level?: string; explanatio
   return pendingStepUp;
 }
 
-async function fetchWithAuth(url: string, options: RequestInit = {}, retried = false): Promise<Response> {
+async function fetchWithAuth(url: string, options: RequestInit = {}, retried = false, refreshed = false): Promise<Response> {
   const headers = new Headers(options.headers || {});
   headers.set(CSRF_HEADER, CSRF_HEADER_VALUE);
   if (options.body && !headers.has("Content-Type")) {
@@ -136,6 +149,7 @@ async function fetchWithAuth(url: string, options: RequestInit = {}, retried = f
   // decision and must NOT be treated as expiry — that would bounce a user to
   // login for something they simply aren't allowed to do.
   if (response.status === 401) {
+    if (!refreshed && await refreshSession()) return fetchWithAuth(url, options, retried, true);
     handleSessionExpired();
     throw new SessionExpiredError();
   }
@@ -1437,5 +1451,11 @@ export async function patientAppointmentAction(id: string, action: "cancel" | "r
 export async function getAppointmentSlots(doctorId: string, day: string): Promise<{slots: string[]; timezone: string; duration_minutes: number}> {
   const response = await fetchWithAuth(`${backendBaseUrl}/api/patient/doctors/${doctorId}/slots?day=${encodeURIComponent(day)}`);
   if (!response.ok) throw new Error("Unable to load appointment slots");
+  return response.json();
+}
+
+export async function workflowRequest(path: string, body?: unknown, method = "POST") {
+  const response = await fetchWithAuth(`${backendBaseUrl}/api/${path}`, body === undefined ? {} : {method, body: JSON.stringify(body)});
+  if (!response.ok) throw new Error(extractErrorDetail(await response.json().catch(() => null), "Request failed"));
   return response.json();
 }
