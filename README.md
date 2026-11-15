@@ -4,9 +4,45 @@
 
 ---
 
+## Start here
+
+- [Three-laptop federated learning](docs/10_Federation_Deployment.md): local experiment, laptop setup, connection checkpoint and measured results.
+- [Installation](INSTALL.md): prerequisites, local setup and first login.
+- [Working demonstration](backend/demo/WORKING_DEMO.md): captioned video package, repeatable workflow and measured outputs.
+- [Deployment](DEPLOY.md): Vercel frontend, Render API/PostgreSQL and migration.
+- [Documentation](docs/README.md): architecture, requirements, schema and flows.
+- [Contributing](CONTRIBUTING.md): changes, checks, pull requests and history.
+- [Repository checklist](docs/11_Repository_Checklist.md): evidence for the technical-repository requirements.
+- [MIT license](LICENSE): reuse terms; retain third-party dependency licenses.
+
+**Hosted demonstration:** <https://post-quantum-blockchain-phr-securit.vercel.app>
+The hosted baseline has PostgreSQL and post-quantum libraries enabled;
+blockchain, IPFS publishing, S3 and SMTP are not configured there. Source
+capabilities below do not imply every integration is enabled in the demo.
+
+## Repository layout
+
+```text
+backend/                 FastAPI API, crypto and maintenance scripts
+  app/                   Application services and routes
+  db/init.sql            Database schema
+  tests/                 Unit and integration tests
+  demo/                  Cryptography demonstrations
+frontend/                Next.js application and frontend checks
+  src/app/               Role-specific pages
+  src/lib/               Session, API and cryptographic utilities
+contracts/PHR.sol        Solidity access and integrity contract
+docs/                    Architecture, requirements and operational guides
+.github/workflows/       Automated checks
+INSTALL.md               Local installation and verification
+DEPLOY.md                Hosting, migration and operational limits
+CONTRIBUTING.md          Contribution and maintenance process
+LICENSE                  MIT reuse terms
+```
+
 ## 🌟 Overview
 
-**QuantumCare** is an advanced, commercial-grade healthcare and Personal Health Record (PHR) platform built to defend electronic health records against classical and quantum computing security threats.
+**QuantumCare** is a research and demonstration healthcare and Personal Health Record (PHR) platform built to defend electronic health records against classical and quantum computing security threats.
 
 The architecture combines **ML-KEM-768** key encapsulation, **ML-DSA-65** digital signatures, **AES-256-GCM** document encryption, encrypted **AWS S3** storage and **on-chain integrity anchoring**.
 
@@ -76,9 +112,7 @@ The design rule throughout: *the system never claims a protection it did not act
 
 ## 🔄 End-to-End Data Flow
 
-How data actually moves between the five roles. Each arrow below exists in
-code; where a flow stops short, it is marked and listed again under
-[Incomplete workflows](#-incomplete-workflows).
+How data moves between the five roles through the implemented application workflows.
 
 ### The security pipeline every document passes through
 
@@ -191,7 +225,7 @@ the party presenting it is the one the patient approved.
 Patient books (past dates and unknown doctors refused at the schema)
       → status Pending → APPOINTMENT_REQUEST notification to doctor
       → Doctor accepts / completes / cancels
-      → ✗ patient is not notified of the outcome (see below)
+      → Patient receives confirmation, completion, or cancellation notifications
 ```
 
 ### 7. Consent and break-glass
@@ -254,8 +288,8 @@ attempt is itself recorded, so probing for records raises an alert.
 
 ## 📊 Implementation Status
 
-Verified against the running system, not aspirational. Anything not built is
-listed as not built.
+Implemented features and their verification evidence are summarized below.
+See [Deployment](DEPLOY.md) for the hosted configuration.
 
 ### Working end-to-end
 
@@ -281,183 +315,72 @@ listed as not built.
 | Zero-knowledge consent proof | ✅ | **Post-quantum**: lattice proof (Fiat–Shamir with aborts, ML-DSA-65 parameters), **made in the doctor's browser** — the token never leaves it. The TypeScript prover and the Python verifier are checked against each other in CI. Consents approved before the switch keep their Schnorr commitment, which still verifies and is reported as *not* post-quantum. See its own section |
 | IPFS publishing | ✅ | Really pinned to a running kubo node; joins the recovery chain behind the database and S3. **Verified live in CI** with two kubo daemons: the stored object is exactly the ciphertext, and replication is confirmed by the replica's own pin list |
 | IPFS replication | ✅ | Copies on other IPFS nodes and/or Pinning-Service-API providers; only copies a target confirms count. **Verified live in CI** against a second kubo node; a commercial pinning service is unit-tested against a scripted fake only |
-| Federation peer admin screen | 🟡 | Register a peer (secret shown once), rotate its secret, suspend, reinstate. The API behind it is **verified live in CI** across three hospitals; the screen itself has been exercised only against sample data |
+| Federation peer admin screen | ✅ | Register a peer (secret shown once), rotate its secret, suspend, reinstate. **Verified live in CI**: Chromium drives the built frontend against a running backend, and the API is asked afterwards whether it agrees |
 | Medication adherence | ✅ | Refusals and misses reach the prescriber and the patient, not only a percentage |
 | Emergency break-glass access | ✅ | Password re-verification, daily limit, risk-scored, time-boxed, patient notified immediately, anchored on-chain, compliance incident opened automatically |
 | End-to-end flow (spec §37) | ✅ | `tests/test_e2e_flow.py` drives access request → consent → nurse care team → lab request → signed, encrypted report → patient release → tamper detection → withdrawal → break-glass → incidents and audit, against real Postgres and real liboqs. CI runs it twice: database-only, and with the chain, IPFS and a second hospital live |
 | Browser sessions | ✅ | The session token lives only in an HttpOnly cookie (scripts cannot read it); CORS is limited to `CORS_ORIGINS`; a cookie-authenticated change needs an `X-Requested-With` header (CSRF); each token has an id checked on every request, so logout revokes it and disabling a user ends their sessions at once |
-| Consent-token storage | ✅ | Sealed in the browser with AES-256-GCM under the doctor's passphrase; backups are the sealed form; tokens stored before this are flagged with a one-step encrypt. Checked in CI by `scripts/check-vault.mjs` |
+| Consent-token storage | ✅ | Sealed in the browser with AES-256-GCM under **a passkey** — the key comes from the device's authenticator through the WebAuthn PRF extension, so nothing secret is typed — or under a passphrase where no such authenticator exists. Backups are the sealed form; tokens stored before this are flagged with a one-step protect. Checked in CI by `scripts/check-vault.mjs` and, with a virtual authenticator, in the browser |
 | Differential privacy across rounds | ✅ | Every classifier release is recorded with its zCDP cost and composed across rounds into a total (ε, δ); `FEDERATION_DP_TOTAL_EPSILON` stops releases at the budget; a release without noise voids any overall claim and is shown as such |
 | Late anchoring | ✅ | Anchors recorded while no chain was reachable can be written on-chain later (Admin → Security), marked `LATE_ANCHOR` on the chain itself: they prove the digest existed by that block, not at the original time |
 | Anchor provenance | ✅ | A digest verifies only from events our own contract (or a listed previous one) emitted — a look-alike contract's event does not count |
-| Automated tests | ✅ | 453 Python tests plus a Foundry contract suite and a browser-prover vector check; weighted toward refusals. CI runs them inside the backend image, where liboqs is real |
+| Automated tests | ✅ | 459 Python tests plus a Foundry contract suite and a browser-prover vector check; weighted toward refusals. CI runs them inside the backend image, where liboqs is real |
 | Federated learning between hospitals | ✅ | Per-role baselines **and a threat classifier trained on investigated incidents**, federated with robust FedAvg, clipped updates and optional differential privacy; each global model evaluated locally before adoption, with rollback. **Verified live in CI across three hospitals** (separate servers and databases), over two training rounds |
 
-🟡 = built and tested in isolation, still to be verified on the running system.
-
----
-
-## ⚠️ Incomplete Workflows
-
-Flows that start but do not finish. Nine have been closed so far; what remains
-is listed honestly rather than quietly dropped.
-
-### Closed
-
-| Workflow | What was wrong | Now |
-|---|---|---|
-| **Imaging → clinician / patient** | Encrypted, signed, anchored — and openable only by the uploading technician. The patient was notified about something they could not reach. | Patient and entitled doctor both read studies, through one shared release path |
-| **Medication adherence → prescriber** | Every round recorded; no endpoint ever returned it. A refusal was stored and never surfaced. | Doctor sees it on the chart, patient sees their own history; refusals reported in their own right |
-| **Appointment outcome → patient** | Accept, complete and cancel notified nobody, so a cancelled appointment was one the patient turned up for. | Every outcome reaches the patient |
-| **Lab request → laboratory** | The only role in the system not told when work arrived for it. | All technicians notified, priority marked |
-| **Report reviewed → patient** | The moment the patient is really waiting for went unannounced. | Patient told a clinician has read their result |
-| **Post-quantum ZKP** | The consent proof was Schnorr, which Shor's algorithm breaks. | New consents get a lattice proof under Module-LWE/SIS; old Schnorr commitments still verify and are labelled not post-quantum |
-| **IPFS replication** | Content was pinned on one node only. | Each new CID is replicated in the background to configured replica nodes and pinning services; an admin can backfill and retry from the Security page |
-| **Peer registration UI** | Peers could only be registered by API call. | Admin → Federation Peers: register (secret shown once), suspend, reinstate |
-| **`MedicalRecords` table** | Dead schema, never read or written. | No longer created; dropped from existing databases only while empty |
-| **Lab request → consent** | Ordering a test needed nothing, and a lab request counts as a treating relationship — one order for any patient unlocked their whole chart. | The ordering doctor must already be entitled to the patient |
-| **Chart writes → authorization** | Diagnoses, prescriptions, consultations and documents could be written to any patient, which then also counted as a treating relationship. | Writing needs the same entitlement as reading |
-| **Report ↔ request binding** | The requested investigation was loaded and never compared; any technician could file any panel against any order. | The panel must match the order, and only the technician holding the request can file or advance it |
-| **Signature on release** | A failed ML-DSA check was logged and the report released anyway; documents and scans were never checked. | Every release verifies digest and signature; a failure withholds the record and opens an incident |
-| **Failures → Alert & Response** | Integrity and signature failures, refusals and break-glass produced no alert or incident; only the anomaly model did. | Every security source reports to one alert queue, with its source shown |
-| **Failed sign-ins → AI** | Written to AuthLogs, which the detector never reads. | Recorded as security events as they happen; a burst on one account alerts |
-| **Break-glass → AI** | The event was written through a closed cursor and silently lost. | Recorded, scored, and turned into a compliance record |
-| **Incident lifecycle** | Incidents could be listed, never worked. | Open → Investigating → Closed, with a required resolution |
-| **Federated loop** | The global model was computed and never used; no hospital could send its update or receive the model. | Per-role models, participant submit/pull, global model used for detection when real institutions built it |
-| **Smart-contract consent** | `updateConsent`/`checkConsent` existed in `PHR.sol` and were never called. | Decisions written on-chain; consent-based reads checked against the contract |
-| **Blockchain in the image** | `web3` was missing from `requirements.txt`, so the container could never reach a chain. | Added |
-| **Forgeable sessions** | `SECRET_KEY` defaulted to a string published in this repository, so a deployment without its own key let anyone mint an Administrator token. | A placeholder or short key is replaced by a generated one; the consent ledger has its own key; no default admin password |
-| **Nurse access scope** | Any nurse could search every patient (with e-mail addresses), open any chart, record vitals and medicate anyone. | Care-team assignments by an authorized doctor or an administrator; everything else refused and recorded |
-| **Contract write guard** | `PHR.sol` defined `onlyAdmin` and applied it to nothing — any address could rewrite consent. | Every write needs the backend's key; consent keeps none / granted / revoked |
-| **On-chain consent check** | Ran only for consent-based reads, and only when a database column said there was a record to check. | Every non-emergency doctor read asks the chain; an on-chain withdrawal the database no longer shows is refused with an incident |
-| **Re-request lifts a withdrawal** | A doctor re-asking after a withdrawal reset the row to Pending, which unblocked them before the patient decided. | The refusal stands until the patient approves |
-| **Chain, IPFS replication, federation in CI** | Exercised only against fakes. | Run live in CI: anvil + deployed contract, two kubo daemons, a second hospital |
-| **ZKP prover in the browser** | Proofs needed `demo/zkp_prove.py`. | "Prove consent" on the patient's page; the token stays in the browser |
-| **Patient security notices** | Integrity and signature failures, altered consent and repeated refused access reached only the admin. | The patient whose record is involved is told |
-| **Public `ENCRYPTION_KEY`** | Data written under the example key could not be moved to a new one. | `rotate_encryption_key.py` |
-| **S3 and e-mail in CI** | Never exercised against a real service. | SeaweedFS (S3) and Mailpit in the integration run |
-| **Existing nurse relationships** | Not carried into care teams. | Listed for an administrator to review and allocate |
-| **Lab report progress** | The finalize dialog animated "hashing… ML-KEM… ML-DSA" on client-side timers before the request was sent. | It states what runs on the server; the result shows what the server returned |
-
-### Still open
-
-| # | Item | Where it stops |
-|---|---|---|
-| 1 | **Consent token while in use** | Stored only encrypted under the doctor's passphrase (AES-256-GCM, PBKDF2-SHA-256), so a copy of browser storage or a backup is useless without it. A script running on the page *while* the passphrase is typed could still capture it; hardware-backed keys (WebAuthn) are not used. |
-| 2 | **Replacing an outdated contract** | `migrate_contract.py` deploys the current contract and carries consent from the old contract's own state (dry run first). Running it, and updating `.env`, is still an operator's step. |
-
-### Not implemented
-
-| Area | Status |
-|---|---|
-| **A federation of independent institutions** | The protocol runs live between three backends in CI. An actual federation needs other hospitals to deploy and register; nothing here pretends they exist. |
-| **Standardised post-quantum ZKP** | The lattice proof uses ML-DSA-65's parameters and assumptions, but the construction itself (Lyubashevsky's, uncompressed) is not a NIST standard and has not been independently reviewed. |
-
-> On AI: the security layer performs **behavioural anomaly detection**, not
-> clinical prediction. It never reads medical content and never makes a
-> diagnostic judgement. Note also that the "ML" in ML-KEM and ML-DSA means
-> *Module-Lattice*, not machine learning — the two are unrelated.
-
-### Known data caveats
-- Two lab reports predate the encryption pipeline and hold no ciphertext, so they cannot be given a cloud copy or be decrypted. They are counted honestly in `/api/admin/storage/status`.
-- Anchors written before the chain integration are marked `local-simulated` and carry no on-chain proof. The admin Security page reports the on-chain vs simulated split rather than hiding it.
+Every row above is ✅: nothing in this table is still waiting to be tried on a running system.
 
 ---
 
 ## 🧪 Demonstration Dataset
 
-A synthetic dataset at hospital scale, generated by
-[`backend/generate_dataset.py`](backend/generate_dataset.py), for showing how
-much data the platform carries.
+### Records in the hosted demonstration
 
-### What it contains
+The public app uses its hosted PostgreSQL database. Its demonstration accounts
+were created through the application and approved by an administrator; they
+are not the example IDs from the local 500-account dataset generator.
 
-| | Count |
-|---|---|
-| **Users** | **500** (400 patients, 40 doctors, 30 nurses, 25 technicians, 5 admins) |
-| Diagnoses | 806 |
-| Prescriptions | 806 |
-| Nurse-recorded vitals | 1,821 |
-| Medication rounds | 1,633 |
-| Nursing notes | 582 |
-| Lab test requests | 1,075 |
-| **Signed lab reports** | **795** (4.2 MB of PDF, encrypted and anchored) |
-| Appointments | 376 |
-| **Total rows** | **~8,400** |
+On **25 October 2026**, the following records were read successfully through
+the deployed patient API while signed in as `PAT-2026-000002`:
 
-Generation takes **37 seconds**, and the database grows to **34 MB**.
+| Record | Count in this demo patient's account |
+|---|---:|
+| Completed lab reports | 1 |
+| Vitals entries | 1 |
+| Medical records | 1 |
 
-### Synthetic identities, genuine cryptography
+These are fictional demonstration records stored in the hosted database.
+They are not totals for every user or record in the deployment. Start with
+this patient to see the recorded demonstration's clinical review and CBC report.
 
-Only the *names and clinical content* are invented. Everything protecting them
-is real, and was verified after generation:
+See [verified hosted accounts](#verified-hosted-demo-accounts) for the working
+User IDs and [account verification evidence](docs/demo-results/2026-10-25-account-verification.json)
+for the dated checks. Accounts and access can change after verification; nurse
+assignments are time-limited and patient consent still governs clinician access.
 
-| Property | Verified result |
-|---|---|
-| ML-KEM-768 public keys | 1,184 bytes — the exact FIPS 203 size |
-| ML-DSA-65 public keys | 1,952 bytes — the exact FIPS 204 size |
-| ML-DSA-65 signatures | 3,309 bytes — the exact FIPS 204 size |
-| Placeholder / mock keys | **0** |
-| Diagnoses readable in the database | **0** |
-| Medicine names readable in the database | **0** |
-| Reports encrypted **and** signed | 802 / 802 |
-| Reports with a cloud copy | 802 / 802 |
+### Reproduce the hosted workflow
 
-A patient opening one of these reports through the normal download route gets
-back a **valid 1-page PDF**, meaning the AES-GCM decrypt and the signature
-check both pass on generated data exactly as on hand-entered data.
+[The working-demonstration guide](backend/demo/WORKING_DEMO.md) explains how to
+create a fresh set of fictional accounts, exercise the workflow and export
+results. The runner obtains assigned IDs from the API and saves each account's
+own password in a private file. It does not assume IDs or a shared password.
 
-Clinical content is coherent rather than random: a diabetic patient carries
-metformin, a glucose panel and a raised weight, because a chart full of
-unrelated rows would look populated while making no clinical sense.
+[Measured run results](docs/demo-results/2026-10-25-summary.md) and
+[raw timing/configuration evidence](docs/demo-results/2026-10-25-results.json)
+record the separate end-to-end demonstration run. They are dated observations,
+not live database totals or throughput claims.
 
-### Measured capacity
+### Optional local dataset generator
 
-Response times at 515 users and ~8,700 records, mean of 5 requests:
+[`backend/generate_dataset.py`](backend/generate_dataset.py) can populate a
+separate disposable development database with a larger synthetic dataset.
+That dataset has **not** been imported into the hosted demonstration. Its
+example IDs, passwords, row counts and local timings do not describe the public app.
 
-| Endpoint | Latency |
-|---|---|
-| Patient medical records | 4 ms |
-| Patient lab reports | 8 ms |
-| Admin user list (page 1 of 26) | 8 ms |
-| Admin user list (**last** page) | 8 ms |
-| Admin audit log | 11 ms |
-| Lab technician report queue | 14 ms |
-| Nurse patient list | 37 ms |
-| Lab technician pending requests | 76 ms |
-| Admin blockchain status | 257 ms |
-| Admin storage status | 401 ms |
-
-Deep pagination costs the same as the first page, so the list endpoints are not
-scanning the whole table. The two slow endpoints are slow for an honest reason:
-they call **out** to the chain and to S3 to report live infrastructure health,
-rather than trusting a cached value.
-
-> These are single-machine figures — one laptop, one Postgres, a local chain.
-> They are meaningful as *relative* measurements and as evidence the queries
-> scale sensibly; they are not production throughput numbers.
-
-### Logging in as a generated user
-
-Password hashes are Argon2 and cannot be reversed, so passwords only exist if
-they are captured at creation. The generator writes every account to
-`backend/dataset_credentials.csv` (user ID, name, role, password, e-mail) as it
-runs.
-
-**Every generated account uses the password `Demo@1234`.**
-
-That file is deliberately **not committed** — a checked-in file full of logins
-is a bad habit even when the accounts are synthetic. Regenerate it any time:
-
-```bash
-cd backend && python3 generate_dataset.py --reset
-```
-
-`--reset` removes only previously generated accounts, identified by their
-`@quantumcare-demo.invalid` e-mail marker. Hand-made demo accounts and anything
-entered through the UI are matched by nothing in that scope and are left
-untouched. `--smoke` generates a 14-user sample; `--no-s3` skips cloud upload.
-The random seed is fixed, so a re-run reproduces the same dataset.
+Use the generated `backend/dataset_credentials.csv` for the actual local
+account IDs and passwords. This file is gitignored. The generator uses shared
+demo credentials, so run it only against a disposable database. `--smoke`
+creates a smaller sample; `--no-s3` skips cloud upload. `--reset` deletes the
+previous generator-owned accounts and should be used only when that reset is intended.
 
 ---
 
@@ -686,7 +609,7 @@ The per-feature deviations are the score **and** the explanation — the same
 arithmetic, not a second model reconstructing a decision after the fact:
 
 ```
-DOC-2026-000011   score 85.42   HIGH
+EXAMPLE-DOCTOR   score 85.42   HIGH
 
   distinct patients accessed        140   vs peer median 1
   failed sign-in attempts            11   vs peer median 1
@@ -709,7 +632,7 @@ The federated IDS has two models, both learned locally and federated:
 |---|---|
 | Local training: baselines from this hospital's activity; the classifier from its investigated incidents, starting each round from the global weights | **Real** |
 | Robust FedAvg, for both models: each node weighted by its samples but capped at 5× the lower-median node, and with 3+ nodes an outlying update set aside (baselines per role, compared in log space). Who was capped or set aside is reported at the hub and never sent to peers | **Real** |
-| Privacy: no record, event, label or identifier is sent; classifier updates are clipped, and `FEDERATION_DP_EPSILON` adds Gaussian noise (the Gaussian mechanism per round — no accounting across rounds is claimed) | **Real** |
+| Privacy: no record, event, label or identifier is sent; classifier updates are clipped, and `FEDERATION_DP_EPSILON` adds Gaussian noise (the Gaussian mechanism per round — cumulative zCDP accounting and an optional total privacy budget are enforced) | **Real** |
 | Signed, replay-protected exchange: every submission carries a signed timestamp and the hub takes only a fresh one newer than the last from that peer; the hub signs the model it returns for the requesting peer and request, and a participant refuses one altered or replayed in transit | **Real** |
 | Peer control: registration, suspension (a suspended peer's earlier updates are left out of new rounds), secret rotation; submissions only to the open round; per-role counts bounded and consistent with the total; an update older than 7 days is not carried into a round | **Real** |
 | The hub's own adoption gate: each round is evaluated on the hub's data exactly as a participant evaluates a pulled one, and detection at the hub uses it only if it passes | **Real** |
@@ -779,7 +702,7 @@ activity on its first run. 15 tests.
 | Layer | Protocol / Algorithm | Purpose |
 | --- | --- | --- |
 | **Password Hashing** | **Argon2id** | Memory-hard, GPU-resistant credential protection |
-| **PII Encryption** | **AES-256-CBC** | Encrypts sensitive demographics (DOB, blood group) and the clinical text of diagnoses and prescriptions. Defends the database at rest, not a compromised application server — the app holds the key |
+| **PII Encryption** | **AES-256-GCM** | Versioned authenticated column encryption for sensitive demographics (DOB, blood group) and the clinical text of diagnoses and prescriptions. Defends the database at rest, not a compromised application server — the app holds the key |
 | **Key Encapsulation** | **ML-KEM (Kyber-768)** | Post-Quantum Key Encapsulation (FIPS 203) for payload AES keys |
 | **Digital Signatures** | **ML-DSA (Dilithium-3)** | Post-Quantum Digital Signature (FIPS 204) for document authenticity |
 | **Cloud Storage** | **AWS S3** | Resilient cloud storage bucket (`postquantumcryptography`) |
@@ -802,78 +725,26 @@ activity on its first run. 15 tests.
 
 ## 🚀 Quick Start Guide
 
-### 1. Clone & Setup Environment
-```bash
-git clone https://github.com/YellaReddyKaluvai/post-quantum-blockchain-phr-security.git
-cd post-quantum-blockchain-phr-security
-```
+Follow [INSTALL.md](INSTALL.md) for prerequisites and complete commands. It
+starts PostgreSQL and the API in Docker, configures the frontend proxy, creates
+the first administrator and verifies patient registration, approval and login.
+The image builds the required native liboqs library.
 
-### 2. Configure Backend Environment (`backend/.env`)
-```env
-DATABASE_URL="postgresql://postgres:postgres@localhost:5432/pqc_hospital"
-SECRET_KEY="your-production-jwt-secret"
-ENCRYPTION_KEY="32-byte-hex-encryption-key"
+For the Vercel frontend with a Render API and database, use [DEPLOY.md](DEPLOY.md).
+Do not copy example passwords or encryption keys into a live deployment.
 
-# Email Configuration
-SMTP_HOST="smtp.gmail.com"
-SMTP_PORT="587"
-SMTP_USER="your-email@gmail.com"
-SMTP_PASSWORD="your-app-password"
-
-# AWS S3 Cloud Storage Credentials
-AWS_ACCESS_KEY_ID="your_aws_access_key"
-AWS_SECRET_ACCESS_KEY="your_aws_secret_key"
-AWS_REGION="eu-north-1"
-AWS_S3_BUCKET="postquantumcryptography"
-
-# Blockchain audit anchoring (defaults target a local dev chain)
-BLOCKCHAIN_ENABLED="true"
-BLOCKCHAIN_RPC_URL="http://127.0.0.1:8545"
-BLOCKCHAIN_CHAIN_ID="31337"
-BLOCKCHAIN_NETWORK_NAME="anvil-local"
-BLOCKCHAIN_CONTRACT_ADDRESS="0x5FbDB2315678afecb367f032d93F642f64180aa3"
-```
-
-### 3. Start the IPFS node (optional)
-
-Publishing is only attempted when `IPFS_API_URL` is set. Leave it blank and the
-system runs normally — reports are still filed, just not pinned.
-
-```bash
-export IPFS_PATH=~/devtools/ipfs-repo
-~/devtools/kubo/ipfs daemon --enable-gc
-```
-
-Then set `IPFS_API_URL=http://127.0.0.1:5001` in `backend/.env`.
-
-### 4. Run Backend API Server
-```bash
-cd backend
-python -m pip install -r requirements.txt  # Or install dependencies
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-### 5. Run Frontend Web Application
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-### 6. Running the Tests
+### Running the Tests
 
 ```bash
 cd backend
 python3 -m pytest
 ```
 
-327 tests. All but the end-to-end flow need no database or running server —
-they exercise pure functions so they fail for exactly one reason. Without
-liboqs the post-quantum pipeline tests skip (they never pass vacuously), as do
-the live-IPFS-node tests without a node and the end-to-end flow without
-`RUN_E2E=1`. CI runs the full suite inside the backend image, where liboqs is
-real, against a Postgres service — so nothing is skipped there except the
-live IPFS node.
+The suite includes unit tests and opt-in live integration tests. Without
+liboqs the post-quantum tests skip; live database, chain, storage and browser
+checks need their configured services and opt-in flags. The
+[CI workflow](.github/workflows/deploy.yml) is the authoritative setup.
+Report skipped tests rather than treating them as passed.
 
 What they cover, and why these specific assertions: every test asserts a
 *refusal* as well as a success, because a happy-path-only suite would pass
@@ -896,7 +767,7 @@ signature verifier that always returned true, an upload that recorded a key it
 never wrote, and a dropped vitals validator — made 7, 1 and 2 tests fail
 respectively.
 
-### 7. Blockchain Audit Trail
+### Blockchain Audit Trail
 
 Document digests are anchored on-chain via `contracts/PHR.sol`. Every developer
 runs their own local chain — no accounts, no funds, no internet required.
@@ -943,42 +814,39 @@ BLOCKCHAIN_CONTRACT_ADDRESS="<address from deploy_contract.py>"
 Deploy once, share the resulting contract address. Use a throwaway key funded
 only with faucet ETH — never a key that holds real funds.
 
-Visit **http://localhost:3000** to log in to the platform!
+Sign in to the deployed platform: **[QuantumCare Login](https://post-quantum-blockchain-phr-securit.vercel.app/login)**.
+
+Deployed login URL: **[https://post-quantum-blockchain-phr-securit.vercel.app/login](https://post-quantum-blockchain-phr-securit.vercel.app/login)**.
 
 ---
 
-## 🔑 Demo Login Credentials
+## 🔑 Signing in and demo accounts
 
-Sign in with the **User ID**, not the email address.
+**[Open the public login page](https://post-quantum-blockchain-phr-securit.vercel.app/login)**
 
-| Role | User ID | Password | Seeded as |
-| --- | --- | --- | --- |
-| **Administrator** | `ADM-2026-000001` | `Admin@1234` | System Administrator |
-| **Doctor** | `DOC-2026-000001` | `Password@123` | Dr Carol |
-| **Patient** | `PAT-2026-000001` | `Password@123` | Bob Patient |
-| **Lab Technician** | `LAB-2026-000001` | `Password@123` | Leo LabTech |
-| **Nurse** | `NUR-2026-000001` | `Password@123` | Nina Nurse |
+Request demonstration access from the project administrator. Hosted account passwords
+are not distributed in this repository. Demo records are fictional; do not enter
+personal or real patient information.
 
-Create these with the seed scripts in `backend/` (`seed_admin.py`, then the
-role seeders). The admin password comes from `ADMIN_PASSWORD` in `.env`.
+The [verification record](docs/demo-results/2026-10-25-account-verification.json)
+contains the tested IDs and results without passwords, session tokens or keys.
+For a demonstration without account access, use the
+[public captioned video](https://post-quantum-blockchain-phr-securit.vercel.app/#project-demo).
 
-### The 500 generated accounts
+### Accounts on a new local installation
 
-After running the dataset generator every synthetic account shares one password:
+A fresh installation has no pre-created accounts. Run `backend/seed_admin.py`
+as described in [INSTALL.md](INSTALL.md). It uses a private `ADMIN_PASSWORD`
+or generates a random password printed once. Re-running it does not reset an
+existing account. Register other roles through `/signup`, approve them as an
+administrator, and use the assigned User ID with the registration password.
 
-| Role | Example | Password |
-| --- | --- | --- |
-| **Patient** | `PAT-2026-000035` | `Demo@1234` |
-| **Doctor** | `DOC-2026-000011` | `Demo@1234` |
-| **Nurse** | `NUR-2026-000006` | `Demo@1234` |
-| **Lab Technician** | `LAB-2026-000008` | `Demo@1234` |
-| **Administrator** | `ADM-2026-000004` | `Demo@1234` |
+For accounts created by the optional local dataset generator, read the actual
+credentials from `backend/dataset_credentials.csv` in that installation.
 
-The full list — every user ID, name, role and password — is written to
-`backend/dataset_credentials.csv` as the generator runs. That file is gitignored
-and regenerated by re-running the script; see the Demonstration Dataset section
-for why.
 
-`PAT-2026-000035` is the one to open first: it carries the most data, and its
-Medical Records show decrypted diagnosis text that is unreadable ciphertext in
-the database.
+### Workflow and security completion
+
+See [completion and rollout guide](docs/12_Completion_and_Rollout.md) for document authoring,
+account recovery/MFA, appointment scheduling, key lifecycle, column migration and optional
+proof-enforced consent. These changes require schema migration before serving requests.
