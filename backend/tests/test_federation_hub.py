@@ -236,3 +236,39 @@ def test_a_plain_http_hub_elsewhere_is_flagged():
     assert federation.transport_warning("http://hub.example.org")
     assert federation.transport_warning("https://hub.example.org") is None
     assert federation.transport_warning("http://localhost:8001") is None
+
+
+def test_closed_round_is_refused_and_not_overwritten(hub):
+    cur = hub([_peer(), {"n": 4}])
+    status, detail = _refused(main.receive_peer_parameters, _submission(round_number=3))
+    assert status == 409 and "closed" in detail
+    assert not cur.statements("INSERT INTO FederatedRounds")
+
+
+def test_new_timestamp_cannot_replace_same_round_submission(hub):
+    cur = hub([_peer(), {"n": 3}, {"exists": 1}])
+    status, _ = _refused(main.receive_peer_parameters, _submission(round_number=3))
+    assert status == 409
+    assert not cur.statements("INSERT INTO FederatedRounds")
+
+
+def test_bootstrap_state_is_signed_even_without_a_global_model(hub):
+    ts = int(time.time())
+    headers = {"X-Federation-Node": NODE, "X-Federation-Timestamp": str(ts),
+               "X-Federation-Signature": federation.request_signature(NODE, ts, "round-state", SECRET)}
+    hub([_peer(), None, {"n": 6}])
+    body = main.serve_round_state(_Request(headers))
+    assert body["parameters"] is None and body["open_round"] == 6
+    assert federation.verify_model_signature(NODE, ts, body, SECRET)
+    body["open_round"] = 1
+    assert not federation.verify_model_signature(NODE, ts, body, SECRET)
+
+
+def test_strict_round_waits_before_training_or_writing(hub, monkeypatch):
+    monkeypatch.setenv("FEDERATION_REQUIRE_FRESH_UPDATES", "true")
+    monkeypatch.setenv("FEDERATION_MIN_PEERS", "2")
+    cur = hub([{"n": 1}, {"n": 3}])
+    status, detail = _refused(main._federated_round, cur)
+    assert status == 409 and "2 fresh peer updates" in detail
+    assert not cur.statements("INSERT INTO")
+    assert cur.statements("pg_advisory_xact_lock")

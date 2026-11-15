@@ -31,7 +31,8 @@ export default function FederatedLearningPanel({ onChanged }: { onChanged: () =>
     Promise.all([getFederationParticipation(), getFederatedClassifierStatus(), getFederatedModels()])
       .then(([p, c, m]) => { if (live) { setParticipation(p); setClassifier(c); setModels(m); } })
       .catch((e) => { if (live) setError(e instanceof Error ? e.message : "Failed to load federation state"); });
-    return () => { live = false; };
+    const timer = window.setInterval(() => setVersion((v) => v + 1), 10000);
+    return () => { live = false; window.clearInterval(timer); };
   }, [version]);
 
   const run = useCallback(async (key: string, action: () => Promise<string>) => {
@@ -165,7 +166,7 @@ export default function FederatedLearningPanel({ onChanged }: { onChanged: () =>
               <p className="font-bold text-slate-800">{classifier.labels.threats} threats · {classifier.labels.benign} benign</p>
             </div>
             <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-100">
-              <p className="text-slate-500">Local training</p>
+              <p className="text-slate-500">Training fit (not validation)</p>
               <p className="font-bold text-slate-800">
                 {classifier.trainable ? `fit ${pct(classifier.local_fit?.accuracy)} accuracy` : `needs ${classifier.needs.labels}, ${classifier.needs.per_class}+ of each`}
               </p>
@@ -191,6 +192,36 @@ export default function FederatedLearningPanel({ onChanged }: { onChanged: () =>
                       : " · no total budget set"}</>
                 : `${classifier.privacy.spent.releases_without_noise} earlier release(s) had no noise, so no overall guarantee is claimed.`}
             </p>
+          )}
+        </div>
+      )}
+
+      {classifier?.validation && (
+        <div className="rounded-lg border border-violet-100 p-3">
+          <p className="text-sm font-bold text-slate-700">Separate validation data</p>
+          <p className="text-xs text-slate-500 mt-1">{classifier.validation.note}</p>
+          {classifier.validation.available && (
+            <>
+              <p className="text-xs text-slate-500 mt-1">
+                {classifier.validation.training_examples} training examples · {classifier.validation.examples} validation examples.
+                Detection: {classifier.validation.model ?? "no classifier"}. The latest candidate may have been refused by the adoption gate.
+                Synthetic lab data is for demonstration only.
+              </p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs mt-3">
+                  <thead><tr className="text-left text-slate-500"><th>Model</th><th>Accuracy</th><th>Recall</th><th>F1</th><th>Log loss ↓</th></tr></thead>
+                  <tbody>
+                    {[["Local training only", classifier.validation.local],
+                      [`Latest global candidate (round ${classifier.validation.candidate_round ?? "—"})`, classifier.validation.candidate],
+                      ["Currently used", classifier.validation.in_use]].map(([name, raw]) => {
+                      const m = typeof raw === "object" ? raw : null;
+                      return <tr key={String(name)} className="border-t border-slate-100"><td className="py-2">{String(name)}</td>
+                        <td>{pct(m?.accuracy)}</td><td>{pct(m?.recall)}</td><td>{pct(m?.f1)}</td><td>{m?.log_loss ?? "—"}</td></tr>;
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </div>
       )}

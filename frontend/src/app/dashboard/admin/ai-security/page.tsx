@@ -83,6 +83,9 @@ interface Federated {
   latest_round_evaluation?: { adopt: boolean; reasons: string[] } | null;
   open_round?: number;
   pending_peer_submissions?: number;
+  required_peer_submissions?: number;
+  require_fresh_updates?: boolean;
+  ready_for_round?: boolean;
   participant?: {
     configured: boolean;
     hub_url?: string | null;
@@ -164,6 +167,14 @@ export default function AiSecurityPage() {
   }, []);
 
   useEffect(() => { load(filter); }, [load, filter]);
+  useEffect(() => {
+    let live = true;
+    const timer = window.setInterval(() => {
+      getFederatedStatus().then((status) => { if (live) setFederated(status); }).catch(() => {});
+    }, 10000);
+    return () => { live = false; window.clearInterval(timer); };
+  }, []);
+
 
   const analyze = async () => {
     setRunning(true);
@@ -587,6 +598,12 @@ export default function AiSecurityPage() {
                 Round {federated.latest_round} was not adopted here: it would make detection on this
                 hospital&apos;s data worse ({federated.latest_round_evaluation?.reasons.join("; ")}).
                 Peers still receive it and judge it on their own data.
+              </p>
+            )}
+            {federated.require_fresh_updates && (
+              <p role="status" className="text-sm text-violet-800 bg-violet-50 rounded-lg px-3 py-2 mb-3">
+                Round {federated.open_round}: {federated.pending_peer_submissions ?? 0}/{federated.required_peer_submissions} fresh participant updates.
+                {federated.ready_for_round ? " Ready to aggregate." : " Waiting for both laptops to train and submit."}
               </p>
             )}
             {!!federated.pending_peer_submissions && (

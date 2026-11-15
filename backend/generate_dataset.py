@@ -30,6 +30,7 @@ Existing accounts are never touched — this appends.
 from __future__ import annotations
 
 import csv
+import argparse
 import os
 import random
 import sys
@@ -58,7 +59,7 @@ from app.lab_catalog import (
     get_panel, list_panels, analytes_of, apply_computed, interpretation_for,
 )
 from app.report_pdf import build_report_pdf
-from app.storage_service import upload_to_aws_s3
+from app.storage_service import upload_to_aws_s3, is_s3_configured, storage_status
 
 SHARED_PASSWORD = "Demo@1234"
 SEED = 20260903
@@ -67,14 +68,20 @@ random.seed(SEED)
 # Volumes. Patients dominate, as in a real hospital's user base.
 N_PATIENTS, N_DOCTORS, N_NURSES, N_LABTECHS, N_ADMINS = 400, 40, 30, 25, 5
 
-# A tiny run that exercises every code path, for checking the generator itself
-# before committing to the full volume.
-if "--smoke" in sys.argv:
-    N_PATIENTS, N_DOCTORS, N_NURSES, N_LABTECHS, N_ADMINS = 6, 3, 2, 2, 1
-
-DSN = (f"host={os.getenv('DB_HOST','127.0.0.1')} port={os.getenv('DB_PORT','5433')} "
+DSN = os.getenv("DATABASE_URL") or (f"host={os.getenv('DB_HOST','127.0.0.1')} port={os.getenv('DB_PORT','5433')} "
        f"dbname={os.getenv('DB_NAME','pqc_hospital')} user={os.getenv('DB_USER','postgres')} "
        f"password={os.getenv('DB_PASSWORD','')}")
+
+
+def counts_for_new_users(n: int) -> tuple[int, int, int, int, int]:
+    """Keep the 500-user role mix while reaching an exact target total."""
+    if n < 5:
+        raise ValueError("At least five new users are needed to include every role.")
+    doctors = max(1, round(n * 0.08))
+    nurses = max(1, round(n * 0.06))
+    lab_techs = max(1, round(n * 0.05))
+    admins = max(1, round(n * 0.01))
+    return n - doctors - nurses - lab_techs - admins, doctors, nurses, lab_techs, admins
 
 # ─── Name pools ──────────────────────────────────────────────────────────────
 FIRST_M = ["Arjun","Ravi","Vikram","Karthik","Suresh","Anil","Rahul","Manoj","Prakash","Sanjay",
@@ -615,13 +622,41 @@ def reset_synthetic(conn) -> int:
 
 
 def main() -> None:
-    upload_s3 = "--no-s3" not in sys.argv
+    parser = argparse.ArgumentParser(description="Generate fictional users and encrypted reports.")
+    parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--reset", action="store_true")
+    parser.add_argument("--no-s3", action="store_true")
+    parser.add_argument("--target-total-users", type=int,
+                        help="Append only enough users to reach this database-wide total")
+    parser.add_argument("--plan", action="store_true",
+                        help="Show the current count and planned additions without writing")
+    parser.add_argument("--expected-existing-users", type=int,
+                        help="Required with --target-total-users; abort if the count has changed")
+    parser.add_argument("--credentials-output", type=Path,
+                        help="Private path for generated synthetic account credentials")
+    args = parser.parse_args()
+    if args.target_total_users is not None and (args.reset or args.smoke):
+        parser.error("--target-total-users cannot be combined with --reset or --smoke")
+    if args.plan and args.target_total_users is None:
+        parser.error("--plan requires --target-total-users")
+    if args.target_total_users is not None and args.expected_existing_users is None and not args.plan:
+        parser.error("--expected-existing-users is required for a target-total write")
+    if args.target_total_users is not None and not args.plan:
+        demo_password = os.getenv("DEMO_DATASET_PASSWORD", "")
+        if len(demo_password) < 16 or demo_password == "Demo@1234":
+            parser.error("Set a private DEMO_DATASET_PASSWORD of at least 16 characters")
+        global SHARED_PASSWORD
+        SHARED_PASSWORD = demo_password
+    global N_PATIENTS, N_DOCTORS, N_NURSES, N_LABTECHS, N_ADMINS
+    if args.smoke:
+        N_PATIENTS, N_DOCTORS, N_NURSES, N_LABTECHS, N_ADMINS = 6, 3, 2, 2, 1
+    upload_s3 = not args.no_s3
     started = time.perf_counter()
 
     print("\n" + "=" * 66)
     print("  QuantumCare — synthetic dataset generation")
     print("=" * 66)
-    print(f"  target users : {N_PATIENTS + N_DOCTORS + N_NURSES + N_LABTECHS + N_ADMINS}")
+    print(f"  target users : {args.target_total_users if args.target_total_users is not None else N_PATIENTS + N_DOCTORS + N_NURSES + N_LABTECHS + N_ADMINS}")
     print(f"  key material : {ML_KEM_ALG} + {ML_DSA_ALG}  (genuine, not simulated)")
     print(f"  cloud upload : {'enabled' if upload_s3 else 'skipped (--no-s3)'}")
     print(f"  seed         : {SEED}  (re-running reproduces the same dataset)")
@@ -629,13 +664,31 @@ def main() -> None:
 
     credentials: list[dict] = []
     with psycopg.connect(DSN) as conn:
-        if "--reset" in sys.argv:
+        if args.reset:
             removed = reset_synthetic(conn)
             print(f"  reset: removed {removed} previously generated users")
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM Users")
             before = cur.fetchone()[0]
         print(f"  pre-existing users preserved: {before}\n")
+        if args.target_total_users is not None:
+            if args.expected_existing_users is not None and before != args.expected_existing_users:
+                raise RuntimeError(f"Expected {args.expected_existing_users} existing users; found {before}. No users were added.")
+            to_add = args.target_total_users - before
+            if to_add <= 0:
+                print("Target already reached; nothing to add.")
+                return
+            N_PATIENTS, N_DOCTORS, N_NURSES, N_LABTECHS, N_ADMINS = counts_for_new_users(to_add)
+            print(f"  adding {to_add} fictional users to reach {args.target_total_users}\n")
+            if args.plan:
+                print("Plan only; no users, reports or S3 objects were created.")
+                return
+            if upload_s3:
+                if not is_s3_configured():
+                    raise RuntimeError("S3 credentials and bucket must be configured before adding hosted users. Use --no-s3 only for a database-only test.")
+                cloud = storage_status()
+                if not cloud["connected"]:
+                    raise RuntimeError(f"S3 bucket is not reachable: {cloud['error']}. No users were added.")
 
         print("  [1/3] users + post-quantum keypairs")
         made = create_users(conn, credentials)
@@ -654,12 +707,14 @@ def main() -> None:
         print("\n  [3/3] lab reports through the full security pipeline")
         rstats = create_reports(conn, jobs, upload_s3)
 
-    out = BASE / "dataset_credentials.csv"
-    with out.open("w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=["user_id", "full_name", "role", "password",
-                                           "email", "specialization"])
-        w.writeheader()
-        w.writerows(credentials)
+    out = args.credentials_output or (None if args.target_total_users is not None else BASE / "dataset_credentials.csv")
+    if out is not None:
+        with out.open("x" if args.target_total_users is not None else "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=["user_id", "full_name", "role", "password",
+                                               "email", "specialization"])
+            w.writeheader()
+            w.writerows(credentials)
+        os.chmod(out, 0o600)
 
     total = sum(counts.values()) + rstats["reports"] + len(credentials)
     print("\n" + "=" * 66)
@@ -672,8 +727,9 @@ def main() -> None:
               + (f"   ({rstats['s3_failed']} failed)" if rstats["s3_failed"] else ""))
     print(f"  TOTAL ROWS         {total:>6}")
     print(f"  elapsed            {time.perf_counter()-started:>6.1f}s")
-    print(f"\n  credentials -> {out}")
-    print(f"  every synthetic account's password is: {SHARED_PASSWORD}")
+    print(f"\n  credentials -> {out or 'not written'}")
+    if args.target_total_users is None:
+        print(f"  every synthetic account's password is: {SHARED_PASSWORD}")
     print("=" * 66 + "\n")
 
 

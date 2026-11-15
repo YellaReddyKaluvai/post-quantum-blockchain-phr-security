@@ -15,6 +15,7 @@ function LoginForm() {
   const { setSession } = useAuth();
   const [userId, setUserId] = useState("");
   const [password, setPassword] = useState("");
+  const [otp, setOtp] = useState("");
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -30,7 +31,7 @@ function LoginForm() {
     if (id && password) {
       setLoading(true);
       try {
-        const result = await login(id, password);
+        const result = await login(id, password, otp);
         // The session itself arrived as an HttpOnly cookie; the token in the
         // response body is deliberately not kept anywhere a script could read it.
         setAuthCookies(result.role, result.public_user_id || id);
@@ -129,6 +130,10 @@ function LoginForm() {
                   </div>
                 </div>
 
+                <label className="block text-sm font-semibold mt-4">Authenticator or recovery code (if enabled)
+                  <input autoComplete="one-time-code" value={otp} onChange={e => setOtp(e.target.value)} className="w-full border rounded-xl p-3 mt-1" />
+                </label>
+                <Link href="/forgot-password" className="block text-sm text-cyan-700 mt-3">Forgot password?</Link>
                 <button type="submit" disabled={loading}
                   className="w-full mt-6 bg-gradient-to-r from-cyan-500 to-teal-500 hover:from-cyan-400 hover:to-teal-400 disabled:opacity-50 text-white py-4 rounded-2xl font-extrabold transition-all flex items-center justify-center gap-2 shadow-[0_8px_16px_-4px_rgba(8,145,178,0.4)] hover:shadow-[0_12px_20px_-4px_rgba(8,145,178,0.5)] hover:-translate-y-1">
                   {loading ? <Loader2 className="w-5 h-5 animate-spin"/> : "Authenticate Portal"} <ArrowRight className="w-5 h-5" />
