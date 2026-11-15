@@ -12,7 +12,11 @@ def test_bundled_contract_matches_source_and_loads_without_foundry_output(monkey
 
     artifact = chain_client.load_contract_artifact()
 
-    assert artifact["sourceSha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    # The backend-only Docker image omits the repository-root Solidity source.
+    # Check the source fingerprint when testing a full checkout; the image
+    # still validates the bundled ABI and bytecode below.
+    if source.exists():
+        assert artifact["sourceSha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
     assert artifact["compiler"] == "solc 0.8.20"
     assert artifact["bytecode"]["object"].startswith("0x")
     assert len(artifact["bytecode"]["object"]) > 1000
