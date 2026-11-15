@@ -31,9 +31,11 @@ from app.security import decrypt_data_strict, encrypt_data, looks_encrypted
 # encrypt_data — test_key_rotation keeps this in step with the code that writes them.
 ENCRYPTED_COLUMNS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("Users", "id", ("date_of_birth_encrypted", "blood_group_encrypted",
-                     "mlkem_private_key_encrypted", "mldsa_private_key_encrypted")),
+                     "mlkem_private_key_encrypted", "mldsa_private_key_encrypted",
+                      "mfa_secret_encrypted", "mfa_pending_encrypted")),
     ("Diagnoses", "id", ("title", "description", "symptoms", "doctor_notes", "recommended_tests")),
     ("Prescriptions", "id", ("medicine_name", "dosage", "frequency", "duration", "instructions")),
+    ("PqcKeyVersions", "id", ("mlkem_private_key_encrypted",)),
     ("Consent", "consent_id", ("zkp_token_encrypted",)),
     ("FederatedPeers", "id", ("shared_secret_encrypted",)),
     ("FederationParticipation", "id", ("shared_secret_encrypted",)),

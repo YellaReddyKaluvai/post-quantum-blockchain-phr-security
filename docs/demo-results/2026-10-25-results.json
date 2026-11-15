@@ -1,0 +1,699 @@
+{
+  "run_id": "20261025T084816Z-e92c",
+  "started_utc": "2026-10-25T08:48:23.656035+00:00",
+  "origin": "https://post-quantum-blockchain-phr-securit.vercel.app",
+  "synthetic_data": true,
+  "checks": [
+    {
+      "name": "frontend proxy health",
+      "passed": true
+    },
+    {
+      "name": "anonymous admin request refused",
+      "passed": true
+    },
+    {
+      "name": "Administrator login role",
+      "passed": true
+    },
+    {
+      "name": "Administrator secure session cookie",
+      "passed": true
+    },
+    {
+      "name": "Patient login role",
+      "passed": true
+    },
+    {
+      "name": "Patient secure session cookie",
+      "passed": true
+    },
+    {
+      "name": "Doctor login role",
+      "passed": true
+    },
+    {
+      "name": "Doctor secure session cookie",
+      "passed": true
+    },
+    {
+      "name": "Lab Technician login role",
+      "passed": true
+    },
+    {
+      "name": "Lab Technician secure session cookie",
+      "passed": true
+    },
+    {
+      "name": "Nurse login role",
+      "passed": true
+    },
+    {
+      "name": "Nurse secure session cookie",
+      "passed": true
+    },
+    {
+      "name": "doctor cannot read without permission",
+      "passed": true
+    },
+    {
+      "name": "patient approval enables authorized access",
+      "passed": true
+    },
+    {
+      "name": "patient can read recorded vitals",
+      "passed": true
+    },
+    {
+      "name": "patient receives clinical record",
+      "passed": true
+    },
+    {
+      "name": "laboratory receives doctor order",
+      "passed": true
+    },
+    {
+      "name": "post-quantum algorithms reported",
+      "passed": true
+    },
+    {
+      "name": "report digest matches",
+      "passed": true
+    },
+    {
+      "name": "ML-DSA signature verifies",
+      "passed": true
+    },
+    {
+      "name": "patient receives a decrypted PDF",
+      "passed": true
+    },
+    {
+      "name": "patient notified of report",
+      "passed": true
+    },
+    {
+      "name": "patient cannot access admin API",
+      "passed": true
+    },
+    {
+      "name": "revocation blocks doctor and delegated nurse",
+      "passed": true
+    },
+    {
+      "name": "administrator audit and security APIs respond",
+      "passed": true
+    },
+    {
+      "name": "Administrator logout invalidates session",
+      "passed": true
+    },
+    {
+      "name": "Patient logout invalidates session",
+      "passed": true
+    },
+    {
+      "name": "Doctor logout invalidates session",
+      "passed": true
+    },
+    {
+      "name": "Lab Technician logout invalidates session",
+      "passed": true
+    },
+    {
+      "name": "Nurse logout invalidates session",
+      "passed": true
+    }
+  ],
+  "requests": [
+    {
+      "operation": "/api/health",
+      "role": "Anonymous",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 23339.14
+    },
+    {
+      "operation": "anonymous admin refusal",
+      "role": "Anonymous",
+      "method": "GET",
+      "status": 401,
+      "elapsed_ms": 557.64
+    },
+    {
+      "operation": "login",
+      "role": "Administrator",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 1726.23
+    },
+    {
+      "operation": "register Patient",
+      "role": "Anonymous",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 1702.42
+    },
+    {
+      "operation": "/api/admin/registrations/pending",
+      "role": "Administrator",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 352.16
+    },
+    {
+      "operation": "approve Patient",
+      "role": "Administrator",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 335.37
+    },
+    {
+      "operation": "login",
+      "role": "Patient",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 1815.45
+    },
+    {
+      "operation": "register Doctor",
+      "role": "Anonymous",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 1677.37
+    },
+    {
+      "operation": "/api/admin/registrations/pending",
+      "role": "Administrator",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 304.16
+    },
+    {
+      "operation": "approve Doctor",
+      "role": "Administrator",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 274.85
+    },
+    {
+      "operation": "login",
+      "role": "Doctor",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 1733.36
+    },
+    {
+      "operation": "register Lab Technician",
+      "role": "Anonymous",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 1780.62
+    },
+    {
+      "operation": "/api/admin/registrations/pending",
+      "role": "Administrator",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 323.58
+    },
+    {
+      "operation": "approve Lab Technician",
+      "role": "Administrator",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 372.14
+    },
+    {
+      "operation": "login",
+      "role": "Lab Technician",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 1614.59
+    },
+    {
+      "operation": "register Nurse",
+      "role": "Anonymous",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 1588.9
+    },
+    {
+      "operation": "/api/admin/registrations/pending",
+      "role": "Administrator",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 360.95
+    },
+    {
+      "operation": "approve Nurse",
+      "role": "Administrator",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 314.56
+    },
+    {
+      "operation": "login",
+      "role": "Nurse",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 1729.24
+    },
+    {
+      "operation": "doctor refused before consent",
+      "role": "Doctor",
+      "method": "GET",
+      "status": 403,
+      "elapsed_ms": 293.52
+    },
+    {
+      "operation": "/api/doctor/access-requests",
+      "role": "Doctor",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 291.48
+    },
+    {
+      "operation": "/api/patient/access-requests/92b33f62-c580-40de-9c9c-df59190dd970/approve",
+      "role": "Patient",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 436.62
+    },
+    {
+      "operation": "doctor allowed after consent",
+      "role": "Doctor",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 473.53
+    },
+    {
+      "operation": "nurse refused before care assignment",
+      "role": "Nurse",
+      "method": "GET",
+      "status": 403,
+      "elapsed_ms": 539.7
+    },
+    {
+      "operation": "/api/doctor/patients/b832c719-b2a1-4f91-9211-0e3749670403/care-team",
+      "role": "Doctor",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 519.28
+    },
+    {
+      "operation": "/api/nurse/patients/b832c719-b2a1-4f91-9211-0e3749670403/vitals",
+      "role": "Nurse",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 460.4
+    },
+    {
+      "operation": "/api/nurse/patients/b832c719-b2a1-4f91-9211-0e3749670403/notes",
+      "role": "Nurse",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 276.12
+    },
+    {
+      "operation": "/api/patient/vitals",
+      "role": "Patient",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 270.56
+    },
+    {
+      "operation": "/api/doctor/patients/b832c719-b2a1-4f91-9211-0e3749670403/diagnosis",
+      "role": "Doctor",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 261.65
+    },
+    {
+      "operation": "/api/patient/medical-records",
+      "role": "Patient",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 304.82
+    },
+    {
+      "operation": "/api/doctor/requests",
+      "role": "Doctor",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 284.7
+    },
+    {
+      "operation": "/api/lab-tech/requests",
+      "role": "Lab Technician",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 325.31
+    },
+    {
+      "operation": "/api/lab-tech/requests/e4788067-13ba-43eb-ae51-0d33b48bd9e4/status",
+      "role": "Lab Technician",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 303.98
+    },
+    {
+      "operation": "/api/lab-tech/reports/create",
+      "role": "Lab Technician",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 572.97
+    },
+    {
+      "operation": "/api/patient/lab-reports/ca9433f2-ee9c-4676-8d43-a10102288cf6/verify",
+      "role": "Patient",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 327.09
+    },
+    {
+      "operation": "/api/patient/lab-reports/ca9433f2-ee9c-4676-8d43-a10102288cf6/download",
+      "role": "Patient",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 283.19
+    },
+    {
+      "operation": "/api/patient/notifications",
+      "role": "Patient",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 241.66
+    },
+    {
+      "operation": "patient admin-role refusal",
+      "role": "Patient",
+      "method": "GET",
+      "status": 403,
+      "elapsed_ms": 418.42
+    },
+    {
+      "operation": "/api/patient/consent/ea26c4dc-e44c-41dc-bd46-17657f561a2d/revoke",
+      "role": "Patient",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 335.97
+    },
+    {
+      "operation": "doctor refused after withdrawal",
+      "role": "Doctor",
+      "method": "GET",
+      "status": 403,
+      "elapsed_ms": 318.68
+    },
+    {
+      "operation": "delegated nurse refused after withdrawal",
+      "role": "Nurse",
+      "method": "GET",
+      "status": 403,
+      "elapsed_ms": 313.5
+    },
+    {
+      "operation": "/api/patient/consent/ea26c4dc-e44c-41dc-bd46-17657f561a2d/grant",
+      "role": "Patient",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 342.48
+    },
+    {
+      "operation": "access restored by patient for walkthrough",
+      "role": "Doctor",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 302.81
+    },
+    {
+      "operation": "administrator audit trail",
+      "role": "Administrator",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 253.99
+    },
+    {
+      "operation": "administrator security overview",
+      "role": "Administrator",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 391.06
+    },
+    {
+      "operation": "metric: health",
+      "role": "Anonymous",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 233.57
+    },
+    {
+      "operation": "metric: health",
+      "role": "Anonymous",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 298.38
+    },
+    {
+      "operation": "metric: health",
+      "role": "Anonymous",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 309.56
+    },
+    {
+      "operation": "metric: health",
+      "role": "Anonymous",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 260.95
+    },
+    {
+      "operation": "metric: health",
+      "role": "Anonymous",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 288.62
+    },
+    {
+      "operation": "metric: patient_dashboard",
+      "role": "Patient",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 304.54
+    },
+    {
+      "operation": "metric: patient_dashboard",
+      "role": "Patient",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 309.17
+    },
+    {
+      "operation": "metric: patient_dashboard",
+      "role": "Patient",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 315.79
+    },
+    {
+      "operation": "metric: patient_dashboard",
+      "role": "Patient",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 264.45
+    },
+    {
+      "operation": "metric: patient_dashboard",
+      "role": "Patient",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 276.56
+    },
+    {
+      "operation": "metric: report_verification",
+      "role": "Patient",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 285.39
+    },
+    {
+      "operation": "metric: report_verification",
+      "role": "Patient",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 266.53
+    },
+    {
+      "operation": "metric: report_verification",
+      "role": "Patient",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 348.96
+    },
+    {
+      "operation": "metric: report_verification",
+      "role": "Patient",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 280.1
+    },
+    {
+      "operation": "metric: report_verification",
+      "role": "Patient",
+      "method": "GET",
+      "status": 200,
+      "elapsed_ms": 320.5
+    },
+    {
+      "operation": "logout Administrator",
+      "role": "Administrator",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 506.05
+    },
+    {
+      "operation": "session refused after logout Administrator",
+      "role": "Administrator",
+      "method": "GET",
+      "status": 401,
+      "elapsed_ms": 305.8
+    },
+    {
+      "operation": "logout Patient",
+      "role": "Patient",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 484.3
+    },
+    {
+      "operation": "session refused after logout Patient",
+      "role": "Patient",
+      "method": "GET",
+      "status": 401,
+      "elapsed_ms": 307.55
+    },
+    {
+      "operation": "logout Doctor",
+      "role": "Doctor",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 286.07
+    },
+    {
+      "operation": "session refused after logout Doctor",
+      "role": "Doctor",
+      "method": "GET",
+      "status": 401,
+      "elapsed_ms": 271.72
+    },
+    {
+      "operation": "logout Lab Technician",
+      "role": "Lab Technician",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 296.22
+    },
+    {
+      "operation": "session refused after logout Lab Technician",
+      "role": "Lab Technician",
+      "method": "GET",
+      "status": 401,
+      "elapsed_ms": 305.69
+    },
+    {
+      "operation": "logout Nurse",
+      "role": "Nurse",
+      "method": "POST",
+      "status": 200,
+      "elapsed_ms": 280.68
+    },
+    {
+      "operation": "session refused after logout Nurse",
+      "role": "Nurse",
+      "method": "GET",
+      "status": 401,
+      "elapsed_ms": 271.63
+    }
+  ],
+  "versions": {
+    "runner_python": "3.9.6",
+    "runner_sha256": "55e3023ad3756e019bbe2b63f860f482829922c0c129f27baa9a4605a82aaafc",
+    "backend_git_revision": "41abb2c776fcf6e3d8689bcb570628b2ac839af1",
+    "frontend_git_revision": "515f499c167c61d6e5762d9639534abda71c6a28",
+    "revision_source": "operator-supplied hosting metadata",
+    "dataset": "synthetic-cbc-v1",
+    "schema": "repository backend/db/init.sql"
+  },
+  "configuration": {
+    "concurrency": 1,
+    "latency_samples_per_route": 5,
+    "mutations": "four fictional accounts, consent, care team, vitals, diagnosis, lab request and report",
+    "external_integrations": "reported from report verification; never inferred from a CID"
+  },
+  "limitations": [
+    "Not a load test: client-observed latency includes network and hosting delays.",
+    "No database tampering or real patient data is used.",
+    "A successful PDF download verifies decryption/release, not independent database-at-rest inspection.",
+    "No independent federated institutions or trained classifier evaluation is claimed."
+  ],
+  "report": {
+    "report_id": "ca9433f2-ee9c-4676-8d43-a10102288cf6",
+    "report_no": "LR-2026-000001",
+    "panel_code": "CBC",
+    "document_hash": "0bd6c003b41d1f042c9d245397ab9a36b404343e619a96849972cd4fcc9a52ab",
+    "signature_algorithm": "ML-DSA-65",
+    "kem_algorithm": "ML-KEM-768",
+    "anchored_on": "local-simulated"
+  },
+  "verification": {
+    "hash_matches": true,
+    "signature_valid": true,
+    "blockchain_verified": null,
+    "anchored_on": "local-simulated",
+    "signature_algorithm": "ML-DSA-65",
+    "kem_algorithm": "ML-KEM-768"
+  },
+  "sample_pdf": {
+    "bytes": 4620,
+    "sha256": "0bd6c003b41d1f042c9d245397ab9a36b404343e619a96849972cd4fcc9a52ab"
+  },
+  "latency": {
+    "health": {
+      "samples_ms": [
+        233.57,
+        298.38,
+        309.56,
+        260.95,
+        288.62
+      ],
+      "median_ms": 288.62,
+      "p95_ms": 309.56
+    },
+    "patient_dashboard": {
+      "samples_ms": [
+        304.54,
+        309.17,
+        315.79,
+        264.45,
+        276.56
+      ],
+      "median_ms": 304.54,
+      "p95_ms": 315.79
+    },
+    "report_verification": {
+      "samples_ms": [
+        285.39,
+        266.53,
+        348.96,
+        280.1,
+        320.5
+      ],
+      "median_ms": 285.39,
+      "p95_ms": 348.96
+    }
+  },
+  "finished_utc": "2026-10-25T08:49:22.422219+00:00",
+  "all_passed": true
+}
