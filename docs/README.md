@@ -16,6 +16,7 @@ Start with [installation](../INSTALL.md) for a new checkout, or
 | [Database schema](9_Database_Schema.md) | Relationships, encryption and indexes |
 | [Federation deployment](10_Federation_Deployment.md) | Hub and independent participants |
 | [Repository checklist](11_Repository_Checklist.md) | Evidence for repository requirements |
+| [Cloud storage and scale](13_Cloud_Storage_and_Scale.md) | S3, PostgreSQL backups and a 1,000-user test |
 
 Reusable resources include [the SQL schema](../backend/db/init.sql),
 [backend configuration](../backend/.env.example),

@@ -31,7 +31,6 @@ from app.storage_service import (
     s3_object_exists,
     storage_status,
     upload_to_aws_s3,
-    generate_ipfs_cid_v0,
 )
 
 
@@ -93,8 +92,10 @@ def main() -> int:
     with get_db() as conn:
         for r in to_upload:
             body = r["encrypted_document"].encode("utf-8")
-            cid = generate_ipfs_cid_v0(body)
-            name = f"{cid}_{(r['report_id_public'] or str(r['id']))}_{r['panel_code'] or 'REPORT'}.enc"
+            # An existing IPFS CID may identify a UnixFS object published by
+            # kubo. Recomputing a raw-byte CID here would replace that valid
+            # pointer with a different object that was never pinned.
+            name = f"{(r['report_id_public'] or str(r['id']))}_{r['panel_code'] or 'REPORT'}.enc"
             try:
                 s3_key, _ = upload_to_aws_s3(body, name)
             except StorageError as exc:
@@ -104,8 +105,8 @@ def main() -> int:
 
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE LabReports SET s3_key = %s, ipfs_cid = %s WHERE id = %s",
-                    (s3_key, cid, r["id"]),
+                    "UPDATE LabReports SET s3_key = %s WHERE id = %s",
+                    (s3_key, r["id"]),
                 )
                 conn.commit()
             print(f"    repaired {r['report_id_public'] or r['id']} -> {s3_key}")
