@@ -15,6 +15,7 @@ function LoginForm() {
   const { setSession } = useAuth();
   const [userId, setUserId] = useState("");
   const [password, setPassword] = useState("");
+  const [otp, setOtp] = useState("");
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -24,16 +25,19 @@ function LoginForm() {
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;                      // one sign-in attempt at a time
     setError("");
-    if (userId && password) {
+    const id = userId.trim();
+    if (id && password) {
       setLoading(true);
       try {
-        const result = await login(userId, password);
-        setAuthCookies(result.access_token, result.role, userId);
+        const result = await login(id, password, otp);
+        // The session itself arrived as an HttpOnly cookie; the token in the
+        // response body is deliberately not kept anywhere a script could read it.
+        setAuthCookies(result.role, result.public_user_id || id);
         setSession({
           role: result.role,
-          userId: userId,
-          accessToken: result.access_token,
+          userId: result.public_user_id || id,
         });
         const appRole = normalizeRole(result.role);
         const dashPath = appRole ? dashboardRouteMap[appRole] : "/login";
@@ -108,24 +112,28 @@ function LoginForm() {
                   </span>
                 </div>
               )}
-              {error && <div className="mb-5 p-3.5 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-semibold">{error}</div>}
+              {error && <div role="alert" className="mb-5 p-3.5 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-xs font-semibold">{error}</div>}
 
               <form onSubmit={handleLoginSubmit} className="space-y-5 mt-6">
                 <div>
-                  <label className={labelClass}>User ID</label>
+                  <label htmlFor="login-id" className={labelClass}>User ID</label>
                   <div className="relative group">
                     <User className="absolute left-4 top-1/2 -translate-y-1/2 w-[20px] h-[20px] text-teal-500 group-focus-within:text-cyan-500 group-focus-within:drop-shadow-sm transition-colors" />
-                    <input type="text" required value={userId} onChange={e => setUserId(e.target.value)} className={inputClass} placeholder="PAT-2026-000001" />
+                    <input id="login-id" type="text" required autoComplete="username" value={userId} onChange={e => setUserId(e.target.value)} className={inputClass} placeholder="PAT-2026-000001" />
                   </div>
                 </div>
                 <div>
-                  <label className={labelClass}>Password</label>
+                  <label htmlFor="login-password" className={labelClass}>Password</label>
                   <div className="relative group">
                     <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-[20px] h-[20px] text-teal-500 group-focus-within:text-cyan-500 group-focus-within:drop-shadow-sm transition-colors" />
-                    <input type="password" required value={password} onChange={e => setPassword(e.target.value)} className={inputClass} placeholder="••••••••••••" />
+                    <input id="login-password" type="password" required autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} className={inputClass} placeholder="••••••••••••" />
                   </div>
                 </div>
 
+                <label className="block text-sm font-semibold mt-4">Authenticator or recovery code (if enabled)
+                  <input autoComplete="one-time-code" value={otp} onChange={e => setOtp(e.target.value)} className="w-full border rounded-xl p-3 mt-1" />
+                </label>
+                <Link href="/forgot-password" className="block text-sm text-cyan-700 mt-3">Forgot password?</Link>
                 <button type="submit" disabled={loading}
                   className="w-full mt-6 bg-gradient-to-r from-cyan-500 to-teal-500 hover:from-cyan-400 hover:to-teal-400 disabled:opacity-50 text-white py-4 rounded-2xl font-extrabold transition-all flex items-center justify-center gap-2 shadow-[0_8px_16px_-4px_rgba(8,145,178,0.4)] hover:shadow-[0_12px_20px_-4px_rgba(8,145,178,0.5)] hover:-translate-y-1">
                   {loading ? <Loader2 className="w-5 h-5 animate-spin"/> : "Authenticate Portal"} <ArrowRight className="w-5 h-5" />

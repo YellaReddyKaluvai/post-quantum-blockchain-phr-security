@@ -18,3 +18,19 @@ contracts/out/
 
 # Local editor/tooling config (machine-specific paths)
 .claude/
+
+# Generated demo dataset credentials (regenerate with generate_dataset.py)
+backend/dataset_credentials.csv
+
+# Keys generated on first start when none is configured (see app/config.py)
+backend/.secret_key
+backend/.ledger_key
+db_backups/
+
+# Local database scratch script: holds a real connection password.
+backend/test_db.py
+
+# Generated working-demonstration output; publish only reviewed sample evidence.
+lab-data/
+demo-runs/
+quantumcare-demo-private/

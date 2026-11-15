@@ -4,20 +4,7 @@ import React, { useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
-import {
-  LayoutDashboard,
-  Users,
-  FileText,
-  Calendar,
-  Bell,
-  User,
-  LogOut,
-  ShieldCheck,
-  Menu,
-  X,
-  ChevronLeft,
-  FlaskConical,
-} from "lucide-react";
+import { Bell, Calendar, ChevronLeft, FileText, Film, FlaskConical, KeyRound, LayoutDashboard, LogOut, Menu, ShieldCheck, User, Users, X } from "lucide-react";
 import { logout } from "@/lib/session";
 import { useAuth } from "@/context/AuthContext";
 
@@ -25,7 +12,9 @@ const navItems = [
   { label: "Dashboard", icon: LayoutDashboard, href: "/dashboard/doctor" },
   { label: "My Patients", icon: Users, href: "/dashboard/doctor/patients" },
   { label: "Lab Requests", icon: FlaskConical, href: "/dashboard/doctor/lab-requests" },
+  { label: "Access Requests", icon: KeyRound, href: "/dashboard/doctor/access-requests" },
   { label: "Reports & Documents", icon: FileText, href: "/dashboard/doctor/reports" },
+  { label: "Imaging", icon: Film, href: "/dashboard/doctor/imaging" },
   { label: "Appointments", icon: Calendar, href: "/dashboard/doctor/appointments" },
   { label: "Notifications", icon: Bell, href: "/dashboard/doctor/notifications" },
   { label: "My Profile", icon: User, href: "/dashboard/doctor/profile" },
@@ -53,7 +42,8 @@ export default function DoctorLayout({ children }: { children: React.ReactNode }
     <div className="flex flex-col h-full">
       {/* Logo */}
       <div className="px-5 py-6 border-b border-slate-700/50">
-        <Link href="/dashboard/doctor" className="flex items-center gap-3">
+        <Link href="/dashboard/account" className="block px-4 py-2 text-sm font-semibold text-cyan-300">Account security</Link>
+              <Link href="/dashboard/doctor" className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-400 to-teal-500 flex items-center justify-center shadow-lg shadow-cyan-900/30 flex-shrink-0">
             <ShieldCheck className="w-5 h-5 text-white" />
           </div>

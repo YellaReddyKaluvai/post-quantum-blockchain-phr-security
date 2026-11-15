@@ -84,32 +84,27 @@ CREATE TABLE IF NOT EXISTS AuthLogs (
 );
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- DEPRECATED — MedicalRecords is not used by any code path (0 references in
--- backend/, 0 rows). It predates the current design and its 'Firestore'
--- storage default is from an abandoned backend.
---
--- Superseded by:
+-- REMOVED — MedicalRecords. No code path ever read or wrote it; it predated the
+-- current design (its 'Firestore' storage default came from an abandoned
+-- backend). Superseded by:
 --   LabReports       — lab results, with the full hybrid-encryption columns
 --   ImagingReports   — imaging studies, same protection
 --   MedicalDocuments — doctor-authored documents
 --
--- Left in place rather than dropped so an existing deployment is not altered
--- unilaterally. Safe to remove once the team agrees; nothing reads it.
+-- New databases never create it. An existing one has it dropped only while it
+-- is empty: a deployment that somehow holds rows there keeps them, and gets a
+-- notice instead, so nothing is destroyed without a person deciding to.
 -- ─────────────────────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS MedicalRecords (
-    Medical_Record_ID UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    Patient_ID UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
-    Uploaded_By UUID REFERENCES Users(id) ON DELETE SET NULL,
-    Record_Type VARCHAR(120) NOT NULL,
-    Storage_Provider VARCHAR(40) NOT NULL DEFAULT 'Firestore',
-    Storage_Reference TEXT NOT NULL,
-    Encrypted_Key_Reference TEXT NOT NULL,
-    Key_Version INTEGER NOT NULL DEFAULT 1,
-    Blockchain_Tx_Hash VARCHAR(255),
-    Consent_Required BOOLEAN NOT NULL DEFAULT TRUE,
-    Created_At TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    Updated_At TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+DO $$
+BEGIN
+    IF to_regclass('medicalrecords') IS NOT NULL THEN
+        IF NOT EXISTS (SELECT 1 FROM MedicalRecords) THEN
+            DROP TABLE MedicalRecords;
+        ELSE
+            RAISE NOTICE 'MedicalRecords holds rows, so it was kept. Nothing reads it; migrate and drop it by hand.';
+        END IF;
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS Consent (
     Consent_ID UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -343,7 +338,6 @@ CREATE INDEX IF NOT EXISTS idx_appointments_date ON Appointments(appointment_dat
 CREATE INDEX IF NOT EXISTS idx_users_role ON Users(role);
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON Sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_auditlogs_user_id ON AuthLogs(user_id);
-CREATE INDEX IF NOT EXISTS idx_records_patient_id ON MedicalRecords(Patient_ID);
 CREATE INDEX IF NOT EXISTS idx_consent_patient_subject ON Consent(Patient_ID, Subject_User_ID);
 
 -- Email Notifications
@@ -534,3 +528,407 @@ CREATE INDEX IF NOT EXISTS idx_nursingnotes_nurse ON NursingNotes(nurse_id);
 CREATE INDEX IF NOT EXISTS idx_medadmin_patient ON MedicationAdministration(patient_id);
 CREATE INDEX IF NOT EXISTS idx_medadmin_prescription ON MedicationAdministration(prescription_id);
 CREATE INDEX IF NOT EXISTS idx_medadmin_nurse ON MedicationAdministration(nurse_id);
+
+-- ─── Doctor-initiated access requests (spec §6) ──────────────────────────────
+-- Extends Consent rather than adding a parallel table: a request and a consent
+-- are the same relationship at different stages, and splitting them would give
+-- two sources of truth for "may this doctor read this patient".
+DO $$ BEGIN
+    ALTER TYPE consent_status ADD VALUE IF NOT EXISTS 'Pending';
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN
+    ALTER TYPE consent_status ADD VALUE IF NOT EXISTS 'Rejected';
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Purpose TEXT;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Requested_Resource VARCHAR(120);
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Requested_At TIMESTAMPTZ;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Decided_At TIMESTAMPTZ;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS Decision_Note TEXT;
+CREATE INDEX IF NOT EXISTS idx_consent_patient_status ON Consent(Patient_ID, Status);
+
+-- ─── AI security layer (spec §18–25) ─────────────────────────────────────────
+-- Behavioural metadata only. No clinical content reaches these tables: the
+-- layer analyses *how* records are touched, never what they contain (§18).
+
+CREATE TABLE IF NOT EXISTS SecurityEvents (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    actor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    actor_public_id VARCHAR(20),
+    actor_role user_role,
+    event_type VARCHAR(60) NOT NULL,      -- RECORD_ACCESS, LOGIN_FAILED, EMERGENCY_ACCESS…
+    subject_patient_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    resource VARCHAR(120),
+    ip_address INET,
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS idx_secevent_actor_time ON SecurityEvents(actor_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_secevent_type ON SecurityEvents(event_type, occurred_at DESC);
+
+CREATE TABLE IF NOT EXISTS RiskAssessments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    actor_id UUID REFERENCES Users(id) ON DELETE CASCADE,
+    actor_public_id VARCHAR(20),
+    risk_score NUMERIC(5,2) NOT NULL,
+    risk_level VARCHAR(10) NOT NULL,      -- LOW | MEDIUM | HIGH
+    detection_source VARCHAR(40) NOT NULL,-- LOCAL_ANOMALY | FEDERATED_IDS
+    features JSONB NOT NULL DEFAULT '{}'::jsonb,
+    explanation JSONB NOT NULL DEFAULT '[]'::jsonb,   -- XAI attributions (§22)
+    window_start TIMESTAMPTZ,
+    window_end TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_risk_level ON RiskAssessments(risk_level, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS SecurityAlerts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    assessment_id UUID REFERENCES RiskAssessments(id) ON DELETE CASCADE,
+    actor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    severity VARCHAR(10) NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    summary TEXT NOT NULL,
+    response VARCHAR(40) NOT NULL,        -- MONITOR | WARN | VERIFY | RESTRICT | ESCALATE
+    acknowledged_at TIMESTAMPTZ,
+    acknowledged_by UUID REFERENCES Users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS SecurityIncidents (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    incident_ref VARCHAR(24) UNIQUE NOT NULL,
+    alert_id UUID REFERENCES SecurityAlerts(id) ON DELETE SET NULL,
+    actor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    event_type VARCHAR(60) NOT NULL,
+    affected_resource VARCHAR(160),
+    risk_level VARCHAR(10) NOT NULL,
+    detection_source VARCHAR(40) NOT NULL,
+    explanation TEXT,
+    response TEXT,
+    resolution TEXT,
+    status VARCHAR(20) NOT NULL DEFAULT 'Open',   -- Open | Investigating | Closed
+    audit_reference VARCHAR(80),
+    blockchain_tx_hash VARCHAR(120),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    closed_at TIMESTAMPTZ
+);
+
+-- Federated learning: one row per participating node per round. Holds model
+-- PARAMETERS only (per-feature baselines), never records — that separation is
+-- the entire point of federating (§20).
+CREATE TABLE IF NOT EXISTS FederatedRounds (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    round_number INTEGER NOT NULL,
+    node_name VARCHAR(80) NOT NULL,
+    is_simulated BOOLEAN NOT NULL DEFAULT TRUE,
+    sample_count INTEGER NOT NULL,
+    local_parameters JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(round_number, node_name)
+);
+
+CREATE TABLE IF NOT EXISTS FederatedGlobalModel (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    round_number INTEGER NOT NULL UNIQUE,
+    parameters JSONB NOT NULL,
+    contributing_nodes INTEGER NOT NULL,
+    total_samples INTEGER NOT NULL,
+    aggregation VARCHAR(20) NOT NULL DEFAULT 'FedAvg',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─── Zero-knowledge consent proofs (spec §17) ────────────────────────────────
+-- Only the commitment is public. The token itself is AES-encrypted at rest,
+-- exactly as ML-KEM private keys are, and is handed to the doctor once.
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS zkp_commitment TEXT;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS zkp_token_encrypted TEXT;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS zkp_token_collected_at TIMESTAMPTZ;
+
+-- Challenges are single-use: a proof bound to a nonce that can be presented
+-- twice is just a bearer token wearing a costume.
+CREATE TABLE IF NOT EXISTS ZkpChallenges (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    challenge VARCHAR(64) UNIQUE NOT NULL,
+    subject_user_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    consumed_at TIMESTAMPTZ,
+    verified BOOLEAN,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP + INTERVAL '5 minutes'
+);
+CREATE INDEX IF NOT EXISTS idx_zkp_challenge ON ZkpChallenges(challenge);
+
+-- ─── Federated peers (spec §20–21) ───────────────────────────────────────────
+-- A registered peer is a real remote institution that submits model parameters.
+-- Simulated peers stay flagged in FederatedRounds; these are separate and real.
+CREATE TABLE IF NOT EXISTS FederatedPeers (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    node_name VARCHAR(120) UNIQUE NOT NULL,
+    shared_secret_encrypted TEXT NOT NULL,   -- HMAC key, AES-encrypted at rest
+    contact_url TEXT,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    last_submission_at TIMESTAMPTZ,
+    submissions INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─── IPFS replication ────────────────────────────────────────────────────────
+-- One row per (CID, target): the latest state that target itself reported.
+-- 'queued' and 'pinning' are requests, not copies; only 'pinned' counts towards
+-- the replication factor. A failed target keeps its error for whoever is on call.
+CREATE TABLE IF NOT EXISTS IpfsReplicas (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    cid VARCHAR(255) NOT NULL,
+    target VARCHAR(255) NOT NULL,
+    target_kind VARCHAR(20) NOT NULL CHECK (target_kind IN ('node', 'service')),
+    status VARCHAR(20) NOT NULL CHECK (status IN ('queued', 'pinning', 'pinned', 'failed')),
+    request_id VARCHAR(255),          -- pinning-service request, polled for progress
+    error TEXT,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (cid, target)
+);
+CREATE INDEX IF NOT EXISTS idx_ipfs_replicas_status ON IpfsReplicas(status);
+
+-- ─── Connecting the security architecture (spec §7–§25) ──────────────────────
+-- Alerts now come from more than the anomaly model: integrity and signature
+-- checks, the consent ledger, access control and break-glass all report here,
+-- and an administrator needs to see which one is speaking.
+ALTER TABLE SecurityAlerts ADD COLUMN IF NOT EXISTS source VARCHAR(40) NOT NULL DEFAULT 'LOCAL_ANOMALY';
+
+-- Incidents can be worked: Open → Investigating → Closed, with a resolution.
+ALTER TABLE SecurityIncidents ADD COLUMN IF NOT EXISTS resolved_by UUID REFERENCES Users(id) ON DELETE SET NULL;
+ALTER TABLE SecurityIncidents ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+
+-- The inline risk check scores one actor per request; this keeps it cheap.
+CREATE INDEX IF NOT EXISTS idx_security_events_actor_time ON SecurityEvents(actor_id, occurred_at);
+
+-- Step-up verification: a password re-entry that the risk policy can demand
+-- before releasing records to an actor currently scoring MEDIUM/HIGH.
+CREATE TABLE IF NOT EXISTS StepUpVerifications (
+    user_id UUID PRIMARY KEY REFERENCES Users(id) ON DELETE CASCADE,
+    verified_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- On-chain consent (PHR.sol updateConsent/checkConsent). The transaction that
+-- recorded the latest decision, so a later read can check the chain agrees.
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS onchain_tx_hash VARCHAR(120);
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS onchain_authorized BOOLEAN;
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS onchain_recorded_at TIMESTAMPTZ;
+
+-- Break-glass: the behavioural risk at declaration, the compliance record it
+-- opened, and the contract's own emergency event.
+ALTER TABLE EmergencyAccess ADD COLUMN IF NOT EXISTS risk_level VARCHAR(10);
+ALTER TABLE EmergencyAccess ADD COLUMN IF NOT EXISTS incident_ref VARCHAR(24);
+ALTER TABLE EmergencyAccess ADD COLUMN IF NOT EXISTS contract_tx_hash VARCHAR(120);
+
+-- Federated models record how many real institutions built them, so a model
+-- made only from simulated peers is never used to score a real person.
+ALTER TABLE FederatedGlobalModel ADD COLUMN IF NOT EXISTS real_nodes INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE FederatedGlobalModel ADD COLUMN IF NOT EXISTS simulated_nodes INTEGER NOT NULL DEFAULT 0;
+
+-- Global models pulled from a federation hub when this hospital is a peer.
+CREATE TABLE IF NOT EXISTS FederatedHubModels (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    hub_url TEXT NOT NULL,
+    hub_round INTEGER NOT NULL,
+    parameters JSONB NOT NULL,
+    contributing_nodes INTEGER NOT NULL,
+    total_samples INTEGER NOT NULL,
+    real_nodes INTEGER NOT NULL DEFAULT 0,
+    pulled_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─── Care team: which nurses may open which patients (spec §4, §34) ─────────
+-- A nurse's access is a relationship like a doctor's, not a property of the
+-- role. It is granted by a doctor already authorized for the patient (and lasts
+-- only as long as that doctor's own access) or by an administrator (ward
+-- allocation), optionally time-boxed, and ended rather than deleted.
+CREATE TABLE IF NOT EXISTS CareTeamAssignments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    nurse_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    assigned_by UUID REFERENCES Users(id) ON DELETE SET NULL,
+    assigned_by_role VARCHAR(20) NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ,
+    ended_at TIMESTAMPTZ,
+    ended_by UUID REFERENCES Users(id) ON DELETE SET NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_care_team_active
+    ON CareTeamAssignments(patient_id, nurse_id) WHERE ended_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_care_team_nurse
+    ON CareTeamAssignments(nurse_id) WHERE ended_at IS NULL;
+
+-- A doctor re-asking after a withdrawal or refusal puts the row back to
+-- Pending. The earlier refusal must keep blocking until the patient decides.
+ALTER TABLE Consent ADD COLUMN IF NOT EXISTS prior_refusal BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- ─── Federated learning: labels, a trained classifier, adoption ─────────────
+-- An investigator's verdict on a closed incident is a training label: the
+-- actor's behaviour window at the time, and whether it was a real threat.
+CREATE TABLE IF NOT EXISTS SecurityLabels (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    actor_id UUID REFERENCES Users(id) ON DELETE SET NULL,
+    actor_role VARCHAR(40),
+    features JSONB NOT NULL,
+    label SMALLINT NOT NULL CHECK (label IN (0, 1)),
+    source VARCHAR(30) NOT NULL,
+    source_ref UUID,
+    labelled_by UUID REFERENCES Users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (source, source_ref)
+);
+ALTER TABLE SecurityIncidents ADD COLUMN IF NOT EXISTS verdict VARCHAR(20);
+ALTER TABLE FederatedGlobalModel ADD COLUMN IF NOT EXISTS aggregation_report JSONB;
+
+-- A pulled global model is evaluated on local data before it is used, and an
+-- administrator can switch between models or back to local-only detection.
+ALTER TABLE FederatedHubModels ADD COLUMN IF NOT EXISTS evaluation JSONB;
+ALTER TABLE FederatedHubModels ADD COLUMN IF NOT EXISTS adopted BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE FederatedHubModels ADD COLUMN IF NOT EXISTS decided_by UUID REFERENCES Users(id) ON DELETE SET NULL;
+ALTER TABLE FederatedHubModels ADD COLUMN IF NOT EXISTS decided_at TIMESTAMPTZ;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'federatedhubmodels' AND column_name = 'active') THEN
+        ALTER TABLE FederatedHubModels ADD COLUMN active BOOLEAN NOT NULL DEFAULT FALSE;
+        -- Before adoption existed the newest pulled model was the one in use.
+        UPDATE FederatedHubModels SET active = TRUE
+         WHERE id = (SELECT id FROM FederatedHubModels ORDER BY pulled_at DESC LIMIT 1);
+    END IF;
+END $$;
+
+-- Joining a federation from the admin screen rather than only through server
+-- environment variables. One row; the shared secret is encrypted at rest.
+CREATE TABLE IF NOT EXISTS FederationParticipation (
+    id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    hub_url TEXT NOT NULL,
+    node_name VARCHAR(120) NOT NULL,
+    shared_secret_encrypted TEXT NOT NULL,
+    updated_by UUID REFERENCES Users(id) ON DELETE SET NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_sync_at TIMESTAMPTZ,
+    last_sync_result JSONB
+);
+
+-- ─── Federation hardening ────────────────────────────────────────────────────
+-- A peer's submission carries a signed timestamp; the hub keeps the newest it
+-- accepted from each peer and refuses anything not newer (replay).
+ALTER TABLE FederatedPeers ADD COLUMN IF NOT EXISTS last_submission_ts BIGINT;
+ALTER TABLE FederatedPeers ADD COLUMN IF NOT EXISTS secret_rotated_at TIMESTAMPTZ;
+-- Peer names may be up to 120 characters (FederatedPeers); rounds must hold them.
+ALTER TABLE FederatedRounds ALTER COLUMN node_name TYPE VARCHAR(120);
+-- The hub evaluates its own global model on local data, as a participant does,
+-- before detection here uses it. Rows from before this check count as adopted.
+ALTER TABLE FederatedGlobalModel ADD COLUMN IF NOT EXISTS adopted BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE FederatedGlobalModel ADD COLUMN IF NOT EXISTS evaluation JSONB;
+
+-- ─── Session revocation ──────────────────────────────────────────────────────
+-- Each session token carries a jti; logout marks its row inactive and every
+-- request checks it, so a logged-out (or stolen) token stops working at once.
+ALTER TABLE Sessions ADD COLUMN IF NOT EXISTS jti VARCHAR(64);
+CREATE INDEX IF NOT EXISTS idx_sessions_jti ON Sessions(jti);
+
+-- ─── Differential-privacy ledger ─────────────────────────────────────────────
+-- Every classifier update this hospital released (as a participant, or into its
+-- own round as hub), with its zCDP cost rho. Summed, it is the privacy loss
+-- across all rounds. rho is NULL for a release made without noise.
+CREATE TABLE IF NOT EXISTS FederatedPrivacyLedger (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    purpose VARCHAR(20) NOT NULL,
+    epsilon DOUBLE PRECISION,
+    delta DOUBLE PRECISION,
+    sigma DOUBLE PRECISION,
+    clip DOUBLE PRECISION NOT NULL,
+    rho DOUBLE PRECISION,
+    labels INTEGER NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─── Late anchoring ──────────────────────────────────────────────────────────
+-- A locally simulated anchor later written on-chain keeps its original hash and
+-- when it was re-anchored: it proves the digest existed by that block, not earlier.
+ALTER TABLE DocumentAnchors ADD COLUMN IF NOT EXISTS original_tx_hash VARCHAR(66);
+ALTER TABLE DocumentAnchors ADD COLUMN IF NOT EXISTS reanchored_at TIMESTAMPTZ;
+
+-- Account security. No raw recovery tokens or recovery codes are persisted.
+ALTER TABLE Users ADD COLUMN IF NOT EXISTS mfa_secret_encrypted TEXT;
+ALTER TABLE Users ADD COLUMN IF NOT EXISTS mfa_pending_encrypted TEXT;
+ALTER TABLE Users ADD COLUMN IF NOT EXISTS mfa_pending_until TIMESTAMPTZ;
+ALTER TABLE Users ADD COLUMN IF NOT EXISTS mfa_last_counter BIGINT;
+CREATE TABLE IF NOT EXISTS AuthRateLimits (
+    bucket TEXT PRIMARY KEY, attempts INTEGER NOT NULL, expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS PasswordResetTokens (
+    token_hash TEXT PRIMARY KEY, user_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS MfaRecoveryCodes (
+    user_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE, code_hash TEXT NOT NULL,
+    PRIMARY KEY(user_id, code_hash)
+);
+
+-- Every encrypted record retains the exact KEM and signature versions it used.
+ALTER TABLE Users ADD COLUMN IF NOT EXISTS pqc_key_version INTEGER NOT NULL DEFAULT 1;
+CREATE TABLE IF NOT EXISTS PqcKeyVersions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    mlkem_public_key TEXT NOT NULL, mlkem_private_key_encrypted TEXT NOT NULL,
+    mldsa_public_key TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), revoked_at TIMESTAMPTZ,
+    UNIQUE(user_id, version)
+);
+INSERT INTO PqcKeyVersions (user_id, version, mlkem_public_key, mlkem_private_key_encrypted, mldsa_public_key)
+SELECT id, pqc_key_version, mlkem_public_key, mlkem_private_key_encrypted, mldsa_public_key FROM Users
+WHERE mlkem_public_key IS NOT NULL AND mlkem_private_key_encrypted IS NOT NULL AND mldsa_public_key IS NOT NULL
+ON CONFLICT (user_id, version) DO NOTHING;
+CREATE OR REPLACE FUNCTION snapshot_pqc_key_version() RETURNS trigger AS $$
+BEGIN
+    IF NEW.mlkem_public_key IS NOT NULL AND NEW.mlkem_private_key_encrypted IS NOT NULL AND NEW.mldsa_public_key IS NOT NULL THEN
+        INSERT INTO PqcKeyVersions (user_id, version, mlkem_public_key, mlkem_private_key_encrypted, mldsa_public_key)
+        VALUES (NEW.id, NEW.pqc_key_version, NEW.mlkem_public_key, NEW.mlkem_private_key_encrypted, NEW.mldsa_public_key)
+        ON CONFLICT (user_id, version) DO NOTHING;
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS snapshot_pqc_keys ON Users;
+CREATE TRIGGER snapshot_pqc_keys AFTER INSERT OR UPDATE OF mlkem_public_key, mldsa_public_key, pqc_key_version
+ON Users FOR EACH ROW EXECUTE FUNCTION snapshot_pqc_key_version();
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS recipient_key_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE MedicalDocuments ADD COLUMN IF NOT EXISTS signer_key_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS recipient_key_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE LabReports ADD COLUMN IF NOT EXISTS signer_key_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS recipient_key_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE ImagingReports ADD COLUMN IF NOT EXISTS signer_key_version INTEGER NOT NULL DEFAULT 1;
+CREATE OR REPLACE FUNCTION stamp_record_key_versions() RETURNS trigger AS $$
+DECLARE signer UUID;
+BEGIN
+    SELECT pqc_key_version INTO NEW.recipient_key_version FROM Users WHERE id = NEW.patient_id;
+    IF TG_TABLE_NAME = 'medicaldocuments' THEN signer := NEW.doctor_id;
+    ELSIF TG_TABLE_NAME = 'labreports' THEN signer := COALESCE(NEW.lab_tech_id, NEW.uploaded_by);
+    ELSE signer := NEW.lab_tech_id;
+    END IF;
+    SELECT pqc_key_version INTO NEW.signer_key_version FROM Users WHERE id = signer;
+    NEW.signer_key_version := COALESCE(NEW.signer_key_version, 1);
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS stamp_key_versions ON MedicalDocuments;
+CREATE TRIGGER stamp_key_versions BEFORE INSERT ON MedicalDocuments FOR EACH ROW EXECUTE FUNCTION stamp_record_key_versions();
+DROP TRIGGER IF EXISTS stamp_key_versions ON LabReports;
+CREATE TRIGGER stamp_key_versions BEFORE INSERT ON LabReports FOR EACH ROW EXECUTE FUNCTION stamp_record_key_versions();
+DROP TRIGGER IF EXISTS stamp_key_versions ON ImagingReports;
+CREATE TRIGGER stamp_key_versions BEFORE INSERT ON ImagingReports FOR EACH ROW EXECUTE FUNCTION stamp_record_key_versions();
+
+ALTER TABLE ZkpChallenges ADD COLUMN IF NOT EXISTS proof_commitment TEXT;
+
+-- Optional local experiment holdout. No training/submission query reads this table.
+CREATE TABLE IF NOT EXISTS FederatedValidationLabels (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    features JSONB NOT NULL,
+    label SMALLINT NOT NULL CHECK (label IN (0, 1)),
+    source VARCHAR(30) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

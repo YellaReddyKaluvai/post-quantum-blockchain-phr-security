@@ -25,6 +25,33 @@ from app.config import get_settings
 from app.chain_client import load_contract_artifact
 
 
+def with_margin(estimate: int) -> int:
+    """Gas for a transaction: the node's estimate plus a quarter. A fixed figure
+    either wastes nothing or runs out — and storage-heavy calls run out."""
+    return int(estimate * 1.25) + 10_000
+
+
+def deploy(web3, account, settings, artifact) -> str:
+    """Deploy PHR_Security; return its address. Raises RuntimeError on a revert."""
+    contract = web3.eth.contract(abi=artifact["abi"], bytecode=artifact["bytecode"]["object"])
+    constructor = contract.constructor()
+    tx = constructor.build_transaction({
+        "from": account.address,
+        "nonce": web3.eth.get_transaction_count(account.address),
+        "chainId": settings.BLOCKCHAIN_CHAIN_ID,
+        "gas": with_margin(constructor.estimate_gas({"from": account.address})),
+        "gasPrice": web3.eth.gas_price,
+    })
+    signed = account.sign_transaction(tx)
+    tx_hash = web3.eth.send_raw_transaction(signed.raw_transaction)
+    print(f"  tx: {tx_hash.hex()}")
+    receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+    if receipt["status"] != 1:
+        raise RuntimeError("deployment transaction reverted")
+    print(f"  deployed in block {receipt['blockNumber']}, gas used {receipt['gasUsed']}")
+    return receipt["contractAddress"]
+
+
 def main() -> int:
     settings = get_settings()
 
@@ -54,27 +81,12 @@ def main() -> int:
         print("On a testnet, fund this address from a faucet first.")
         return 1
 
-    contract = web3.eth.contract(abi=artifact["abi"], bytecode=artifact["bytecode"]["object"])
-
     print("\nDeploying PHR_Security...")
-    tx = contract.constructor().build_transaction({
-        "from": account.address,
-        "nonce": web3.eth.get_transaction_count(account.address),
-        "chainId": settings.BLOCKCHAIN_CHAIN_ID,
-        "gas": 2_000_000,
-        "gasPrice": web3.eth.gas_price,
-    })
-    signed = account.sign_transaction(tx)
-    tx_hash = web3.eth.send_raw_transaction(signed.raw_transaction)
-    print(f"  tx: {tx_hash.hex()}")
-
-    receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-    if receipt["status"] != 1:
-        print("\nERROR: deployment transaction reverted.")
+    try:
+        address = deploy(web3, account, settings, artifact)
+    except RuntimeError as exc:
+        print(f"\nERROR: {exc}.")
         return 1
-
-    address = receipt["contractAddress"]
-    print(f"  deployed in block {receipt['blockNumber']}, gas used {receipt['gasUsed']}")
     print("\n" + "=" * 68)
     print("Add this line to backend/.env:")
     print(f"\n    BLOCKCHAIN_CONTRACT_ADDRESS={address}\n")

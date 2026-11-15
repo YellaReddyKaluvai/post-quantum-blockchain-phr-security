@@ -29,6 +29,7 @@ export default function RequestsPage() {
   const [loadError, setLoadError] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState("");
 
   const fetchRequests = useCallback(async () => {
     setLoading(true);
@@ -50,13 +51,15 @@ export default function RequestsPage() {
   }, [fetchRequests]);
 
   const handleAccept = async (id: string) => {
+    if (busyId) return;
     setBusyId(id);
+    setActionError("");
     try {
       await updateLabTestRequestStatus(id, "Accepted");
       setRequests((prev) => prev.map((req) => (req.id === id ? { ...req, status: "Accepted" } : req)));
     } catch (e) {
       console.error(e);
-      alert(e instanceof Error ? e.message : "Failed to accept the request");
+      setActionError(e instanceof Error ? e.message : "Failed to accept the request");
     } finally {
       setBusyId(null);
     }
@@ -89,6 +92,7 @@ export default function RequestsPage() {
         <div>
           <h1 className="text-2xl font-bold text-slate-800">Test Requests</h1>
           <p className="text-sm text-slate-500">Accept incoming requests and file the corresponding report.</p>
+          {actionError && <p role="alert" className="mt-2 text-sm font-semibold text-rose-600">{actionError}</p>}
         </div>
       </div>
 

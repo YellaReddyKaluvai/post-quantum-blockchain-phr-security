@@ -1,5 +1,5 @@
 from datetime import datetime, date
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 # Roles a member of the public may request during self-registration.
@@ -44,8 +44,9 @@ class RegistrationRequest(BaseModel):
         return self
 
 class LoginRequest(BaseModel):
-    user_id: str
-    password: str
+    user_id: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=1, max_length=1024)
+    otp: str | None = Field(default=None, max_length=100)
 
 class RegistrationResponse(BaseModel):
     message: str
@@ -265,6 +266,7 @@ class ConsultationRecord(BaseModel):
 
 class AppointmentRecord(BaseModel):
     id: str
+    doctor_id: Optional[str] = None
     doctor_name: Optional[str] = None
     department: Optional[str] = None
     appointment_date: Optional[date] = None
@@ -287,7 +289,9 @@ class CreateAppointmentRequest(BaseModel):
     @field_validator("appointment_date")
     @classmethod
     def date_not_in_past(cls, v: date) -> date:
-        if v < date.today():
+        from datetime import datetime
+        from app.appointments import clinic_zone
+        if v < datetime.now(clinic_zone()).date():
             raise ValueError("Appointment date cannot be in the past.")
         return v
 
@@ -367,9 +371,9 @@ class MedicalDocumentItem(BaseModel):
 
 class CreateDocumentRequest(BaseModel):
     patient_id: str
-    document_name: str
-    document_type: str
-    content: Optional[str] = None
+    document_name: str = Field(min_length=1, max_length=255)
+    document_type: Literal["Diagnosis Report", "Consultation Report", "Treatment Summary", "Medical Certificate", "Referral Letter", "Discharge Summary", "Other"]
+    content: str = Field(min_length=1, max_length=100000)
     status: str = "Final"
 
 class DoctorAppointmentItem(BaseModel):
@@ -559,6 +563,42 @@ class NursePatientListItem(BaseModel):
     blood_group: Optional[str] = None
     last_recorded_at: Optional[datetime] = None
     status: str
+    # Why this nurse may open the chart: the care-team assignment behind it.
+    assigned_by_name: Optional[str] = None
+    assignment_expires_at: Optional[datetime] = None
+    assignment_reason: Optional[str] = None
+
+
+class CareTeamAssignRequest(BaseModel):
+    """Add a nurse to a patient's care team."""
+    nurse_id: str = Field(min_length=1, max_length=64)        # internal id or public user id
+    patient_id: Optional[str] = Field(default=None, max_length=64)   # admin form only
+    reason: str = Field(min_length=10, max_length=300)
+    # Time-boxed by default; a ward allocation may run longer (max 30 days).
+    duration_hours: Optional[int] = Field(default=72, ge=1, le=720)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_must_be_substantive(cls, v: str) -> str:
+        cleaned = " ".join(v.split())
+        if len(cleaned) < 10 or len(cleaned.split()) < 2:
+            raise ValueError("Give the clinical reason for the assignment — a short phrase at least.")
+        return cleaned
+
+
+class CareTeamMember(BaseModel):
+    id: str
+    patient_id: str
+    patient_user_id: Optional[str] = None
+    patient_name: Optional[str] = None
+    nurse_id: str
+    nurse_user_id: Optional[str] = None
+    nurse_name: Optional[str] = None
+    assigned_by_name: Optional[str] = None
+    assigned_by_role: str
+    reason: str
+    created_at: datetime
+    expires_at: Optional[datetime] = None
 
 
 class PatientVitalsRecord(BaseModel):
@@ -688,6 +728,11 @@ class EmergencyAccessRequest(BaseModel):
     patient_id: str
     reason: str = Field(min_length=10)
     duration_hours: int = Field(default=4, ge=1, le=24)
+    # Identity verification (spec §9, §30). Break-glass overrides a patient's
+    # decision, so it is not enough to hold a session token — which may be
+    # stolen or left open on a ward terminal. The declarer re-enters their
+    # password, and the backend checks it before anything is granted.
+    password: str = Field(min_length=1, max_length=256)
 
     @field_validator("reason")
     @classmethod
@@ -731,3 +776,137 @@ class PatientDocumentItem(BaseModel):
     kem_algorithm: Optional[str] = None
     signature_algorithm: Optional[str] = None
     blockchain_tx_hash: Optional[str] = None
+
+
+# ─── Doctor access requests (spec §6) ────────────────────────────────────────
+
+class CreateAccessRequest(BaseModel):
+    """A doctor asking a patient for permission to read their record."""
+    patient_id: str
+    purpose: str = Field(..., min_length=15, max_length=500)
+    requested_resource: str = Field(default="Full medical record", max_length=120)
+
+    @field_validator("purpose")
+    @classmethod
+    def purpose_must_be_substantive(cls, v: str) -> str:
+        # The patient reads this to decide. "need it" tells them nothing, and a
+        # consent decision made on no information is not informed consent.
+        cleaned = " ".join(v.split())
+        if len(cleaned) < 15 or len(cleaned.split()) < 3:
+            raise ValueError(
+                "State a clinical reason the patient can weigh — at least a short sentence."
+            )
+        return cleaned
+
+
+class AccessRequestDecision(BaseModel):
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+class AccessRequestRecord(BaseModel):
+    request_id: str
+    doctor_id: str
+    doctor_user_id: Optional[str] = None
+    doctor_name: Optional[str] = None
+    specialization: Optional[str] = None
+    patient_id: str
+    patient_user_id: Optional[str] = None
+    patient_name: Optional[str] = None
+    requested_resource: Optional[str] = None
+    purpose: Optional[str] = None
+    status: str
+    requested_at: Optional[datetime] = None
+    decided_at: Optional[datetime] = None
+    decision_note: Optional[str] = None
+
+
+class ZkpProofRequest(BaseModel):
+    """A consent proof, in one of two shapes.
+
+    * ``mlwe-v1`` (post-quantum, issued for every new consent): ``proof`` is the
+      base64 lattice proof, 7 072 bytes decoded.
+    * ``schnorr-v1`` (legacy): ``t`` and ``s``, both hex. A request with no
+      ``scheme`` is read as Schnorr so clients written before the switch work.
+    """
+    challenge: str = Field(..., min_length=8, max_length=64)
+    scheme: Literal["mlwe-v1", "schnorr-v1"] = "schnorr-v1"
+    proof: Optional[str] = Field(default=None, min_length=1, max_length=10_000)
+    t: Optional[str] = Field(default=None, min_length=1, max_length=1024)
+    s: Optional[str] = Field(default=None, min_length=1, max_length=1024)
+
+    @model_validator(mode="after")
+    def _fields_match_scheme(self):
+        if self.scheme == "mlwe-v1" and not self.proof:
+            raise ValueError("A post-quantum proof needs the 'proof' field.")
+        if self.scheme == "schnorr-v1" and not (self.t and self.s):
+            raise ValueError("A Schnorr proof needs both 't' and 's'.")
+        return self
+
+    def as_proof(self) -> dict:
+        if self.scheme == "mlwe-v1":
+            return {"scheme": self.scheme, "proof": self.proof}
+        return {"scheme": self.scheme, "t": self.t, "s": self.s}
+
+
+class RegisterPeerRequest(BaseModel):
+    """Register a real remote institution as a federation peer."""
+    node_name: str = Field(..., min_length=3, max_length=120)
+    contact_url: Optional[str] = Field(default=None, max_length=500)
+
+
+class PeerSubmissionRequest(BaseModel):
+    """A peer institution's locally-fitted model parameters.
+
+    Carries no records, no identifiers and no events — only the medians and
+    scales describing what normal looks like at that institution.
+    """
+    node_name: str = Field(..., min_length=3, max_length=120)
+    round_number: int = Field(..., ge=1)
+    sample_count: int = Field(..., ge=1, le=10_000_000)
+    parameters: dict = Field(...)
+    # Unix seconds, covered by the signature: the hub refuses a stale one, or one
+    # not newer than the last it accepted from this peer (replay).
+    timestamp: int = Field(..., ge=0)
+    signature: str = Field(..., min_length=64, max_length=64)
+
+
+class StepUpRequest(BaseModel):
+    """Password re-entry demanded by the risk policy (spec §23 'additional verification')."""
+    password: str = Field(min_length=1, max_length=256)
+
+
+class IncidentUpdateRequest(BaseModel):
+    """Move an incident through its lifecycle (spec §25)."""
+    status: Literal["Investigating", "Closed"]
+    resolution: Optional[str] = Field(default=None, max_length=2000)
+    # The investigator's finding. It becomes a training label for the federated
+    # threat classifier; "inconclusive" (or none) teaches it nothing.
+    verdict: Optional[Literal["confirmed_threat", "false_positive", "inconclusive"]] = None
+
+    @model_validator(mode="after")
+    def _closing_needs_a_resolution(self):
+        # A closed incident with no stated outcome is not a compliance record,
+        # it is a deletion with extra steps.
+        if self.status == "Closed" and not (self.resolution and self.resolution.strip()):
+            raise ValueError("Closing an incident requires a resolution.")
+        return self
+
+
+class FederationParticipationRequest(BaseModel):
+    """Join another hospital's federation (it issued the secret at registration)."""
+    hub_url: str = Field(min_length=8, max_length=300)
+    node_name: str = Field(min_length=2, max_length=120)
+    shared_secret: str = Field(min_length=16, max_length=200)
+
+    @field_validator("hub_url")
+    @classmethod
+    def http_url(cls, v: str) -> str:
+        v = v.strip()
+        if not (v.startswith("https://") or v.startswith("http://")) or " " in v:
+            raise ValueError("Enter the hub's address, e.g. https://hub.example-hospital.org")
+        return v
+
+    @field_validator("node_name", "shared_secret")
+    @classmethod
+    def trimmed(cls, v: str) -> str:
+        return v.strip()

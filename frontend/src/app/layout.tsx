@@ -1,13 +1,8 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
 import "./globals.css";
 import React from "react";
 import { AuthProvider } from "@/context/AuthContext";
-
-const inter = Inter({
-  variable: "--font-inter",
-  subsets: ["latin"],
-});
+import StepUpDialog from "@/components/StepUpDialog";
 
 export const metadata: Metadata = {
   title: "QuantumCare | Post-Quantum PHR Security",
@@ -21,7 +16,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="">
-      <body className={`${inter.variable} antialiased selection:bg-cyan-300/40`}>
+      <body className="antialiased selection:bg-cyan-300/40">
         {/* Animated Background Mesh */}
         <div className="fixed inset-0 z-[-1] overflow-hidden pointer-events-none">
           <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] rounded-full bg-cyan-200/40 blur-[120px]" />
@@ -33,6 +28,8 @@ export default function RootLayout({
           <div className="min-h-screen flex flex-col">
             {children}
           </div>
+          {/* Password re-verification requested by the backend risk policy. */}
+          <StepUpDialog />
         </AuthProvider>
       </body>
     </html>

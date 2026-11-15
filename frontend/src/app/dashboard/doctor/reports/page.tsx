@@ -5,8 +5,9 @@ import { motion } from "framer-motion";
 import { FileText, CheckCircle, Upload, X, Download, ShieldCheck, ShieldAlert, Loader2, Eye } from "lucide-react";
 import {
   getDoctorReports, getDoctorDocuments, reviewLabReport, createMedicalDocument,
-  downloadDoctorLabReport, verifyDoctorLabReport,
+  downloadDoctorLabReport, verifyDoctorLabReport, searchDoctorPatients, getDoctorDocumentContent,
 } from "@/lib/session";
+import PatientSearchSelect from "@/components/PatientSearchSelect";
 import { saveBlobAsFile, openBlobInNewTab } from "@/lib/utils";
 
 interface DoctorReportItem {
@@ -38,7 +39,21 @@ export default function ReportsAndDocuments() {
   const [loading, setLoading] = useState(true);
 
   const [uploadModal, setUploadModal] = useState(false);
-  const [docData, setDocData] = useState({ title: "", type: "", file_url: "" });
+  const emptyDoc = { patient_id: "", document_name: "", document_type: "Other", content: "" };
+  const [docData, setDocData] = useState(emptyDoc);
+  const [selectedPatient, setSelectedPatient] = useState<{ id: string; user_id: string; full_name: string; email: string; gender: string } | null>(null);
+  const [documentError, setDocumentError] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [openedDocument, setOpenedDocument] = useState<{ title: string; content: string } | null>(null);
+  const viewDocument = async (doc: DoctorDocumentItem) => {
+    setDocumentError("");
+    setBusyId(doc.id);
+    try {
+      const result = await getDoctorDocumentContent(doc.id);
+      setOpenedDocument({ title: doc.document_name || "Document", content: result.content });
+    } catch (error) { setDocumentError(error instanceof Error ? error.message : "Unable to open document"); }
+    finally { setBusyId(null); }
+  };
   const [busyId, setBusyId] = useState<string | null>(null);
   const [verifyResult, setVerifyResult] = useState<Record<string, { valid: boolean; detail: string }>>({});
 
@@ -105,14 +120,14 @@ export default function ReportsAndDocuments() {
 
   const handleUpload = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (uploading || !selectedPatient) return;
+    setUploading(true); setDocumentError("");
     try {
-      const res = await createMedicalDocument(docData);
-      setDocuments([...documents, res]);
-      setUploadModal(false);
-      setDocData({ title: "", type: "", file_url: "" });
-    } catch (error) {
-      console.error(error);
-    }
+      await createMedicalDocument({ ...docData, patient_id: selectedPatient.id });
+      setDocuments(await getDoctorDocuments());
+      setUploadModal(false); setDocData(emptyDoc); setSelectedPatient(null);
+    } catch (error) { setDocumentError(error instanceof Error ? error.message : "Unable to issue document"); }
+    finally { setUploading(false); }
   };
 
   if (loading) {
@@ -121,6 +136,12 @@ export default function ReportsAndDocuments() {
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
+      {documentError && <p role="alert" className="text-rose-700">{documentError}</p>}
+      {openedDocument && <section role="dialog" aria-label="Medical document" className="bg-white border rounded-xl p-6">
+        <button onClick={() => setOpenedDocument(null)} className="float-right">Close</button>
+        <h2 className="font-bold">{openedDocument.title}</h2>
+        <pre className="whitespace-pre-wrap font-sans mt-4">{openedDocument.content}</pre>
+      </section>}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
         <div className="flex items-center gap-3">
           <FileText className="w-6 h-6 text-cyan-600" />
@@ -213,7 +234,7 @@ export default function ReportsAndDocuments() {
         <div className="space-y-6">
           <div className="flex justify-end">
             <button onClick={() => setUploadModal(true)} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-bold transition-colors">
-              <Upload className="w-4 h-4" /> Upload Document
+              <Upload className="w-4 h-4" /> Issue Document
             </button>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -225,9 +246,9 @@ export default function ReportsAndDocuments() {
                   <h3 className="font-bold text-slate-800 mb-2">{doc.document_name || "Document"}</h3>
                   <p className="text-sm text-slate-600">Type: {doc.document_type || "General"}</p>
                   <p className="text-xs text-slate-400 mt-4 mb-4">{doc.upload_date ? new Date(doc.upload_date).toLocaleDateString() : "N/A"}</p>
-                  <a href={doc.file_url} target="_blank" rel="noopener noreferrer" className="block text-center w-full py-2 px-4 bg-slate-50 hover:bg-slate-100 text-slate-700 rounded-xl font-semibold text-sm transition-colors">
-                    View Document
-                  </a>
+                  <button onClick={() => viewDocument(doc)} disabled={busyId === doc.id} className="w-full py-2 bg-cyan-50 rounded-xl text-cyan-800">
+                    {busyId === doc.id ? "Opening…" : "View Document"}
+                  </button>
                 </motion.div>
               ))
             )}
@@ -239,16 +260,20 @@ export default function ReportsAndDocuments() {
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
             <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-bold">Upload Document</h3>
+              <h3 className="text-lg font-bold">Issue Document</h3>
               <button onClick={() => setUploadModal(false)}><X className="w-5 h-5 text-slate-500" /></button>
             </div>
             <form onSubmit={handleUpload}>
               <div className="space-y-4 mb-6">
-                <input required type="text" placeholder="Title" className="w-full border border-slate-200 rounded-xl p-3 focus:ring-2 focus:ring-indigo-500 outline-none" value={docData.title} onChange={(e) => setDocData({ ...docData, title: e.target.value })} />
-                <input required type="text" placeholder="Type (e.g. X-Ray, Scan)" className="w-full border border-slate-200 rounded-xl p-3 focus:ring-2 focus:ring-indigo-500 outline-none" value={docData.type} onChange={(e) => setDocData({ ...docData, type: e.target.value })} />
-                <input required type="text" placeholder="File URL (mock)" className="w-full border border-slate-200 rounded-xl p-3 focus:ring-2 focus:ring-indigo-500 outline-none" value={docData.file_url} onChange={(e) => setDocData({ ...docData, file_url: e.target.value })} />
+                <PatientSearchSelect searchFn={searchDoctorPatients} onSelect={setSelectedPatient} selectedPatient={selectedPatient} onClear={() => setSelectedPatient(null)} />
+                <label className="block">Document name<input required maxLength={255} className="w-full border rounded-xl p-3" value={docData.document_name} onChange={e => setDocData({...docData, document_name: e.target.value})} /></label>
+                <label className="block">Type<select className="w-full border rounded-xl p-3" value={docData.document_type} onChange={e => setDocData({...docData, document_type: e.target.value})}>
+                  {["Diagnosis Report", "Consultation Report", "Treatment Summary", "Medical Certificate", "Referral Letter", "Discharge Summary", "Other"].map(type => <option key={type}>{type}</option>)}
+                </select></label>
+                <label className="block">Document content<textarea required rows={7} maxLength={100000} className="w-full border rounded-xl p-3" value={docData.content} onChange={e => setDocData({...docData, content: e.target.value})} /></label>
+                {documentError && <p role="alert" className="text-rose-700">{documentError}</p>}
               </div>
-              <button type="submit" className="w-full bg-indigo-600 text-white rounded-xl py-2 font-bold hover:bg-indigo-700">Upload</button>
+              <button type="submit" disabled={uploading || !selectedPatient} className="w-full bg-indigo-600 text-white rounded-xl py-2 font-bold hover:bg-indigo-700">{uploading ? "Securing document…" : "Issue document"}</button>
             </form>
           </div>
         </div>

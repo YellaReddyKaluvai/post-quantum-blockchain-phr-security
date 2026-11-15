@@ -99,7 +99,8 @@ The QuantumCare Team"""
             msg.attach(MIMEText(body, 'plain'))
 
             with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
-                server.starttls()
+                if settings.SMTP_STARTTLS:
+                    server.starttls()
                 server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
                 server.send_message(msg)
             
@@ -171,7 +172,8 @@ def retry_failed_email(conn, notification_id: str) -> dict:
             msg.attach(MIMEText(body, 'plain'))
 
             with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
-                server.starttls()
+                if settings.SMTP_STARTTLS:
+                    server.starttls()
                 server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
                 server.send_message(msg)
             
@@ -221,7 +223,8 @@ def send_admin_notification(registration_data: dict):
         msg.attach(MIMEText(body, 'plain'))
 
         with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
-            server.starttls()
+            if settings.SMTP_STARTTLS:
+                server.starttls()
             server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
             server.send_message(msg)
         logger.info("Admin notification sent successfully")
